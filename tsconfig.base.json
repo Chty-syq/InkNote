@@ -1,0 +1,29 @@
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "useDefineForClassFields": true,
+    "lib": ["ES2020", "DOM", "DOM.Iterable"],
+    "types": ["node"],
+    "allowJs": false,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
+    "strict": true,
+    "forceConsistentCasingInFileNames": true,
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "noEmit": true,
+    "jsx": "react-jsx",
+    "baseUrl": ".",
+    "paths": {
+      "@inknote/content-schema": ["packages/content-schema/src/index.ts"],
+      "@inknote/content-schema/*": ["packages/content-schema/src/*"],
+      "@inknote/inknote-core": ["packages/inknote-core/src/index.ts"],
+      "@inknote/inknote-core/*": ["packages/inknote-core/src/*"],
+      "@inknote/site-builder": ["packages/site-builder/src/index.ts"],
+      "@inknote/site-builder/*": ["packages/site-builder/src/*"]
+    }
+  }
+}

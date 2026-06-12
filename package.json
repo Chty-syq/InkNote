@@ -1,0 +1,18 @@
+{
+  "name": "inknote-monorepo",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm run web:build && npm run desktop:build",
+    "desktop:dev": "npm run dev --workspace @inknote/desktop",
+    "desktop:build": "npm run build --workspace @inknote/desktop",
+    "desktop:tauri": "npm run tauri --workspace @inknote/desktop",
+    "desktop:tauri:dev": "npm run tauri --workspace @inknote/desktop -- dev",
+    "web:dev": "npm run dev --workspace @inknote/web",
+    "web:build": "npm run build --workspace @inknote/web"
+  }
+}

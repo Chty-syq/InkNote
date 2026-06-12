@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <title>InkNote Redirect</title>
+    <script>
+      (function () {
+        var pathSegmentsToKeep = 1;
+        var locationData = window.location;
+        var pathSegments = locationData.pathname.split('/');
+        var basePath = pathSegments.slice(0, pathSegmentsToKeep + 1).join('/') || '';
+        var routePath = '/' + pathSegments.slice(pathSegmentsToKeep + 1).join('/');
+        var query = locationData.search ? locationData.search + '&' : '?';
+        var redirect =
+          locationData.origin +
+          basePath +
+          '/' +
+          query +
+          'p=' +
+          encodeURIComponent(routePath + locationData.hash);
+
+        locationData.replace(redirect);
+      })();
+    </script>
+  </head>
+  <body></body>
+</html>

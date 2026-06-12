@@ -1,0 +1,116 @@
+import { invoke } from '@tauri-apps/api/core';
+import { open, save } from '@tauri-apps/plugin-dialog';
+
+export interface ContentFileDescriptor {
+  path: string;
+  kind: string;
+}
+
+export interface ContentIndexResponse {
+  root: string;
+  files: ContentFileDescriptor[];
+}
+
+export interface GitCommandResult {
+  success: boolean;
+  stdout: string;
+  stderr: string;
+}
+
+export interface PublishStatusResponse {
+  branch: string;
+  shortStatus: string;
+  clean: boolean;
+}
+
+export function isTauri(): boolean {
+  return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
+}
+
+export function ensureExtension(path: string, extension: string): string {
+  return path.toLowerCase().endsWith(extension.toLowerCase()) ? path : `${path}${extension}`;
+}
+
+export async function chooseProjectToOpen(): Promise<string | null> {
+  if (!isTauri()) return null;
+  const result = await open({
+    multiple: false,
+    directory: false,
+    filters: [{ name: 'InkNote Project', extensions: ['json'] }],
+  });
+  if (!result) return null;
+  return Array.isArray(result) ? result[0] ?? null : result;
+}
+
+export async function chooseFileToSave(defaultPath: string): Promise<string | null> {
+  if (!isTauri()) return null;
+  const result = await save({ defaultPath });
+  if (!result) return null;
+  return result;
+}
+
+export async function readTextFile(path: string): Promise<string> {
+  return invoke('read_text_file', { path });
+}
+
+export async function writeTextFile(path: string, contents: string): Promise<void> {
+  await invoke('write_text_file', { path, contents });
+}
+
+export async function writeBinaryFile(path: string, bytes: Uint8Array): Promise<void> {
+  await invoke('write_binary_file', { path, bytes: Array.from(bytes) });
+}
+
+export async function getContentIndex(): Promise<ContentIndexResponse> {
+  return invoke('get_content_index');
+}
+
+export async function readContentFile(path: string): Promise<string> {
+  return invoke('read_content_file', { path });
+}
+
+export async function writeContentFile(path: string, contents: string): Promise<void> {
+  await invoke('write_content_file', { path, contents });
+}
+
+export async function deleteContentFile(path: string): Promise<void> {
+  await invoke('delete_content_path', { path });
+}
+
+export async function getPublishStatus(): Promise<PublishStatusResponse> {
+  return invoke('get_publish_status');
+}
+
+export async function publishContentChanges(message: string): Promise<GitCommandResult> {
+  return invoke('publish_content_changes', { message });
+}
+
+export function saveBlobWithBrowser(blob: Blob, filename: string): void {
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = filename;
+  anchor.click();
+  URL.revokeObjectURL(url);
+}
+
+export async function openTextFileWithBrowser(): Promise<string | null> {
+  const input = document.createElement('input');
+  input.type = 'file';
+  input.accept = '.json,application/json';
+
+  return new Promise((resolve) => {
+    input.addEventListener('change', () => {
+      const file = input.files?.[0];
+      if (!file) {
+        resolve(null);
+        return;
+      }
+      file
+        .text()
+        .then((content) => resolve(content))
+        .catch(() => resolve(null));
+    });
+    input.click();
+  });
+}

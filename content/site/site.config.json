@@ -1,0 +1,48 @@
+﻿{
+  "title": "Chty's Blog",
+  "tagline": "秋阴不散霜飞晚，留得残荷听雨声",
+  "description": "记录技术学习、长期写作与古典摘录的个人博客，内容由桌面端统一管理并同步发布到 web。",
+  "baseUrl": "https://example.github.io/inknote",
+  "language": "zh-CN",
+  "author": "Chty",
+  "hero": {
+    "eyebrow": "Personal Notebook",
+    "title": "Markdown 笔记与 InkNote 摘录",
+    "description": "从桌面端写作工作台同步到静态博客的一套内容系统。",
+    "primaryLink": {
+      "label": "浏览文章",
+      "href": "/notes"
+    },
+    "secondaryLink": {
+      "label": "浏览 InkNote",
+      "href": "/inknote"
+    }
+  },
+  "channels": [
+    {
+      "label": "搜索",
+      "href": "#blog-search",
+      "description": "站内检索"
+    },
+    {
+      "label": "归档",
+      "href": "#",
+      "description": "文章归档"
+    },
+    {
+      "label": "RSS",
+      "href": "#",
+      "description": "订阅更新"
+    },
+    {
+      "label": "友链",
+      "href": "#blog-links",
+      "description": "友情链接"
+    },
+    {
+      "label": "关于",
+      "href": "/about",
+      "description": "关于这个博客"
+    }
+  ]
+}
