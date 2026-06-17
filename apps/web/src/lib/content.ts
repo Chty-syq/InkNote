@@ -7,7 +7,11 @@ import type {
   NavigationItem,
   SiteConfig,
 } from '@inknote/content-schema';
-import { parseMarkdownDocument, sortDocumentsByDate } from '@inknote/site-builder';
+import {
+  parseMarkdownDocument,
+  sortDocumentsByDate,
+  sortDocumentsByOrderAndDate,
+} from '@inknote/site-builder';
 import categoriesData from '../../../../content/site/categories.json';
 import navigationData from '../../../../content/site/navigation.json';
 import siteConfigData from '../../../../content/site/site.config.json';
@@ -119,19 +123,22 @@ const notes = markdown.filter((document) => !isMarkdownPage(document.frontmatter
 const pages = markdown.filter((document) => isMarkdownPage(document.frontmatter));
 const inknotes = parseInkNoteCollection(inknoteModules);
 
-const configuredCategories = (categoriesData as ContentCategory[]).filter((category) => category.slug && category.label);
+const configuredCategories = (categoriesData as ContentCategory[])
+  .filter((category) => category.slug && category.label)
+  .sort((left, right) => (left.order ?? Number.MAX_SAFE_INTEGER) - (right.order ?? Number.MAX_SAFE_INTEGER));
 const inferredCategories = [...new Set([...notes, ...inknotes].map((document) => getDocumentCategorySlug(document.frontmatter)).filter(Boolean))]
   .filter((slug) => !configuredCategories.some((category) => category.slug === slug))
-  .map((slug) => ({
+  .map((slug, index) => ({
     slug,
     label: humanizeCategorySlug(slug),
+    order: configuredCategories.length + index + 1,
   }));
 const categories = [...configuredCategories, ...inferredCategories];
 
 const categoryDocuments = Object.fromEntries(
   categories.map((category) => [
     category.slug,
-    sortDocumentsByDate(
+    sortDocumentsByOrderAndDate(
       [...notes, ...inknotes].filter((document) => getDocumentCategorySlug(document.frontmatter) === category.slug),
     ) as Array<RoutedDocument<MarkdownFrontmatter | InkNoteFrontmatter>>,
   ]),

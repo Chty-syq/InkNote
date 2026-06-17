@@ -1,13 +1,13 @@
 import {
+  startTransition,
   useDeferredValue,
   useEffect,
-  useLayoutEffect,
   useMemo,
   useRef,
   useState,
   type ChangeEvent,
   type KeyboardEvent,
-  type MouseEvent as ReactMouseEvent,
+  type PointerEvent as ReactPointerEvent,
   type ReactNode,
   type WheelEvent,
 } from 'react';
@@ -17,7 +17,17 @@ import {
   serializeProject,
   type ProjectData,
 } from '@inknote/inknote-core';
-import type { ContentCategory } from '@inknote/content-schema';
+import {
+  getFrontmatterOrderValue,
+  sortDocumentsByOrderAndDate,
+} from '@inknote/site-builder';
+import type {
+  ContentCategory,
+  FriendLinkConfig,
+  GiscusConfig,
+  RepositoryConfig,
+  SiteConfig,
+} from '@inknote/content-schema';
 import {
   createDraftFromItem,
   createEmptyDraft,
@@ -38,6 +48,7 @@ import {
 import {
   CATEGORY_CONFIG_PATH,
   ensureUniqueCategorySlug,
+  normalizeCategoryOrder,
   parseCategoryConfig,
   serializeCategoryConfig,
   slugifyCategoryLabel,
@@ -46,10 +57,12 @@ import { MarkdownPreview } from './lib/markdown-preview';
 import {
   chooseFileToSave,
   deleteContentFile,
+  ensureBlogPreviewServer,
   ensureExtension,
   getContentIndex,
   getPublishStatus,
   isTauri,
+  openExternalUrl,
   publishContentChanges,
   readContentFile,
   writeContentFile,
@@ -62,6 +75,7 @@ interface NotesWorkbenchProps {
 }
 
 type WorkspacePanel = 'write' | 'inknote';
+type CategoryDialogState = { mode: 'create' } | { mode: 'edit'; slug: string };
 
 interface TextTransformResult {
   nextValue: string;
@@ -76,12 +90,150 @@ interface NoteHistoryEntry {
   timestamp: string;
 }
 
+interface EditorSelectionState {
+  start: number;
+  end: number;
+  direction: 'forward' | 'backward' | 'none';
+}
+
+interface DraftUndoEntry {
+  draft: ContentDraft;
+  selection: EditorSelectionState | null;
+}
+
 const DRAFT_UNDO_LIMIT = 100;
 const NOTE_HISTORY_LIMIT = 24;
 const BRAND_AVATAR_STORAGE_KEY = 'inknote.desktop.brandAvatar';
+const SITE_CONFIG_PATH = 'site/site.config.json';
+const LOCAL_BLOG_PREVIEW_ORIGIN = 'http://localhost:4321';
+
+type SettingsSection = 'categories' | 'blog' | 'publish';
+
+const DEFAULT_SITE_CONFIG: SiteConfig = {
+  title: "Chty's Blog",
+  tagline: '\u79cb\u9634\u4e0d\u6563\u971c\u98de\u665a\uff0c\u7559\u5f97\u6b8b\u8377\u542c\u96e8\u58f0',
+  description:
+    '\u8bb0\u5f55\u6280\u672f\u5b66\u4e60\u3001\u957f\u671f\u5199\u4f5c\u4e0e\u53e4\u5178\u6458\u5f55\u7684\u4e2a\u4eba\u535a\u5ba2\u3002',
+  baseUrl: 'https://example.github.io/inknote',
+  language: 'zh-CN',
+  author: 'Chty',
+  hero: {
+    eyebrow: 'Personal Notebook',
+    title: 'Markdown \u7b14\u8bb0\u4e0e InkNote \u6458\u5f55',
+    description:
+      '\u4ece\u684c\u9762\u7aef\u5199\u4f5c\u5de5\u4f5c\u53f0\u540c\u6b65\u5230\u9759\u6001\u535a\u5ba2\u7684\u4e00\u5957\u5185\u5bb9\u7cfb\u7edf\u3002',
+    primaryLink: {
+      label: '\u6d4f\u89c8\u6587\u7ae0',
+      href: '/notes',
+    },
+    secondaryLink: {
+      label: '\u6d4f\u89c8 InkNote',
+      href: '/inknote',
+    },
+  },
+  channels: [
+    {
+      label: '\u641c\u7d22',
+      href: '#blog-search',
+      description: '\u7ad9\u5185\u68c0\u7d22',
+    },
+    {
+      label: '\u5f52\u6863',
+      href: '#',
+      description: '\u6587\u7ae0\u5f52\u6863',
+    },
+    {
+      label: 'RSS',
+      href: '#',
+      description: '\u8ba2\u9605\u66f4\u65b0',
+    },
+    {
+      label: '\u53cb\u94fe',
+      href: '#blog-links',
+      description: '\u53cb\u60c5\u94fe\u63a5',
+    },
+    {
+      label: '\u5173\u4e8e',
+      href: '/about',
+      description: '\u5173\u4e8e\u8fd9\u4e2a\u535a\u5ba2',
+    },
+  ],
+  friendLinks: [
+    {
+      label: '\u53cb\u94fe\u4f4d\u7f6e A',
+      href: '#',
+      note: '\u540e\u7eed\u53ef\u66ff\u6362\u4e3a\u670b\u53cb\u6216\u5e38\u7528\u7ad9\u70b9\u3002',
+    },
+    {
+      label: '\u53cb\u94fe\u4f4d\u7f6e B',
+      href: '#',
+      note: '\u4fdd\u7559\u7ed9\u6280\u672f\u535a\u5ba2\u6216\u9879\u76ee\u7ad9\u70b9\u3002',
+    },
+  ],
+  repository: {
+    remote: '',
+    branch: 'main',
+    pagesUrl: '',
+    workflow: 'deploy.yml',
+  },
+  giscus: {
+    enabled: false,
+    repo: '',
+    repoId: '',
+    category: 'Announcements',
+    categoryId: '',
+    mapping: 'pathname',
+    strict: false,
+    reactionsEnabled: true,
+    emitMetadata: false,
+    inputPosition: 'bottom',
+    theme: 'preferred_color_scheme',
+    lang: 'zh-CN',
+  },
+};
 
 function sortLibraryItems(items: ContentLibraryItem[]): ContentLibraryItem[] {
   return [...items].sort((left, right) => right.frontmatter.date.localeCompare(left.frontmatter.date));
+}
+
+function patchItemOrder(item: ContentLibraryItem, order: number): ContentLibraryItem {
+  const currentOrder = getFrontmatterOrderValue(item.frontmatter.order);
+  if (currentOrder === order) {
+    return item;
+  }
+
+  return {
+    ...item,
+    frontmatter: {
+      ...item.frontmatter,
+      order,
+    },
+  };
+}
+
+function sortCategoryItems(items: ContentLibraryItem[], categorySlug: string): ContentLibraryItem[] {
+  return sortDocumentsByOrderAndDate(items.filter((item) => getItemCategorySlug(item) === categorySlug));
+}
+
+function categoryUsesManualOrder(items: ContentLibraryItem[], categorySlug: string): boolean {
+  return items.some(
+    (item) =>
+      getItemCategorySlug(item) === categorySlug &&
+      getFrontmatterOrderValue(item.frontmatter.order) !== null,
+  );
+}
+
+function getNextCategoryOrder(items: ContentLibraryItem[], categorySlug: string): number | null {
+  const orders = items
+    .filter((item) => getItemCategorySlug(item) === categorySlug)
+    .map((item) => getFrontmatterOrderValue(item.frontmatter.order))
+    .filter((order): order is number => order !== null);
+
+  if (orders.length === 0) {
+    return null;
+  }
+
+  return Math.max(...orders) + 1;
 }
 
 function isInkNoteType(type: ContentDraft['type'] | ContentLibraryItem['frontmatter']['type']): boolean {
@@ -120,6 +272,15 @@ function getTimestampValue(date = new Date()): string {
   return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`;
 }
 
+function getDatePart(value: string): string {
+  const match = value.trim().match(/^(\d{4}-\d{2}-\d{2})/);
+  if (!match) {
+    return getTimestampValue().slice(0, 10);
+  }
+
+  return match[1];
+}
+
 function createHistoryEntry(label: string, detail = ''): NoteHistoryEntry {
   return {
     id: Date.now() + Math.floor(Math.random() * 1000),
@@ -127,6 +288,183 @@ function createHistoryEntry(label: string, detail = ''): NoteHistoryEntry {
     detail,
     timestamp: getTimestampValue(),
   };
+}
+
+function getDraftEditorSnapshot(draft: ContentDraft): string {
+  const { savedSnapshot: _savedSnapshot, ...editorState } = draft;
+  return JSON.stringify(editorState);
+}
+
+function cloneDefaultSiteConfig(): SiteConfig {
+  return JSON.parse(JSON.stringify(DEFAULT_SITE_CONFIG)) as SiteConfig;
+}
+
+function normalizeSiteConfig(value: unknown): SiteConfig {
+  const input = value && typeof value === 'object' ? (value as Partial<SiteConfig>) : {};
+  const fallback = cloneDefaultSiteConfig();
+  const hero = input.hero && typeof input.hero === 'object' ? input.hero : fallback.hero;
+  const primaryLink =
+    hero.primaryLink && typeof hero.primaryLink === 'object' ? hero.primaryLink : fallback.hero.primaryLink;
+  const secondaryLink =
+    hero.secondaryLink && typeof hero.secondaryLink === 'object' ? hero.secondaryLink : fallback.hero.secondaryLink;
+  const channels = Array.isArray(input.channels)
+    ? input.channels
+        .map((channel) =>
+          channel && typeof channel === 'object'
+            ? {
+                label: typeof channel.label === 'string' ? channel.label : '',
+                href: typeof channel.href === 'string' ? channel.href : '',
+                description: typeof channel.description === 'string' ? channel.description : '',
+              }
+            : null,
+        )
+        .filter((channel): channel is SiteConfig['channels'][number] =>
+          Boolean(channel?.label.trim() && channel.href.trim()),
+        )
+    : fallback.channels;
+  const friendLinks = Array.isArray(input.friendLinks)
+    ? input.friendLinks
+        .map((link) =>
+          link && typeof link === 'object'
+            ? {
+                label: typeof link.label === 'string' ? link.label : '',
+                href: typeof link.href === 'string' ? link.href : '',
+                note: typeof link.note === 'string' ? link.note : '',
+              }
+            : null,
+        )
+        .filter((link): link is FriendLinkConfig => Boolean(link?.label.trim() && link.href.trim()))
+    : fallback.friendLinks;
+  const repositoryInput =
+    input.repository && typeof input.repository === 'object'
+      ? (input.repository as Partial<RepositoryConfig>)
+      : {};
+  const repository: RepositoryConfig = {
+    remote:
+      typeof repositoryInput.remote === 'string'
+        ? repositoryInput.remote
+        : fallback.repository?.remote ?? '',
+    branch:
+      typeof repositoryInput.branch === 'string'
+        ? repositoryInput.branch
+        : fallback.repository?.branch ?? 'main',
+    pagesUrl:
+      typeof repositoryInput.pagesUrl === 'string'
+        ? repositoryInput.pagesUrl
+        : fallback.repository?.pagesUrl ?? '',
+    workflow:
+      typeof repositoryInput.workflow === 'string'
+        ? repositoryInput.workflow
+        : fallback.repository?.workflow ?? 'deploy.yml',
+  };
+  const giscusInput =
+    input.giscus && typeof input.giscus === 'object' ? (input.giscus as Partial<GiscusConfig>) : {};
+  const giscus: GiscusConfig = {
+    enabled: typeof giscusInput.enabled === 'boolean' ? giscusInput.enabled : fallback.giscus?.enabled ?? false,
+    repo: typeof giscusInput.repo === 'string' ? giscusInput.repo : fallback.giscus?.repo ?? '',
+    repoId: typeof giscusInput.repoId === 'string' ? giscusInput.repoId : fallback.giscus?.repoId ?? '',
+    category:
+      typeof giscusInput.category === 'string' ? giscusInput.category : fallback.giscus?.category ?? 'Announcements',
+    categoryId:
+      typeof giscusInput.categoryId === 'string' ? giscusInput.categoryId : fallback.giscus?.categoryId ?? '',
+    mapping:
+      giscusInput.mapping === 'url' ||
+      giscusInput.mapping === 'title' ||
+      giscusInput.mapping === 'og:title' ||
+      giscusInput.mapping === 'specific' ||
+      giscusInput.mapping === 'number' ||
+      giscusInput.mapping === 'pathname'
+        ? giscusInput.mapping
+        : fallback.giscus?.mapping ?? 'pathname',
+    strict: typeof giscusInput.strict === 'boolean' ? giscusInput.strict : fallback.giscus?.strict ?? false,
+    reactionsEnabled:
+      typeof giscusInput.reactionsEnabled === 'boolean'
+        ? giscusInput.reactionsEnabled
+        : fallback.giscus?.reactionsEnabled ?? true,
+    emitMetadata:
+      typeof giscusInput.emitMetadata === 'boolean'
+        ? giscusInput.emitMetadata
+        : fallback.giscus?.emitMetadata ?? false,
+    inputPosition:
+      giscusInput.inputPosition === 'top' || giscusInput.inputPosition === 'bottom'
+        ? giscusInput.inputPosition
+        : fallback.giscus?.inputPosition ?? 'bottom',
+    theme: typeof giscusInput.theme === 'string' ? giscusInput.theme : fallback.giscus?.theme ?? 'preferred_color_scheme',
+    lang: typeof giscusInput.lang === 'string' ? giscusInput.lang : fallback.giscus?.lang ?? 'zh-CN',
+  };
+
+  return {
+    ...fallback,
+    ...input,
+    title: typeof input.title === 'string' && input.title.trim() ? input.title : fallback.title,
+    tagline: typeof input.tagline === 'string' ? input.tagline : fallback.tagline,
+    description: typeof input.description === 'string' ? input.description : fallback.description,
+    baseUrl: typeof input.baseUrl === 'string' ? input.baseUrl : fallback.baseUrl,
+    language: typeof input.language === 'string' ? input.language : fallback.language,
+    author: typeof input.author === 'string' ? input.author : fallback.author,
+    hero: {
+      ...fallback.hero,
+      ...hero,
+      primaryLink: {
+        ...fallback.hero.primaryLink,
+        ...primaryLink,
+      },
+      secondaryLink: secondaryLink
+        ? {
+            ...fallback.hero.secondaryLink,
+            ...secondaryLink,
+          }
+        : undefined,
+    },
+    channels,
+    friendLinks,
+    repository,
+    giscus,
+  };
+}
+
+function formatSiteChannels(channels: SiteConfig['channels']): string {
+  return channels
+    .map((channel) => [channel.label, channel.href, channel.description].map((part) => part.trim()).join(' | '))
+    .join('\n');
+}
+
+function parseSiteChannelsText(value: string): SiteConfig['channels'] {
+  return value
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => {
+      const [label = '', href = '', ...descriptionParts] = line.split('|').map((part) => part.trim());
+      return {
+        label,
+        href,
+        description: descriptionParts.join(' | '),
+      };
+    })
+    .filter((channel) => channel.label && channel.href);
+}
+
+function formatFriendLinks(links: FriendLinkConfig[] = []): string {
+  return links
+    .map((link) => [link.label, link.href, link.note].map((part) => part.trim()).join(' | '))
+    .join('\n');
+}
+
+function parseFriendLinksText(value: string): FriendLinkConfig[] {
+  return value
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => {
+      const [label = '', href = '', ...noteParts] = line.split('|').map((part) => part.trim());
+      return {
+        label,
+        href,
+        note: noteParts.join(' | '),
+      };
+    })
+    .filter((link) => link.label && link.href);
 }
 
 function getProjectSnapshot(project: ProjectData): string {
@@ -254,6 +592,24 @@ function getDraftCategoryLabel(draft: ContentDraft, categories: ContentCategory[
   return getCategoryLabel(categories, draft.category);
 }
 
+function getPreviewPathFromItem(item: ContentLibraryItem | null): string | null {
+  if (!item) {
+    return null;
+  }
+
+  if (item.frontmatter.type === 'inknote') {
+    return `/inknote/${item.frontmatter.slug || item.folderName}`;
+  }
+
+  const permalink =
+    typeof item.frontmatter.permalink === 'string' ? item.frontmatter.permalink.trim() : '';
+  if (permalink) {
+    return permalink.startsWith('/') ? permalink : `/${permalink}`;
+  }
+
+  return `/notes/${item.frontmatter.slug || item.folderName}`;
+}
+
 function wrapSelection(
   value: string,
   selectionStart: number,
@@ -343,21 +699,39 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
   const [workspacePanel, setWorkspacePanel] = useState<WorkspacePanel>('write');
   const [showPreview, setShowPreview] = useState(true);
   const [showHistoryPanel, setShowHistoryPanel] = useState(false);
-  const [showPublishPanel, setShowPublishPanel] = useState(false);
+  const [previewRenderBody, setPreviewRenderBody] = useState('');
+  const [isPreviewRenderPending, setIsPreviewRenderPending] = useState(false);
   const [historyEntries, setHistoryEntries] = useState<NoteHistoryEntry[]>([]);
   const [publishStatus, setPublishStatus] = useState<PublishStatusResponse | null>(null);
   const [publishMessage, setPublishMessage] = useState('Update blog content');
   const [isPublishingSite, setIsPublishingSite] = useState(false);
   const [brandAvatar, setBrandAvatar] = useState('');
+  const [siteConfigDraft, setSiteConfigDraft] = useState<SiteConfig>(() => cloneDefaultSiteConfig());
+  const [siteChannelsText, setSiteChannelsText] = useState(() => formatSiteChannels(DEFAULT_SITE_CONFIG.channels));
+  const [friendLinksText, setFriendLinksText] = useState(() =>
+    formatFriendLinks(DEFAULT_SITE_CONFIG.friendLinks ?? []),
+  );
+  const [isSiteConfigSaving, setIsSiteConfigSaving] = useState(false);
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [settingsSection, setSettingsSection] = useState<SettingsSection>('categories');
+  const [categoryDialog, setCategoryDialog] = useState<CategoryDialogState | null>(null);
+  const [categoryLabelValue, setCategoryLabelValue] = useState('');
+  const [categoryLabelEnValue, setCategoryLabelEnValue] = useState('');
+  const [categorySlugValue, setCategorySlugValue] = useState('');
+  const [draggingCategorySlug, setDraggingCategorySlug] = useState<string | null>(null);
+  const [draggingNotePath, setDraggingNotePath] = useState<string | null>(null);
   const [isCreateDialogOpen, setIsCreateDialogOpen] = useState(false);
+  const [isMetadataDialogOpen, setIsMetadataDialogOpen] = useState(false);
+  const [isDeleteDialogOpen, setIsDeleteDialogOpen] = useState(false);
   const [createTitleValue, setCreateTitleValue] = useState('');
+  const [createSlugValue, setCreateSlugValue] = useState('');
   const [createCategoryValue, setCreateCategoryValue] = useState('');
   const [createTypeValue, setCreateTypeValue] = useState<ContentDraft['type']>('markdown');
-  const [categoryMenu, setCategoryMenu] = useState<{
-    slug: string;
-    x: number;
-    y: number;
-  } | null>(null);
+  const [metadataCategoryValue, setMetadataCategoryValue] = useState('');
+  const [metadataDateValue, setMetadataDateValue] = useState('');
+  const [metadataSlugValue, setMetadataSlugValue] = useState('');
+  const [pendingSwitchItem, setPendingSwitchItem] = useState<ContentLibraryItem | null>(null);
+  const [isPendingSwitchSaving, setIsPendingSwitchSaving] = useState(false);
   const [isTagPickerOpen, setIsTagPickerOpen] = useState(false);
   const [tagInputValue, setTagInputValue] = useState('');
 
@@ -370,20 +744,43 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
   const editorRef = useRef<HTMLTextAreaElement | null>(null);
   const previewPaneRef = useRef<HTMLDivElement | null>(null);
   const previewArticleRef = useRef<HTMLElement | null>(null);
-  const categoryMenuRef = useRef<HTMLDivElement | null>(null);
   const tagPickerRef = useRef<HTMLDivElement | null>(null);
   const tagInputRef = useRef<HTMLInputElement | null>(null);
+  const metadataDateInputRef = useRef<HTMLInputElement | null>(null);
   const brandAvatarInputRef = useRef<HTMLInputElement | null>(null);
   const createTitleInputRef = useRef<HTMLInputElement | null>(null);
-  const draftUndoStackRef = useRef<ContentDraft[]>([]);
-  const draftRedoStackRef = useRef<ContentDraft[]>([]);
+  const draftUndoStackRef = useRef<DraftUndoEntry[]>([]);
+  const draftRedoStackRef = useRef<DraftUndoEntry[]>([]);
+  const draftCacheRef = useRef<Map<string, { fingerprint: string; draft: ContentDraft }>>(new Map());
+  const cleanDraftsRef = useRef<WeakSet<ContentDraft>>(new WeakSet());
+  const editorSelectionRef = useRef<EditorSelectionState | null>(null);
+  const categoriesRef = useRef<ContentCategory[]>([]);
+  const itemsRef = useRef<ContentLibraryItem[]>([]);
+  const categoryDragSourceRef = useRef<string | null>(null);
+  const categoryDragOriginalOrderRef = useRef<ContentCategory[] | null>(null);
+  const pendingCategoryOrderRef = useRef<ContentCategory[] | null>(null);
+  const noteDragSourceRef = useRef<string | null>(null);
+  const noteDragOriginalItemsRef = useRef<ContentLibraryItem[] | null>(null);
+  const pendingNoteOrderRef = useRef<ContentLibraryItem[] | null>(null);
   const linkedNotebookRef = useRef<ProjectData | null>(null);
   const linkedNotebookSavedSnapshotRef = useRef('');
   const linkedNotebookSessionIdRef = useRef<number | null>(null);
+  const previewSyncFrameRef = useRef<number | null>(null);
+  const siteConfigLoadedRef = useRef(false);
+  const siteConfigSnapshotRef = useRef('');
+  const siteConfigSaveTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
     linkedNotebookRef.current = linkedNotebook;
   }, [linkedNotebook]);
+
+  useEffect(() => {
+    categoriesRef.current = categories;
+  }, [categories]);
+
+  useEffect(() => {
+    itemsRef.current = items;
+  }, [items]);
 
   useEffect(() => {
     linkedNotebookSavedSnapshotRef.current = linkedNotebookSavedSnapshot;
@@ -394,43 +791,6 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
       setWorkspacePanel('write');
     }
   }, [draft?.type, workspacePanel]);
-
-  useEffect(() => {
-    if (!categoryMenu) {
-      return;
-    }
-
-    const handlePointerDown = (event: MouseEvent) => {
-      const menu = categoryMenuRef.current;
-      if (menu && event.target instanceof Node && menu.contains(event.target)) {
-        return;
-      }
-
-      setCategoryMenu(null);
-    };
-
-    const handleKeyDown = (event: globalThis.KeyboardEvent) => {
-      if (event.key === 'Escape') {
-        setCategoryMenu(null);
-      }
-    };
-
-    const closeMenu = () => {
-      setCategoryMenu(null);
-    };
-
-    window.addEventListener('pointerdown', handlePointerDown);
-    window.addEventListener('keydown', handleKeyDown);
-    window.addEventListener('resize', closeMenu);
-    window.addEventListener('scroll', closeMenu, true);
-
-    return () => {
-      window.removeEventListener('pointerdown', handlePointerDown);
-      window.removeEventListener('keydown', handleKeyDown);
-      window.removeEventListener('resize', closeMenu);
-      window.removeEventListener('scroll', closeMenu, true);
-    };
-  }, [categoryMenu]);
 
   useEffect(() => {
     if (!isTagPickerOpen) {
@@ -500,6 +860,196 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
   }, [isCreateDialogOpen]);
 
   useEffect(() => {
+    if (!isCreateDialogOpen) {
+      return;
+    }
+
+    const fallbackCategory =
+      selectedCategorySlug && categories.some((category) => category.slug === selectedCategorySlug)
+        ? selectedCategorySlug
+        : categories[0]?.slug ?? '';
+
+    if (!fallbackCategory) {
+      setCreateCategoryValue('');
+      setIsCreateDialogOpen(false);
+      setStatus('\u8bf7\u5148\u65b0\u5efa\u7c7b\u76ee\uff0c\u518d\u5728\u7c7b\u76ee\u4e0b\u65b0\u5efa\u7b14\u8bb0\u3002');
+      return;
+    }
+
+    if (!categories.some((category) => category.slug === createCategoryValue)) {
+      setCreateCategoryValue(fallbackCategory);
+    }
+  }, [categories, createCategoryValue, isCreateDialogOpen, selectedCategorySlug]);
+
+  useEffect(() => {
+    if (!isMetadataDialogOpen) {
+      return;
+    }
+
+    const handleKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setIsMetadataDialogOpen(false);
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [isMetadataDialogOpen]);
+
+  useEffect(() => {
+    if (!draft) {
+      setIsMetadataDialogOpen(false);
+      setIsDeleteDialogOpen(false);
+    }
+  }, [draft]);
+
+  useEffect(() => {
+    if (!isDeleteDialogOpen) {
+      return;
+    }
+
+    const handleKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key === 'Escape' && !isBusy) {
+        setIsDeleteDialogOpen(false);
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [isBusy, isDeleteDialogOpen]);
+
+  useEffect(() => {
+    if (!isSettingsOpen) {
+      setCategoryDialog(null);
+      return;
+    }
+
+    const handleKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setIsSettingsOpen(false);
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [isSettingsOpen]);
+
+  useEffect(() => {
+    if (!categoryDialog) {
+      return;
+    }
+
+    const handleKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key === 'Escape' && !isBusy) {
+        setCategoryDialog(null);
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [categoryDialog, isBusy]);
+
+  useEffect(() => {
+    if (!draggingCategorySlug) {
+      return;
+    }
+
+    const handlePointerMove = (event: PointerEvent) => {
+      const sourceSlug = categoryDragSourceRef.current;
+      if (!sourceSlug) {
+        return;
+      }
+
+      const targetElement = document.elementFromPoint(event.clientX, event.clientY);
+      const targetRow =
+        targetElement instanceof Element
+          ? targetElement.closest<HTMLElement>('[data-category-slug]')
+          : null;
+      const targetSlug = targetRow?.dataset.categorySlug ?? '';
+
+      if (targetSlug) {
+        reorderCategoryLocally(sourceSlug, targetSlug);
+      }
+    };
+
+    const handlePointerRelease = () => {
+      void finishCategoryPointerDrag();
+    };
+
+    window.addEventListener('pointermove', handlePointerMove);
+    window.addEventListener('pointerup', handlePointerRelease);
+    window.addEventListener('pointercancel', handlePointerRelease);
+    return () => {
+      window.removeEventListener('pointermove', handlePointerMove);
+      window.removeEventListener('pointerup', handlePointerRelease);
+      window.removeEventListener('pointercancel', handlePointerRelease);
+    };
+  }, [draggingCategorySlug]);
+
+  useEffect(() => {
+    if (!draggingNotePath) {
+      return;
+    }
+
+    const handlePointerMove = (event: PointerEvent) => {
+      const sourcePath = noteDragSourceRef.current;
+      if (!sourcePath) {
+        return;
+      }
+
+      const targetElement = document.elementFromPoint(event.clientX, event.clientY);
+      const targetRow =
+        targetElement instanceof Element
+          ? targetElement.closest<HTMLElement>('[data-note-path]')
+          : null;
+      const targetPath = targetRow?.dataset.notePath ?? '';
+
+      if (targetPath) {
+        reorderNoteLocally(sourcePath, targetPath);
+      }
+    };
+
+    const handlePointerRelease = () => {
+      void finishNotePointerDrag();
+    };
+
+    window.addEventListener('pointermove', handlePointerMove);
+    window.addEventListener('pointerup', handlePointerRelease);
+    window.addEventListener('pointercancel', handlePointerRelease);
+    return () => {
+      window.removeEventListener('pointermove', handlePointerMove);
+      window.removeEventListener('pointerup', handlePointerRelease);
+      window.removeEventListener('pointercancel', handlePointerRelease);
+    };
+  }, [draggingNotePath]);
+
+  useEffect(() => {
+    if (!pendingSwitchItem) {
+      return;
+    }
+
+    const handleKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key === 'Escape' && !isPendingSwitchSaving) {
+        setPendingSwitchItem(null);
+        setStatus('\u5df2\u8fd4\u56de\u5f53\u524d\u7b14\u8bb0\u3002');
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [isPendingSwitchSaving, pendingSwitchItem]);
+
+  useEffect(() => {
     if (!isTagPickerOpen) {
       return;
     }
@@ -510,22 +1060,45 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
     });
   }, [isTagPickerOpen]);
 
-  const draftDirty = draft ? isDraftDirty(draft) : false;
-  const notebookDirty =
-    draft?.type === 'inknote' && linkedNotebook
-      ? getProjectSnapshot(linkedNotebook) !== linkedNotebookSavedSnapshot
-      : false;
+  const draftDirty = useMemo(() => {
+    if (!draft) {
+      return false;
+    }
+
+    if (cleanDraftsRef.current.has(draft)) {
+      return false;
+    }
+
+    return isDraftDirty(draft);
+  }, [draft]);
+  const linkedNotebookSnapshot = useMemo(
+    () => (linkedNotebook ? getProjectSnapshot(linkedNotebook) : ''),
+    [linkedNotebook],
+  );
+  const notebookDirty = useMemo(
+    () =>
+      draft?.type === 'inknote' && linkedNotebook
+        ? linkedNotebookSnapshot !== linkedNotebookSavedSnapshot
+        : false,
+    [draft?.type, linkedNotebook, linkedNotebookSavedSnapshot, linkedNotebookSnapshot],
+  );
   const dirty = draftDirty || notebookDirty;
+  const unsavedChangesMessage = useMemo(() => {
+    if (draft?.type === 'inknote' && notebookDirty && draftDirty) {
+      return '\u5f53\u524d Markdown \u6761\u76ee\u548c\u5173\u8054\u624b\u5199\u672c\u90fd\u6709\u672a\u4fdd\u5b58\u7684\u4fee\u6539\u3002';
+    }
+
+    if (draft?.type === 'inknote' && notebookDirty) {
+      return '\u5173\u8054\u624b\u5199\u672c\u6709\u672a\u4fdd\u5b58\u7684\u4fee\u6539\u3002';
+    }
+
+    return '\u5f53\u524d\u7b14\u8bb0\u6709\u672a\u4fdd\u5b58\u7684\u4fee\u6539\u3002';
+  }, [draft?.type, draftDirty, notebookDirty]);
 
   const saveTarget = draft ? getDraftSavePath(draft) : '';
   const linkedNotebookTarget =
     draft && draft.type === 'inknote' && draft.projectFile.trim()
       ? resolveSiblingContentPath(saveTarget, draft.projectFile.trim())
-      : null;
-  const validationError = draft ? getDraftValidationError(draft) : null;
-  const duplicateItem =
-    draft && draft.sourceRelativePath !== saveTarget
-      ? items.find((item) => item.relativePath === saveTarget)
       : null;
   const tagList = useMemo(() => (draft ? toUniqueTagList(splitInlineList(draft.tagsText)) : []), [draft]);
   const availableTags = useMemo(
@@ -546,13 +1119,39 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
     return availableTags.filter((tag) => tag.toLocaleLowerCase().includes(keyword));
   }, [availableTags, normalizedTagInput]);
   const previewBody = draft?.body ?? '';
-  const deferredPreviewBody = useDeferredValue(previewBody);
+  const deferredPreviewBody = useDeferredValue(previewRenderBody);
   const renderedPreview = useMemo(
     () => <MarkdownPreview markdown={deferredPreviewBody} />,
     [deferredPreviewBody],
   );
 
+  useEffect(() => {
+    if (!showPreview) {
+      setIsPreviewRenderPending(false);
+      return;
+    }
+
+    if (previewBody === previewRenderBody) {
+      setIsPreviewRenderPending(false);
+      return;
+    }
+
+    setIsPreviewRenderPending(true);
+
+    const delay = previewBody.length > 2500 ? 220 : 120;
+    const timeout = window.setTimeout(() => {
+      startTransition(() => {
+        setPreviewRenderBody(previewBody);
+        setIsPreviewRenderPending(false);
+      });
+    }, delay);
+
+    return () => window.clearTimeout(timeout);
+  }, [previewBody, previewRenderBody, showPreview]);
+
   const syncPreviewPosition = () => {
+    previewSyncFrameRef.current = null;
+
     const editor = editorRef.current;
     const previewPane = previewPaneRef.current;
     const previewArticle = previewArticleRef.current;
@@ -573,8 +1172,16 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
     previewArticle.style.transform = `translate3d(0, -${offset}px, 0)`;
   };
 
+  const schedulePreviewPositionSync = () => {
+    if (previewSyncFrameRef.current !== null) {
+      return;
+    }
+
+    previewSyncFrameRef.current = window.requestAnimationFrame(syncPreviewPosition);
+  };
+
   const handleEditorScroll = () => {
-    syncPreviewPosition();
+    schedulePreviewPositionSync();
   };
 
   const handlePreviewWheel = (event: WheelEvent<HTMLDivElement>) => {
@@ -586,15 +1193,15 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
 
     event.preventDefault();
     editor.scrollTop += event.deltaY;
-    syncPreviewPosition();
+    schedulePreviewPositionSync();
   };
 
-  useLayoutEffect(() => {
+  useEffect(() => {
     if (!showPreview) {
       return;
     }
 
-    syncPreviewPosition();
+    schedulePreviewPositionSync();
   }, [showPreview, deferredPreviewBody]);
 
   useEffect(() => {
@@ -610,9 +1217,7 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
       return;
     }
 
-    const observer = new ResizeObserver(() => {
-      syncPreviewPosition();
-    });
+    const observer = new ResizeObserver(schedulePreviewPositionSync);
 
     observer.observe(previewPane);
     observer.observe(previewArticle);
@@ -621,17 +1226,74 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
     return () => observer.disconnect();
   }, [showPreview, deferredPreviewBody]);
 
+  useEffect(
+    () => () => {
+      if (previewSyncFrameRef.current !== null) {
+        window.cancelAnimationFrame(previewSyncFrameRef.current);
+        previewSyncFrameRef.current = null;
+      }
+    },
+    [],
+  );
+
   const activateDraft = (nextDraft: ContentDraft | null) => {
     draftUndoStackRef.current = [];
     draftRedoStackRef.current = [];
+    editorSelectionRef.current = null;
     setDraftSessionId((current) => current + 1);
     setDraft(nextDraft);
     setShowHistoryPanel(false);
     setHistoryEntries(
       nextDraft
         ? [createHistoryEntry(nextDraft.sourceRelativePath ? 'Opened note' : 'Started new draft', nextDraft.title)]
-        : [],
+      : [],
     );
+  };
+
+  const readEditorSelection = (): EditorSelectionState | null => {
+    const editor = editorRef.current;
+    if (!editor) {
+      return null;
+    }
+
+    return {
+      start: editor.selectionStart,
+      end: editor.selectionEnd,
+      direction: editor.selectionDirection,
+    };
+  };
+
+  const clampEditorSelection = (selection: EditorSelectionState, maxLength: number): EditorSelectionState => {
+    const start = Math.max(0, Math.min(selection.start, maxLength));
+    const end = Math.max(0, Math.min(selection.end, maxLength));
+
+    return {
+      start,
+      end,
+      direction: selection.direction,
+    };
+  };
+
+  const captureEditorSelection = () => {
+    editorSelectionRef.current = readEditorSelection();
+  };
+
+  const restoreEditorSelection = (selection: EditorSelectionState | null) => {
+    if (!selection) {
+      return;
+    }
+
+    requestAnimationFrame(() => {
+      const editor = editorRef.current;
+      if (!editor) {
+        return;
+      }
+
+      const nextSelection = clampEditorSelection(selection, editor.value.length);
+      editor.focus();
+      editor.setSelectionRange(nextSelection.start, nextSelection.end, nextSelection.direction);
+      editorSelectionRef.current = nextSelection;
+    });
   };
 
   const appendHistoryEntry = (label: string, detail = '') => {
@@ -756,17 +1418,81 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
   };
 
   const persistCategoryConfig = async (nextCategories: ContentCategory[]) => {
-    await writeContentFile(CATEGORY_CONFIG_PATH, serializeCategoryConfig(nextCategories));
-    setCategories(nextCategories);
+    const orderedCategories = normalizeCategoryOrder(nextCategories);
+    await writeContentFile(CATEGORY_CONFIG_PATH, serializeCategoryConfig(orderedCategories));
+    setCategories(orderedCategories);
   };
 
-  const resolveCategoryInput = (input: string, candidateCategories: ContentCategory[]): ContentCategory | null => {
-    const normalizedInput = slugifyCategoryLabel(input.trim());
-    return (
-      candidateCategories.find((category) => category.slug === normalizedInput) ??
-      candidateCategories.find((category) => category.label === input.trim()) ??
-      null
-    );
+  const loadSiteConfig = async () => {
+    const applyConfig = (nextConfig: SiteConfig) => {
+      setSiteConfigDraft(nextConfig);
+      setSiteChannelsText(formatSiteChannels(nextConfig.channels));
+      setFriendLinksText(formatFriendLinks(nextConfig.friendLinks ?? []));
+      siteConfigSnapshotRef.current = JSON.stringify(nextConfig);
+      siteConfigLoadedRef.current = true;
+    };
+
+    siteConfigLoadedRef.current = false;
+
+    if (!isTauri()) {
+      applyConfig(cloneDefaultSiteConfig());
+      return;
+    }
+
+    try {
+      const raw = await readContentFile(SITE_CONFIG_PATH);
+      applyConfig(normalizeSiteConfig(JSON.parse(raw)));
+    } catch {
+      applyConfig(cloneDefaultSiteConfig());
+    }
+  };
+
+  const saveSiteConfig = async () => {
+    if (!isTauri()) {
+      setStatus('\u535a\u5ba2\u8bbe\u7f6e\u9700\u8981\u5728 Tauri \u684c\u9762\u7aef\u4e2d\u4fdd\u5b58\u3002');
+      return;
+    }
+
+    const nextConfig = normalizeSiteConfig({
+      ...siteConfigDraft,
+      channels: parseSiteChannelsText(siteChannelsText),
+      friendLinks: parseFriendLinksText(friendLinksText),
+    });
+
+    setIsSiteConfigSaving(true);
+    try {
+      await writeContentFile(SITE_CONFIG_PATH, `${JSON.stringify(nextConfig, null, 2)}\n`);
+      siteConfigSnapshotRef.current = JSON.stringify(nextConfig);
+      setStatus('\u8bbe\u7f6e\u5df2\u81ea\u52a8\u4fdd\u5b58\u3002');
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : '\u4fdd\u5b58\u535a\u5ba2\u8bbe\u7f6e\u5931\u8d25\u3002');
+    } finally {
+      setIsSiteConfigSaving(false);
+    }
+  };
+
+  const updateSiteConfigDraft = (patch: Partial<SiteConfig>) => {
+    setSiteConfigDraft((current) => ({ ...current, ...patch }));
+  };
+
+  const updateRepositoryConfigDraft = (patch: Partial<RepositoryConfig>) => {
+    setSiteConfigDraft((current) => ({
+      ...current,
+      repository: {
+        ...(current.repository ?? cloneDefaultSiteConfig().repository!),
+        ...patch,
+      },
+    }));
+  };
+
+  const updateGiscusConfigDraft = (patch: Partial<GiscusConfig>) => {
+    setSiteConfigDraft((current) => ({
+      ...current,
+      giscus: {
+        ...(current.giscus ?? cloneDefaultSiteConfig().giscus!),
+        ...patch,
+      },
+    }));
   };
 
   const createUniqueDraftSlug = (baseSlug: string, ignorePath?: string | null) => {
@@ -784,11 +1510,22 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
     return nextSlug;
   };
 
-  const pushDraftUndoEntry = (entry: ContentDraft) => {
-    const entrySnapshot = serializeContentDraft(entry);
+  const createRandomDraftSlug = () => {
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      const nextSlug = String(Math.floor(1000000 + Math.random() * 9000000));
+      if (!items.some((item) => item.frontmatter.slug === nextSlug)) {
+        return nextSlug;
+      }
+    }
+
+    return createUniqueDraftSlug(String(Date.now()).slice(-7));
+  };
+
+  const pushDraftUndoEntry = (entry: DraftUndoEntry) => {
+    const entrySnapshot = getDraftEditorSnapshot(entry.draft);
     const lastEntry = draftUndoStackRef.current[draftUndoStackRef.current.length - 1];
 
-    if (lastEntry && serializeContentDraft(lastEntry) === entrySnapshot) {
+    if (lastEntry && getDraftEditorSnapshot(lastEntry.draft) === entrySnapshot) {
       return;
     }
 
@@ -806,8 +1543,15 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
       return false;
     }
 
-    draftRedoStackRef.current = [...draftRedoStackRef.current, draft];
-    setDraft(previousDraft);
+    draftRedoStackRef.current = [
+      ...draftRedoStackRef.current,
+      {
+        draft,
+        selection: readEditorSelection() ?? editorSelectionRef.current,
+      },
+    ];
+    setDraft(previousDraft.draft);
+    restoreEditorSelection(previousDraft.selection);
     appendHistoryEntry('Undo', draft.title);
     setStatus('Undid the latest editor change.');
     return true;
@@ -823,11 +1567,43 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
       return false;
     }
 
-    draftUndoStackRef.current = [...draftUndoStackRef.current, draft];
-    setDraft(nextDraft);
+    draftUndoStackRef.current = [
+      ...draftUndoStackRef.current,
+      {
+        draft,
+        selection: readEditorSelection() ?? editorSelectionRef.current,
+      },
+    ];
+    setDraft(nextDraft.draft);
+    restoreEditorSelection(nextDraft.selection);
     appendHistoryEntry('Redo', draft.title);
     setStatus('Reapplied the latest editor change.');
     return true;
+  };
+
+  const getDraftFromItem = (item: ContentLibraryItem): ContentDraft => {
+    const fingerprint = [
+      item.relativePath,
+      item.frontmatter.title,
+      item.frontmatter.slug,
+      String(getFrontmatterOrderValue(item.frontmatter.order) ?? ''),
+      item.frontmatter.date,
+      item.frontmatter.updatedAt ?? '',
+      item.frontmatter.summary ?? '',
+      item.frontmatter.category ?? '',
+      item.frontmatter.published ? 'published' : 'draft',
+      item.body.length,
+    ].join('\u0000');
+    const cached = draftCacheRef.current.get(item.relativePath);
+
+    if (cached?.fingerprint === fingerprint) {
+      return cached.draft;
+    }
+
+    const nextDraft = createDraftFromItem(item);
+    draftCacheRef.current.set(item.relativePath, { fingerprint, draft: nextDraft });
+    cleanDraftsRef.current.add(nextDraft);
+    return nextDraft;
   };
 
   const loadLibrary = async (preferredPath?: string) => {
@@ -896,7 +1672,7 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
       });
 
       if (nextItem && (!dirty || preferredPath)) {
-        activateDraft(createDraftFromItem(nextItem));
+        activateDraft(getDraftFromItem(nextItem));
       } else if (!nextItem) {
         activateDraft(null);
       }
@@ -911,8 +1687,43 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
 
   useEffect(() => {
     void loadLibrary();
+    void loadSiteConfig();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useEffect(() => {
+    if (!siteConfigLoadedRef.current || !isTauri()) {
+      return;
+    }
+
+    const nextConfig = normalizeSiteConfig({
+      ...siteConfigDraft,
+      channels: parseSiteChannelsText(siteChannelsText),
+      friendLinks: parseFriendLinksText(friendLinksText),
+    });
+    const nextSnapshot = JSON.stringify(nextConfig);
+
+    if (nextSnapshot === siteConfigSnapshotRef.current) {
+      return;
+    }
+
+    if (siteConfigSaveTimerRef.current !== null) {
+      window.clearTimeout(siteConfigSaveTimerRef.current);
+    }
+
+    siteConfigSaveTimerRef.current = window.setTimeout(() => {
+      siteConfigSaveTimerRef.current = null;
+      void saveSiteConfig();
+    }, 520);
+
+    return () => {
+      if (siteConfigSaveTimerRef.current !== null) {
+        window.clearTimeout(siteConfigSaveTimerRef.current);
+        siteConfigSaveTimerRef.current = null;
+      }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [friendLinksText, siteChannelsText, siteConfigDraft]);
 
   useEffect(() => {
     if (!draft || draft.type !== 'inknote' || !linkedNotebookTarget) {
@@ -991,7 +1802,7 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
     item: ContentLibraryItem,
     nextCategorySlug: string,
   ): Promise<ContentLibraryItem> => {
-    const nextDraft = patchDraft(createDraftFromItem(item), {
+    const nextDraft = patchDraft(getDraftFromItem(item), {
       category: nextCategorySlug,
     });
     const payload = serializeContentDraft(nextDraft);
@@ -1021,76 +1832,426 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
 
     const nextSelectedItem = rewrittenByPath.get(draft.sourceRelativePath);
     if (nextSelectedItem) {
-      activateDraft(createDraftFromItem(nextSelectedItem));
+      activateDraft(getDraftFromItem(nextSelectedItem));
     }
   };
 
-  const createCategory = async () => {
-    const label = window.prompt('New category name')?.trim();
+  const openCreateCategoryDialog = () => {
+    setCategoryDialog({ mode: 'create' });
+    setCategoryLabelValue('');
+    setCategoryLabelEnValue('');
+    setCategorySlugValue('');
+  };
+
+  const openEditCategoryDialog = (category: ContentCategory) => {
+    setCategoryDialog({ mode: 'edit', slug: category.slug });
+    setCategoryLabelValue(category.label);
+    setCategoryLabelEnValue(category.labelEn?.trim() ?? '');
+    setCategorySlugValue(category.slug);
+  };
+
+  const closeCategoryDialog = () => {
+    if (isBusy) {
+      return;
+    }
+
+    setCategoryDialog(null);
+  };
+
+  const saveCategoryDialog = async () => {
+    if (!categoryDialog) {
+      return;
+    }
+
+    const label = categoryLabelValue.trim().replace(/\s+/g, ' ');
+    const labelEn = categoryLabelEnValue.trim().replace(/\s+/g, ' ');
+    const routeInput = categorySlugValue.trim();
+    const requestedSlug = routeInput ? slugifyCategoryLabel(routeInput) : '';
+
     if (!label) {
+      setStatus('\u8bf7\u586b\u5199\u7c7b\u76ee\u540d\u79f0\u3002');
       return;
     }
 
-    const nextSlug = ensureUniqueCategorySlug(label, categories);
-    const nextCategories = [...categories, { slug: nextSlug, label }];
-
-    try {
-      await persistCategoryConfig(nextCategories);
-      setSelectedCategorySlug(nextSlug);
-      setStatus(`Created category "${label}".`);
-    } catch (error) {
-      setStatus(error instanceof Error ? error.message : 'Failed to create the category.');
-    }
-  };
-
-  const renameSelectedCategory = async (categoryOverride?: ContentCategory | null) => {
-    const categoryToRename = categoryOverride ?? selectedCategory;
-    if (!categoryToRename) {
-      setStatus('Select a category to rename it.');
+    if (routeInput && !requestedSlug) {
+      setStatus('\u8bf7\u586b\u5199\u6709\u6548\u7684\u7c7b\u76ee\u8def\u7531\u3002');
       return;
     }
-
-    if (!confirmDiscardUnsavedChanges(`rename "${categoryToRename.label}"`)) {
-      return;
-    }
-
-    const nextLabel = window.prompt('Rename category', categoryToRename.label)?.trim();
-    if (!nextLabel || nextLabel === categoryToRename.label) {
-      return;
-    }
-
-    const nextSlug = ensureUniqueCategorySlug(nextLabel, categories, categoryToRename.slug);
-    const affectedItems = items.filter((item) => getItemCategorySlug(item) === categoryToRename.slug);
 
     setIsBusy(true);
-    try {
-      const rewrittenItems =
-        affectedItems.length > 0
-          ? await Promise.all(affectedItems.map((item) => rewriteItemCategory(item, nextSlug)))
-          : [];
-      const nextCategories = categories.map((category) =>
-        category.slug === categoryToRename.slug
-          ? {
-              slug: nextSlug,
-              label: nextLabel,
-            }
-          : category,
-      );
 
-      applyRewrittenItems(rewrittenItems);
-      await persistCategoryConfig(nextCategories);
-      setSelectedCategorySlug(nextSlug);
-      setDraft((current) =>
-        current && !current.sourceRelativePath && current.category === categoryToRename.slug
-          ? patchDraft(current, { category: nextSlug })
-          : current,
-      );
-      setStatus(`Renamed "${categoryToRename.label}" to "${nextLabel}".`);
+    try {
+      if (categoryDialog.mode === 'create') {
+        if (requestedSlug && categories.some((category) => category.slug === requestedSlug)) {
+          setStatus(`\u7c7b\u76ee\u8def\u7531\u300c${requestedSlug}\u300d\u5df2\u5b58\u5728\u3002`);
+          return;
+        }
+
+        const nextSlug = requestedSlug || ensureUniqueCategorySlug(labelEn || label, categories);
+        const nextCategories = [
+          ...categories,
+          {
+            slug: nextSlug,
+            label,
+            ...(labelEn ? { labelEn } : {}),
+          },
+        ];
+
+        await persistCategoryConfig(nextCategories);
+        setSelectedCategorySlug(nextSlug);
+        setStatus(`\u5df2\u65b0\u5efa\u7c7b\u76ee\u300c${label}\u300d\u3002`);
+      } else {
+        const categoryToEdit = categories.find((category) => category.slug === categoryDialog.slug) ?? null;
+        if (!categoryToEdit) {
+          setStatus('\u8981\u7f16\u8f91\u7684\u7c7b\u76ee\u5df2\u4e0d\u5b58\u5728\u3002');
+          return;
+        }
+
+        if (
+          requestedSlug &&
+          categories.some(
+            (category) => category.slug === requestedSlug && category.slug !== categoryToEdit.slug,
+          )
+        ) {
+          setStatus(`\u7c7b\u76ee\u8def\u7531\u300c${requestedSlug}\u300d\u5df2\u5b58\u5728\u3002`);
+          return;
+        }
+
+        const nextSlug =
+          requestedSlug || ensureUniqueCategorySlug(labelEn || label, categories, categoryToEdit.slug);
+        const affectedItems = items.filter((item) => getItemCategorySlug(item) === categoryToEdit.slug);
+        const isChangingSlug = nextSlug !== categoryToEdit.slug;
+        const currentDraftIsAffected =
+          Boolean(draft?.sourceRelativePath) &&
+          affectedItems.some((item) => item.relativePath === draft?.sourceRelativePath);
+
+        if (isChangingSlug && currentDraftIsAffected && dirty) {
+          const shouldContinue = window.confirm(
+            '\u5f53\u524d\u6587\u7ae0\u6709\u672a\u4fdd\u5b58\u4fee\u6539\u3002\u4fee\u6539\u7c7b\u76ee\u8def\u7531\u4f1a\u540c\u6b65\u66f4\u65b0\u6587\u7ae0\u7684\u6240\u5c5e\u7c7b\u76ee\uff0c\u7ee7\u7eed\u5c06\u4e22\u5f03\u5f53\u524d\u672a\u4fdd\u5b58\u4fee\u6539\u3002\u662f\u5426\u7ee7\u7eed\uff1f',
+          );
+
+          if (!shouldContinue) {
+            setStatus('\u5df2\u53d6\u6d88\u4fee\u6539\u7c7b\u76ee\u8def\u7531\u3002');
+            return;
+          }
+        }
+
+        const nextCategories = categories.map((category) =>
+          category.slug === categoryToEdit.slug
+            ? {
+                ...category,
+                slug: nextSlug,
+                label,
+                labelEn: labelEn || undefined,
+              }
+            : category,
+        );
+
+        const rewrittenItems =
+          isChangingSlug && affectedItems.length > 0
+            ? await Promise.all(affectedItems.map((item) => rewriteItemCategory(item, nextSlug)))
+            : [];
+
+        applyRewrittenItems(rewrittenItems);
+        await persistCategoryConfig(nextCategories);
+        setSelectedCategorySlug((current) => (current === categoryToEdit.slug ? nextSlug : current));
+        setCreateCategoryValue((current) => (current === categoryToEdit.slug ? nextSlug : current));
+        setMetadataCategoryValue((current) => (current === categoryToEdit.slug ? nextSlug : current));
+        setDraft((current) =>
+          current && current.category === categoryToEdit.slug
+            ? patchDraft(current, { category: nextSlug })
+            : current,
+        );
+        setStatus(`\u5df2\u66f4\u65b0\u7c7b\u76ee\u300c${categoryToEdit.label}\u300d\u3002`);
+      }
+
+      setCategoryDialog(null);
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : 'Failed to rename the category.');
+      setStatus(error instanceof Error ? error.message : '\u4fdd\u5b58\u7c7b\u76ee\u5931\u8d25\u3002');
     } finally {
       setIsBusy(false);
     }
+  };
+
+  const reorderCategoryToTarget = async (sourceSlug: string, targetSlug: string) => {
+    if (sourceSlug === targetSlug) {
+      return;
+    }
+
+    const sourceIndex = categories.findIndex((category) => category.slug === sourceSlug);
+    const targetIndex = categories.findIndex((category) => category.slug === targetSlug);
+
+    if (sourceIndex < 0 || targetIndex < 0) {
+      return;
+    }
+
+    const nextCategories = [...categories];
+    const [movedCategory] = nextCategories.splice(sourceIndex, 1);
+    nextCategories.splice(targetIndex, 0, movedCategory);
+
+    setIsBusy(true);
+    try {
+      await persistCategoryConfig(nextCategories);
+      setStatus(`\u5df2\u8c03\u6574\u7c7b\u76ee\u300c${movedCategory.label}\u300d\u7684\u987a\u5e8f\u3002`);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : '\u8c03\u6574\u7c7b\u76ee\u987a\u5e8f\u5931\u8d25\u3002');
+    } finally {
+      setIsBusy(false);
+    }
+  };
+
+  const reorderCategoryLocally = (sourceSlug: string, targetSlug: string) => {
+    if (sourceSlug === targetSlug || isBusy) {
+      return;
+    }
+
+    setCategories((current) => {
+      const sourceIndex = current.findIndex((category) => category.slug === sourceSlug);
+      const targetIndex = current.findIndex((category) => category.slug === targetSlug);
+
+      if (sourceIndex < 0 || targetIndex < 0 || sourceIndex === targetIndex) {
+        return current;
+      }
+
+      const nextCategories = [...current];
+      const [movedCategory] = nextCategories.splice(sourceIndex, 1);
+      nextCategories.splice(targetIndex, 0, movedCategory);
+
+      const orderedCategories = normalizeCategoryOrder(nextCategories);
+      categoriesRef.current = orderedCategories;
+      pendingCategoryOrderRef.current = orderedCategories;
+      return orderedCategories;
+    });
+
+  };
+
+  const beginCategoryPointerDrag = (event: ReactPointerEvent<HTMLElement>, categorySlug: string) => {
+    if (isBusy) {
+      return;
+    }
+
+    event.preventDefault();
+    categoryDragSourceRef.current = categorySlug;
+    categoryDragOriginalOrderRef.current = categoriesRef.current;
+    pendingCategoryOrderRef.current = null;
+    setDraggingCategorySlug(categorySlug);
+  };
+
+  const handleCategoryPointerEnter = (categorySlug: string) => {
+    const sourceSlug = categoryDragSourceRef.current;
+    if (!sourceSlug) {
+      return;
+    }
+
+    reorderCategoryLocally(sourceSlug, categorySlug);
+  };
+
+  const finishCategoryPointerDrag = async () => {
+    const nextOrder = pendingCategoryOrderRef.current;
+    const originalOrder = categoryDragOriginalOrderRef.current;
+    const sourceSlug = categoryDragSourceRef.current;
+
+    categoryDragSourceRef.current = null;
+    categoryDragOriginalOrderRef.current = null;
+    pendingCategoryOrderRef.current = null;
+    setDraggingCategorySlug(null);
+
+    if (!sourceSlug || !nextOrder || isBusy) {
+      return;
+    }
+
+    const movedCategory = nextOrder.find((category) => category.slug === sourceSlug);
+    setIsBusy(true);
+    try {
+      await persistCategoryConfig(nextOrder);
+      setStatus(
+        movedCategory
+          ? `\u5df2\u8c03\u6574\u7c7b\u76ee\u300c${movedCategory.label}\u300d\u7684\u987a\u5e8f\u3002`
+          : '\u5df2\u8c03\u6574\u7c7b\u76ee\u987a\u5e8f\u3002',
+      );
+    } catch (error) {
+      if (originalOrder) {
+        categoriesRef.current = originalOrder;
+        setCategories(originalOrder);
+      }
+      setStatus(error instanceof Error ? error.message : '\u8c03\u6574\u7c7b\u76ee\u987a\u5e8f\u5931\u8d25\u3002');
+    } finally {
+      setIsBusy(false);
+    }
+  };
+
+  const ensureCanReorderNotes = () => {
+    if (isBusy) {
+      return false;
+    }
+
+    if (!selectedCategorySlug) {
+      setStatus('\u8bf7\u5148\u9009\u62e9\u4e00\u4e2a\u7c7b\u76ee\uff0c\u518d\u8c03\u6574\u6587\u7ae0\u987a\u5e8f\u3002');
+      return false;
+    }
+
+    if (searchQuery.trim()) {
+      setStatus('\u641c\u7d22\u7ed3\u679c\u5217\u8868\u6682\u4e0d\u652f\u6301\u62d6\u52a8\u6392\u5e8f\uff0c\u8bf7\u5148\u6e05\u7a7a\u641c\u7d22\u3002');
+      return false;
+    }
+
+    if (dirty) {
+      setStatus('\u8bf7\u5148\u4fdd\u5b58\u5f53\u524d\u7b14\u8bb0\uff0c\u518d\u8c03\u6574\u6587\u7ae0\u987a\u5e8f\u3002');
+      return false;
+    }
+
+    return true;
+  };
+
+  const rewriteItemOrder = async (item: ContentLibraryItem, nextOrder: number): Promise<ContentLibraryItem> => {
+    const nextDraft = patchDraft(getDraftFromItem(item), {
+      order: nextOrder,
+    });
+    const payload = serializeContentDraft(nextDraft);
+    await writeContentFile(item.relativePath, payload);
+
+    const savedItem = toContentLibraryItem(item.relativePath, payload);
+    if (!savedItem) {
+      throw new Error(`Failed to update the order for content/${item.relativePath}.`);
+    }
+
+    return savedItem;
+  };
+
+  const persistReorderedNotes = async (
+    sourcePath: string,
+    originalItems: ContentLibraryItem[],
+    orderedCategoryItems: ContentLibraryItem[],
+  ) => {
+    const originalByPath = new Map(originalItems.map((item) => [item.relativePath, item]));
+    const changedItems = orderedCategoryItems.filter((item) => {
+      const previous = originalByPath.get(item.relativePath);
+      return getFrontmatterOrderValue(previous?.frontmatter.order) !== getFrontmatterOrderValue(item.frontmatter.order);
+    });
+
+    if (changedItems.length === 0) {
+      return;
+    }
+
+    const movedItem = orderedCategoryItems.find((item) => item.relativePath === sourcePath) ?? null;
+
+    setIsBusy(true);
+    try {
+      const rewrittenItems = await Promise.all(
+        changedItems.map((item) =>
+          rewriteItemOrder(item, getFrontmatterOrderValue(item.frontmatter.order) ?? orderedCategoryItems.indexOf(item) + 1),
+        ),
+      );
+      const rewrittenByPath = new Map(rewrittenItems.map((item) => [item.relativePath, item]));
+      const nextItems = itemsRef.current.map((item) => rewrittenByPath.get(item.relativePath) ?? item);
+
+      itemsRef.current = nextItems;
+      setItems(nextItems);
+
+      if (draft?.sourceRelativePath) {
+        const nextSelectedItem = rewrittenByPath.get(draft.sourceRelativePath);
+        if (nextSelectedItem) {
+          const nextDraft = getDraftFromItem(nextSelectedItem);
+          cleanDraftsRef.current.add(nextDraft);
+          setDraft(nextDraft);
+        }
+      }
+
+      setStatus(
+        movedItem
+          ? `\u5df2\u8c03\u6574\u300a${movedItem.frontmatter.title}\u300b\u7684\u6392\u5e8f\u3002`
+          : '\u5df2\u8c03\u6574\u6587\u7ae0\u987a\u5e8f\u3002',
+      );
+    } catch (error) {
+      itemsRef.current = originalItems;
+      setItems(originalItems);
+      setStatus(error instanceof Error ? error.message : '\u8c03\u6574\u6587\u7ae0\u987a\u5e8f\u5931\u8d25\u3002');
+    } finally {
+      setIsBusy(false);
+    }
+  };
+
+  const reorderNoteLocally = (sourcePath: string, targetPath: string) => {
+    if (!selectedCategorySlug || sourcePath === targetPath || isBusy) {
+      return;
+    }
+
+    setItems((current) => {
+      const categoryItems = sortCategoryItems(current, selectedCategorySlug);
+      const sourceIndex = categoryItems.findIndex((item) => item.relativePath === sourcePath);
+      const targetIndex = categoryItems.findIndex((item) => item.relativePath === targetPath);
+
+      if (sourceIndex < 0 || targetIndex < 0 || sourceIndex === targetIndex) {
+        return current;
+      }
+
+      const nextCategoryItems = [...categoryItems];
+      const [movedItem] = nextCategoryItems.splice(sourceIndex, 1);
+      nextCategoryItems.splice(targetIndex, 0, movedItem);
+
+      const normalizedCategoryItems = nextCategoryItems.map((item, index) => patchItemOrder(item, index + 1));
+      const reorderedByPath = new Map(normalizedCategoryItems.map((item) => [item.relativePath, item]));
+      const nextItems = current.map((item) => reorderedByPath.get(item.relativePath) ?? item);
+
+      itemsRef.current = nextItems;
+      pendingNoteOrderRef.current = normalizedCategoryItems;
+      return nextItems;
+    });
+  };
+
+  const reorderNoteToTarget = async (sourcePath: string, targetPath: string) => {
+    if (!ensureCanReorderNotes()) {
+      return;
+    }
+
+    const originalItems = itemsRef.current;
+    reorderNoteLocally(sourcePath, targetPath);
+    const nextOrder = pendingNoteOrderRef.current;
+
+    if (!nextOrder) {
+      return;
+    }
+
+    pendingNoteOrderRef.current = null;
+    await persistReorderedNotes(sourcePath, originalItems, nextOrder);
+  };
+
+  const beginNotePointerDrag = (event: ReactPointerEvent<HTMLElement>, itemPath: string) => {
+    if (!ensureCanReorderNotes()) {
+      return;
+    }
+
+    event.preventDefault();
+    noteDragSourceRef.current = itemPath;
+    noteDragOriginalItemsRef.current = itemsRef.current;
+    pendingNoteOrderRef.current = null;
+    setDraggingNotePath(itemPath);
+  };
+
+  const handleNotePointerEnter = (itemPath: string) => {
+    const sourcePath = noteDragSourceRef.current;
+    if (!sourcePath) {
+      return;
+    }
+
+    reorderNoteLocally(sourcePath, itemPath);
+  };
+
+  const finishNotePointerDrag = async () => {
+    const nextOrder = pendingNoteOrderRef.current;
+    const originalItems = noteDragOriginalItemsRef.current;
+    const sourcePath = noteDragSourceRef.current;
+
+    noteDragSourceRef.current = null;
+    noteDragOriginalItemsRef.current = null;
+    pendingNoteOrderRef.current = null;
+    setDraggingNotePath(null);
+
+    if (!sourcePath || !nextOrder || !originalItems || isBusy) {
+      return;
+    }
+
+    await persistReorderedNotes(sourcePath, originalItems, nextOrder);
   };
 
   const deleteSelectedCategory = async (categoryOverride?: ContentCategory | null) => {
@@ -1168,41 +2329,38 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
     }
   };
 
-  const openCategoryContextMenu = (
-    event: ReactMouseEvent<HTMLButtonElement>,
-    category: ContentCategory,
-  ) => {
-    event.preventDefault();
-    setSelectedCategorySlug(category.slug);
-    setCategoryMenu({
-      slug: category.slug,
-      x: event.clientX,
-      y: event.clientY,
+  const switchToItem = (item: ContentLibraryItem) => {
+    const nextDraft = getDraftFromItem(item);
+
+    startTransition(() => {
+      activateDraft(nextDraft);
+      setSelectedCategorySlug(getItemCategorySlug(item) || null);
+      setWorkspacePanel('write');
+      setIsTagPickerOpen(false);
+      setStatus(`\u5df2\u6253\u5f00 "${item.frontmatter.title}"\u3002`);
     });
   };
 
   const openItem = (item: ContentLibraryItem) => {
-    const isCurrentItem =
-      draft?.sourceRelativePath === item.relativePath ||
-      (!draft?.sourceRelativePath && draft?.relativePath === item.relativePath);
+    const isCurrentItem = draft?.sourceRelativePath === item.relativePath;
 
     if (isCurrentItem) {
       return;
     }
 
-    if (!confirmDiscardUnsavedChanges(`open "${item.frontmatter.title}"`)) {
+    if (dirty) {
+      setPendingSwitchItem(item);
+      setStatus('\u68c0\u6d4b\u5230\u672a\u4fdd\u5b58\u7684\u4fee\u6539\uff0c\u8bf7\u5148\u9009\u62e9\u5982\u4f55\u5904\u7406\u3002');
       return;
     }
 
-    activateDraft(createDraftFromItem(item));
-    setSelectedCategorySlug(getItemCategorySlug(item) || null);
-    setWorkspacePanel('write');
-    setStatus(`Opened ${item.frontmatter.title}`);
+    switchToItem(item);
   };
 
+  /*
   const openCreateNoteDialog = () => {
     if (categories.length === 0) {
-      setStatus('Create a category first, then create a note inside it.');
+      setStatus('请先新建类目，再在类目下新建笔记。');
       return;
     }
 
@@ -1212,20 +2370,20 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
     setIsCreateDialogOpen(true);
   };
 
-  const confirmCreateNote = () => {
+  const confirmCreateNote = async () => {
     const normalizedTitle = createTitleValue.trim().replace(/\s+/g, ' ');
     if (!normalizedTitle) {
-      setStatus('Enter a title before creating the note.');
+      setStatus('请输入笔记标题。');
       createTitleInputRef.current?.focus();
       return;
     }
 
     if (!createCategoryValue) {
-      setStatus('Choose a category before creating the note.');
+      setStatus('请选择笔记所属类目。');
       return;
     }
 
-    if (!confirmDiscardUnsavedChanges(`create "${normalizedTitle}"`)) {
+    if (!confirmDiscardUnsavedChanges(`新建 "${normalizedTitle}"`)) {
       return;
     }
 
@@ -1240,7 +2398,89 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
     setWorkspacePanel('write');
     setShowPreview(true);
     activateDraft(nextDraft);
-    setStatus(`Created "${normalizedTitle}".`);
+    setStatus(`已新建 "${normalizedTitle}"。`);
+  };
+
+  */
+
+  const openCreateNoteDialog = () => {
+    const fallbackCategory =
+      selectedCategorySlug && categories.some((category) => category.slug === selectedCategorySlug)
+        ? selectedCategorySlug
+        : categories[0]?.slug ?? '';
+
+    if (!fallbackCategory) {
+      setStatus('\u8bf7\u5148\u65b0\u5efa\u7c7b\u76ee\uff0c\u518d\u5728\u7c7b\u76ee\u4e0b\u65b0\u5efa\u7b14\u8bb0\u3002');
+      return;
+    }
+
+    setCreateTitleValue('');
+    setCreateSlugValue('');
+    setCreateCategoryValue(fallbackCategory);
+    setCreateTypeValue('markdown');
+    setIsCreateDialogOpen(true);
+  };
+
+  const confirmCreateNote = async () => {
+    const normalizedTitle = createTitleValue.trim().replace(/\s+/g, ' ');
+    if (!normalizedTitle) {
+      setStatus('\u8bf7\u8f93\u5165\u7b14\u8bb0\u6807\u9898\u3002');
+      createTitleInputRef.current?.focus();
+      return;
+    }
+
+    const routeInput = createSlugValue.trim();
+    const requestedSlug = routeInput ? slugifyCategoryLabel(routeInput) : '';
+    if (routeInput && !requestedSlug) {
+      setStatus('\u8bf7\u586b\u5199\u6709\u6548\u7684\u6587\u7ae0\u8def\u7531\u3002');
+      return;
+    }
+
+    if (requestedSlug && items.some((item) => item.frontmatter.slug === requestedSlug)) {
+      setStatus(`\u6587\u7ae0\u8def\u7531\u300c${requestedSlug}\u300d\u5df2\u5b58\u5728\u3002`);
+      return;
+    }
+
+    const targetCategory = categories.find((category) => category.slug === createCategoryValue) ?? null;
+    if (!targetCategory) {
+      setStatus('\u8bf7\u5148\u65b0\u5efa\u7c7b\u76ee\uff0c\u518d\u5728\u7c7b\u76ee\u4e0b\u65b0\u5efa\u7b14\u8bb0\u3002');
+      return;
+    }
+
+    if (!confirmDiscardUnsavedChanges(`\u65b0\u5efa "${normalizedTitle}"`)) {
+      return;
+    }
+
+    const nextDraft = patchDraft(createEmptyDraft(createTypeValue), {
+      title: normalizedTitle,
+      slug: requestedSlug || createRandomDraftSlug(),
+      order: categoryUsesManualOrder(items, targetCategory.slug) ? getNextCategoryOrder(items, targetCategory.slug) : null,
+      category: targetCategory.slug,
+    });
+
+    setIsCreateDialogOpen(false);
+    setSelectedCategorySlug(targetCategory.slug);
+    setSearchQuery('');
+    setWorkspacePanel('write');
+    setShowPreview(true);
+    setStatus(`\u6b63\u5728\u4fdd\u5b58 "${normalizedTitle}"...`);
+
+    try {
+      const savedItem = await persistDraft(nextDraft, {
+        linkedProject: nextDraft.type === 'inknote' ? createLinkedNotebookProject(nextDraft, null) : undefined,
+        successMessage: `\u5df2\u65b0\u5efa\u5e76\u4fdd\u5b58 "${normalizedTitle}"\u3002`,
+        historyLabel: 'Created note',
+        historyDetail: normalizedTitle,
+        resetUndoStack: true,
+      });
+
+      if (!savedItem) {
+        activateDraft(nextDraft);
+      }
+    } catch (error) {
+      activateDraft(nextDraft);
+      setStatus(error instanceof Error ? error.message : `\u65b0\u5efa "${normalizedTitle}" \u5931\u8d25\u3002`);
+    }
   };
 
   const revertDraft = () => {
@@ -1260,7 +2500,7 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
       return;
     }
 
-    activateDraft(createDraftFromItem(source));
+    activateDraft(getDraftFromItem(source));
     setSelectedCategorySlug(getItemCategorySlug(source) || null);
     setWorkspacePanel('write');
     setHistoryEntries([createHistoryEntry('Reverted note', source.frontmatter.title)]);
@@ -1369,12 +2609,12 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
       setWorkspacePanel('write');
 
       if (options?.resetUndoStack) {
-        activateDraft(createDraftFromItem(savedItem));
+        activateDraft(getDraftFromItem(savedItem));
         if (options.historyLabel) {
           setHistoryEntries([createHistoryEntry(options.historyLabel, options.historyDetail ?? savedItem.frontmatter.title)]);
         }
       } else {
-        setDraft(createDraftFromItem(savedItem));
+        setDraft(getDraftFromItem(savedItem));
         if (options?.historyLabel) {
           appendHistoryEntry(options.historyLabel, options.historyDetail ?? savedItem.frontmatter.title);
         }
@@ -1390,16 +2630,59 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
     }
   };
 
-  const saveDraft = async () => {
+  const saveDraft = async (): Promise<ContentLibraryItem | null> => {
     if (!draft) {
-      return;
+      return null;
     }
 
-    await persistDraft(draft, {
+    return persistDraft(draft, {
       successMessage: `Saved to content/${getDraftSavePath(draft)}`,
       historyLabel: 'Saved note',
       historyDetail: draft.title,
     });
+  };
+
+  const returnToCurrentDraft = () => {
+    if (isPendingSwitchSaving) {
+      return;
+    }
+
+    setPendingSwitchItem(null);
+    setStatus('\u5df2\u8fd4\u56de\u5f53\u524d\u7b14\u8bb0\u3002');
+  };
+
+  const discardAndSwitchItem = () => {
+    if (!pendingSwitchItem || isPendingSwitchSaving) {
+      return;
+    }
+
+    const targetItem = pendingSwitchItem;
+    setPendingSwitchItem(null);
+    setStatus('\u5df2\u4e22\u5f03\u672a\u4fdd\u5b58\u7684\u4fee\u6539\u3002');
+    switchToItem(targetItem);
+  };
+
+  const saveAndSwitchItem = async () => {
+    if (!pendingSwitchItem || isPendingSwitchSaving) {
+      return;
+    }
+
+    const targetItem = pendingSwitchItem;
+    setIsPendingSwitchSaving(true);
+
+    try {
+      const savedItem = await saveDraft();
+
+      if (!savedItem) {
+        setStatus('\u4fdd\u5b58\u672a\u5b8c\u6210\uff0c\u5df2\u7559\u5728\u5f53\u524d\u7b14\u8bb0\u3002');
+        return;
+      }
+
+      setPendingSwitchItem(null);
+      switchToItem(targetItem);
+    } finally {
+      setIsPendingSwitchSaving(false);
+    }
   };
 
   const publishDraft = async () => {
@@ -1454,100 +2737,94 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
     }
   };
 
-  const moveDraftToCategory = async () => {
+  const openMetadataDialog = () => {
     if (!draft) {
       return;
     }
 
-    const otherCategories = categories.filter((category) => category.slug !== draft.category);
-    if (otherCategories.length === 0) {
-      setStatus('Create another category before moving this note.');
-      return;
-    }
-
-    const targetInput = window
-      .prompt(
-        `Move "${draft.title}" to which category?\n\n${otherCategories
-          .map((category) => `${category.label} (${category.slug})`)
-          .join('\n')}`,
-        otherCategories[0]?.label ?? '',
-      )
-      ?.trim();
-
-    if (!targetInput) {
-      setStatus('Move cancelled.');
-      return;
-    }
-
-    const targetCategory = resolveCategoryInput(targetInput, otherCategories);
-    if (!targetCategory) {
-      setStatus('Choose a valid target category.');
-      return;
-    }
-
-    await persistDraft(patchDraft(draft, { category: targetCategory.slug }), {
-      successMessage: `Moved "${draft.title}" to "${targetCategory.label}".`,
-      historyLabel: 'Moved note',
-      historyDetail: `${draft.title} -> ${targetCategory.label}`,
-    });
+    setMetadataCategoryValue(draft.category || categories[0]?.slug || '');
+    setMetadataDateValue(getDatePart(draft.date));
+    setMetadataSlugValue(draft.slug);
+    setIsMetadataDialogOpen(true);
   };
 
-  const copyDraftToCurrentCategory = async () => {
+  const openMetadataDatePicker = () => {
+    const input = metadataDateInputRef.current;
+    if (!input) {
+      return;
+    }
+
+    input.focus();
+    try {
+      input.showPicker?.();
+    } catch {
+      // Some WebView versions only allow showPicker during a direct click.
+    }
+  };
+
+  const saveMetadata = async () => {
     if (!draft) {
       return;
     }
 
-    const targetCategory =
-      categories.find((category) => category.slug === (selectedCategorySlug ?? draft.category)) ??
-      categories.find((category) => category.slug === draft.category) ??
+    const nextCategory =
+      metadataCategoryOptions.find((category) => category.slug === metadataCategoryValue) ??
       null;
+    const nextDate = getDatePart(metadataDateValue);
+    const nextSlug = slugifyCategoryLabel(metadataSlugValue.trim());
 
-    if (!targetCategory) {
-      setStatus('Select a target category before copying this note.');
+    if (!nextCategory) {
+      setStatus('\u8bf7\u9009\u62e9\u6709\u6548\u7684\u6240\u5c5e\u7c7b\u76ee\u3002');
       return;
     }
 
-    const baseTitle = draft.title.trim() || 'Untitled note';
-    const duplicatedTitle = baseTitle.endsWith(' Copy') ? `${baseTitle} 2` : `${baseTitle} Copy`;
-    const duplicatedSlug = createUniqueDraftSlug(`${draft.slug || baseTitle}-copy`);
-    const duplicatedDraft = patchDraft(draft, {
-      title: duplicatedTitle,
-      slug: duplicatedSlug,
-      category: targetCategory.slug,
-      relativePath: null,
-      sourceRelativePath: null,
-      published: false,
-      date: draft.date || getTimestampValue().slice(0, 10),
+    if (!nextSlug) {
+      setStatus('\u8bf7\u586b\u5199\u6709\u6548\u7684\u6587\u7ae0\u8def\u7531\u3002');
+      return;
+    }
+
+    if (
+      items.some(
+        (item) => item.frontmatter.slug === nextSlug && item.relativePath !== draft.sourceRelativePath,
+      )
+    ) {
+      setStatus(`\u6587\u7ae0\u8def\u7531\u300c${nextSlug}\u300d\u5df2\u5b58\u5728\u3002`);
+      return;
+    }
+
+    if (!nextDate) {
+      setStatus('\u8bf7\u586b\u5199\u6587\u7ae0\u53d1\u5e03\u65f6\u95f4\u3002');
+      return;
+    }
+
+    const savedItem = await persistDraft(patchDraft(draft, { category: nextCategory.slug, date: nextDate, slug: nextSlug }), {
+      successMessage: `\u5df2\u66f4\u65b0\u300a${draft.title}\u300b\u7684\u6587\u7ae0\u5143\u6570\u636e\u3002`,
+      historyLabel: 'Edited metadata',
+      historyDetail: `${nextCategory.label} | ${nextDate} | ${nextSlug}`,
     });
 
-    const duplicatedProject =
-      draft.type === 'inknote'
-        ? JSON.parse(
-            JSON.stringify(linkedNotebook ?? createLinkedNotebookProject(draft, linkedNotebookRef.current)),
-          ) as ProjectData
-        : null;
+    if (savedItem) {
+      setIsMetadataDialogOpen(false);
+    }
+  };
 
-    await persistDraft(duplicatedDraft, {
-      linkedProject: duplicatedProject,
-      successMessage: `Copied "${baseTitle}" to "${targetCategory.label}".`,
-      historyLabel: 'Copied note',
-      historyDetail: `${baseTitle} -> ${duplicatedTitle}`,
-      resetUndoStack: true,
-    });
+  const openDeleteDialog = () => {
+    if (!draft) {
+      return;
+    }
+
+    setIsDeleteDialogOpen(true);
   };
 
   const deleteDraft = async () => {
     if (!draft) {
+      setIsDeleteDialogOpen(false);
       return;
     }
 
-    if (!draft.sourceRelativePath) {
-      const shouldDiscard = window.confirm(`Discard the unsaved draft "${draft.title}"?`);
-      if (!shouldDiscard) {
-        setStatus('Deletion cancelled.');
-        return;
-      }
+    setIsDeleteDialogOpen(false);
 
+    if (!draft.sourceRelativePath) {
       activateDraft(null);
       clearLinkedNotebookState();
       setStatus('Discarded the unsaved draft.');
@@ -1556,12 +2833,6 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
 
     if (!isTauri()) {
       setStatus('Deleting notes requires the Tauri desktop app.');
-      return;
-    }
-
-    const shouldDelete = window.confirm(`Delete "${draft.title}"? This action cannot be undone.`);
-    if (!shouldDelete) {
-      setStatus('Deletion cancelled.');
       return;
     }
 
@@ -1585,7 +2856,7 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
         remainingItems.find((item) => getItemCategorySlug(item) === draft.category) ?? remainingItems[0] ?? null;
 
       if (nextItem) {
-        activateDraft(createDraftFromItem(nextItem));
+        activateDraft(getDraftFromItem(nextItem));
         setSelectedCategorySlug(getItemCategorySlug(nextItem) || null);
         setStatus(`Deleted "${draft.title}".`);
       } else {
@@ -1600,18 +2871,24 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
     }
   };
 
-  const updateDraft = (patch: Partial<ContentDraft>) => {
+  const updateDraft = (
+    patch: Partial<ContentDraft>,
+    options: { undoSelection?: EditorSelectionState | null } = {},
+  ) => {
     setDraft((current) => {
       if (!current) {
         return current;
       }
 
       const nextDraft = patchDraft(current, patch);
-      if (serializeContentDraft(nextDraft) === serializeContentDraft(current)) {
+      if (getDraftEditorSnapshot(nextDraft) === getDraftEditorSnapshot(current)) {
         return current;
       }
 
-      pushDraftUndoEntry(current);
+      pushDraftUndoEntry({
+        draft: current,
+        selection: options.undoSelection ?? null,
+      });
       return nextDraft;
     });
 
@@ -1622,6 +2899,65 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
 
   const setDraftTags = (nextTags: string[]) => {
     updateDraft({ tagsText: nextTags.join(', ') });
+  };
+
+  const getLocalBlogPreviewPath = (): string => {
+    if (draft) {
+      if (draft.sourceRelativePath) {
+        const savedItem = items.find((item) => item.relativePath === draft.sourceRelativePath) ?? null;
+        const savedPath = getPreviewPathFromItem(savedItem);
+        if (savedPath) {
+          return savedPath;
+        }
+      }
+
+      if (draft.type === 'inknote') {
+        return `/inknote/${draft.slug || 'untitled-inknote'}`;
+      }
+
+      const permalink = draft.permalink.trim();
+      if (permalink) {
+        return permalink.startsWith('/') ? permalink : `/${permalink}`;
+      }
+
+      return `/notes/${draft.slug || 'untitled-markdown'}`;
+    }
+
+    const categorySlug = selectedCategorySlug ?? categories[0]?.slug ?? '';
+    return categorySlug ? `/category/${categorySlug}` : '/notes';
+  };
+
+  const openLocalBlogPreview = async () => {
+    let path = getLocalBlogPreviewPath();
+
+    if (draft?.sourceRelativePath && isTauri()) {
+      try {
+        const raw = await readContentFile(draft.sourceRelativePath);
+        const latestItem = toContentLibraryItem(draft.sourceRelativePath, raw);
+        const latestPath = getPreviewPathFromItem(latestItem);
+        if (latestPath) {
+          path = latestPath;
+        }
+      } catch {
+        // Fall back to the in-memory route when the content file cannot be re-read.
+      }
+    }
+
+    const url = `${LOCAL_BLOG_PREVIEW_ORIGIN}${path}`;
+
+    void ensureBlogPreviewServer().catch((error) => {
+      const message = error instanceof Error ? error.message : String(error);
+      setStatus(`\u672c\u5730\u535a\u5ba2\u670d\u52a1\u542f\u52a8\u5931\u8d25\uff1a${message}`);
+    });
+
+    try {
+      await openExternalUrl(url);
+      setStatus(`\u5df2\u6253\u5f00\u672c\u5730\u535a\u5ba2\u9884\u89c8\uff1a${url}`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setStatus(`\u65e0\u6cd5\u6253\u5f00\u672c\u5730\u535a\u5ba2\u9884\u89c8\uff1a${url}\uff08${message}\uff09`);
+      return;
+    }
   };
 
   const hasTag = (tag: string) =>
@@ -1690,16 +3026,27 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
       return;
     }
 
+    const undoSelection = readEditorSelection();
     const result = transform(draft.body, editor.selectionStart, editor.selectionEnd);
-    updateDraft({ body: result.nextValue });
+    updateDraft({ body: result.nextValue }, { undoSelection });
 
     requestAnimationFrame(() => {
       if (!editorRef.current) {
         return;
       }
 
+      const nextSelection = clampEditorSelection(
+        {
+          start: result.nextSelectionStart,
+          end: result.nextSelectionEnd,
+          direction: 'none',
+        },
+        editorRef.current.value.length,
+      );
+
       editorRef.current.focus();
-      editorRef.current.setSelectionRange(result.nextSelectionStart, result.nextSelectionEnd);
+      editorRef.current.setSelectionRange(nextSelection.start, nextSelection.end, nextSelection.direction);
+      editorSelectionRef.current = nextSelection;
     });
   };
 
@@ -1732,20 +3079,26 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
 
   const visibleItems = useMemo(() => {
     const keyword = searchQuery.trim().toLowerCase();
-    return items.filter((item) => {
-      if (!selectedCategorySlug || getItemCategorySlug(item) !== selectedCategorySlug) {
-        return false;
-      }
+    if (!selectedCategorySlug) {
+      return [];
+    }
 
-      if (!keyword) {
-        return true;
-      }
+    return sortDocumentsByOrderAndDate(
+      items.filter((item) => {
+        if (getItemCategorySlug(item) !== selectedCategorySlug) {
+          return false;
+        }
 
-      return [item.frontmatter.title, item.frontmatter.slug, item.body]
-        .join('\n')
-        .toLowerCase()
-        .includes(keyword);
-    });
+        if (!keyword) {
+          return true;
+        }
+
+        return [item.frontmatter.title, item.frontmatter.slug, item.body]
+          .join('\n')
+          .toLowerCase()
+          .includes(keyword);
+      }),
+    );
   }, [items, searchQuery, selectedCategorySlug]);
   const canUndo = workspacePanel === 'write' && draftUndoStackRef.current.length > 0;
   const canRedo = workspacePanel === 'write' && draftRedoStackRef.current.length > 0;
@@ -1760,20 +3113,13 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
           : 'All changes are saved.'
     : 'Select a note to start editing.';
 
-  const selectedItemIsVisible =
-    draft?.sourceRelativePath && visibleItems.some((item) => item.relativePath === draft.sourceRelativePath);
   const selectedCategory =
     (selectedCategorySlug ? categories.find((category) => category.slug === selectedCategorySlug) : null) ?? null;
-  const selectedCategoryCount =
-    (selectedCategory ? categoryCounts.find((category) => category.slug === selectedCategory.slug)?.count : 0) ?? 0;
-  const categoryMenuCategory =
-    (categoryMenu ? categories.find((category) => category.slug === categoryMenu.slug) : null) ?? null;
-  const categoryMenuStyle = categoryMenu
-    ? {
-        left: `${Math.max(12, Math.min(categoryMenu.x, window.innerWidth - 180))}px`,
-        top: `${Math.max(12, Math.min(categoryMenu.y, window.innerHeight - 110))}px`,
-      }
-    : undefined;
+  const metadataCategoryOptions =
+    draft?.category && !categories.some((category) => category.slug === draft.category)
+      ? [...categories, { slug: draft.category, label: draft.category }]
+      : categories;
+  const createCategoryIsValid = categories.some((category) => category.slug === createCategoryValue);
 
   return (
     <div className="notes-app-shell">
@@ -1796,7 +3142,7 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
                 accept="image/*"
                 onChange={handleBrandAvatarChange}
               />
-              <strong>Chty's Blog</strong>
+              <strong>{siteConfigDraft.title || "Chty's Blog"}</strong>
             </div>
           </div>
 
@@ -1812,83 +3158,81 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
         <div className="notes-topbar-create">
           <button
             type="button"
-            className="notes-create-button active"
+            className="notes-topbar-button"
             onClick={openCreateNoteDialog}
             disabled={isBusy || categories.length === 0}
+            aria-label={'\u65b0\u5efa\u7b14\u8bb0'}
           >
-            New Note
+            新建笔记
           </button>
         </div>
 
-        <div className="notes-topbar-path">{draft ? `- ${draft.title}` : '- No note selected'}</div>
+        <div className="notes-topbar-path">{draft ? `- ${draft.title}` : '- 未选择笔记'}</div>
 
         <div className="notes-topbar-right">
           <button
             type="button"
-            className={showPublishPanel ? 'notes-create-button active' : 'notes-create-button'}
-            onClick={() =>
-              setShowPublishPanel((current) => {
-                const next = !current;
-                if (next) {
-                  void refreshPublishStatus();
-                }
-                return next;
-              })
-            }
+            className={isSettingsOpen && settingsSection === 'publish' ? 'notes-create-button active' : 'notes-create-button'}
+            onClick={() => {
+              setSettingsSection('publish');
+              setIsSettingsOpen(true);
+              void refreshPublishStatus();
+            }}
             disabled={isBusy || isPublishingSite}
           >
-            Publish Site
+            {'\u53d1\u5e03\u7ad9\u70b9'}
+          </button>
+          <button
+            type="button"
+            className={isSettingsOpen ? 'notes-create-button active' : 'notes-create-button'}
+            onClick={() => {
+              setSettingsSection('categories');
+              setIsSettingsOpen(true);
+            }}
+          >
+            {'\u8bbe\u7f6e'}
+          </button>
+        </div>
+        <div className="notes-topbar-primary-actions">
+          <button
+            type="button"
+            className="notes-topbar-button"
+            onClick={openCreateNoteDialog}
+            disabled={isBusy || categories.length === 0}
+          >
+            {'\u65b0\u5efa\u7b14\u8bb0'}
+          </button>
+          <button
+            type="button"
+            className={isSettingsOpen && settingsSection !== 'publish' ? 'notes-topbar-button active' : 'notes-topbar-button'}
+            onClick={() => {
+              setSettingsSection('categories');
+              setIsSettingsOpen(true);
+            }}
+          >
+            {'\u8bbe\u7f6e'}
+          </button>
+          <button
+            type="button"
+            className="notes-topbar-button"
+            onClick={() => void openLocalBlogPreview()}
+          >
+            {'\u9884\u89c8'}
+          </button>
+          <button
+            type="button"
+            className={isSettingsOpen && settingsSection === 'publish' ? 'notes-topbar-button active' : 'notes-topbar-button'}
+            onClick={() => {
+              setSettingsSection('publish');
+              setIsSettingsOpen(true);
+              void refreshPublishStatus();
+            }}
+            disabled={isBusy || isPublishingSite}
+          >
+            {'\u53d1\u5e03'}
           </button>
         </div>
       </header>
-
-      {showPublishPanel ? (
-        <section className="notes-publish-panel" aria-label="GitHub Pages publishing">
-          <div className="notes-publish-panel-head">
-            <div>
-              <strong>GitHub Pages Publish</strong>
-              <span>
-                {publishStatus
-                  ? `Branch: ${publishStatus.branch || 'unknown'}`
-                  : 'Commit and push content changes to trigger the Pages workflow.'}
-              </span>
-            </div>
-            <button
-              type="button"
-              className="notes-create-button"
-              onClick={() => void refreshPublishStatus()}
-              disabled={isPublishingSite}
-            >
-              Refresh
-            </button>
-          </div>
-
-          <div className="notes-publish-row">
-            <input
-              type="text"
-              value={publishMessage}
-              onChange={(event) => setPublishMessage(event.target.value)}
-              placeholder="Commit message"
-            />
-            <button
-              type="button"
-              className="notes-create-button active"
-              onClick={() => void publishSiteChanges()}
-              disabled={isPublishingSite}
-            >
-              Commit & Push
-            </button>
-          </div>
-
-          <pre className="notes-publish-status">
-            {publishStatus
-              ? publishStatus.clean
-                ? 'No content changes detected.'
-                : publishStatus.shortStatus
-              : 'Refresh to inspect content changes.'}
-          </pre>
-        </section>
-      ) : null}
 
       <main className="notes-shell">
         <aside className="notes-sidebar">
@@ -1906,16 +3250,6 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
               </span>
               <strong>{'\u7b14\u8bb0\u672c'}</strong>
             </div>
-            <button
-              type="button"
-              className="notes-sidebar-add"
-              onClick={createCategory}
-              disabled={isBusy}
-              title={'\u65b0\u5efa\u7c7b\u76ee'}
-              aria-label={'\u65b0\u5efa\u7c7b\u76ee'}
-            >
-              +
-            </button>
           </div>
 
           <nav className="notes-sidebar-nav" aria-label="Note categories">
@@ -1926,8 +3260,6 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
                   type="button"
                   className={selectedCategorySlug === category.slug ? 'notes-sidebar-item active' : 'notes-sidebar-item'}
                   onClick={() => setSelectedCategorySlug(category.slug)}
-                  onContextMenu={(event) => openCategoryContextMenu(event, category)}
-                  title="Right-click for category actions"
                 >
                   <span className="notes-sidebar-item-label">{category.label}</span>
                   <strong className="notes-sidebar-item-count">{category.count}</strong>
@@ -1935,7 +3267,7 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
               ))
             ) : (
               <div className="notes-sidebar-empty">
-                <p>{'\u5148\u65b0\u5efa\u4e00\u4e2a\u7c7b\u76ee\uff0c\u518d\u5f00\u59cb\u6574\u7406\u5185\u5bb9\u3002'}</p>
+                <p>{'\u8bf7\u5728\u8bbe\u7f6e\u7684\u7c7b\u76ee\u7ba1\u7406\u4e2d\u65b0\u5efa\u7c7b\u76ee\u3002'}</p>
               </div>
             )}
           </nav>
@@ -1958,47 +3290,107 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
 
         <section className="notes-list-pane">
           <div className="notes-list-header">
+            {/*
             <div className="notes-list-heading">
-              <strong>{selectedCategory?.label ?? 'No category selected'}</strong>
+              <strong>{selectedCategory?.label ?? '未选择类目'}</strong>
               <span>
                 {selectedCategory
-                  ? `${visibleItems.length} / ${selectedCategoryCount} notes`
-                  : `${visibleItems.length} notes`}
+                  ? `${visibleItems.length} 篇笔记`
+                  : `${visibleItems.length} 篇笔记`}
               </span>
             </div>
-            <button type="button" className="notes-list-layout-button" aria-label="Toggle list layout">
-              List
-            </button>
+            */}
+            <div className="notes-list-heading">
+              <strong>{selectedCategory?.label ?? '\u672a\u9009\u62e9\u7c7b\u76ee'}</strong>
+            </div>
           </div>
 
           <div className="notes-list-scroll">
             {visibleItems.length > 0 ? (
               visibleItems.map((item) => {
-                const selected =
-                  draft?.sourceRelativePath === item.relativePath ||
-                  (!draft?.sourceRelativePath && draft?.relativePath === item.relativePath);
+                const selected = draft?.sourceRelativePath === item.relativePath;
 
                 return (
-                  <button
+                  <div
                     key={item.relativePath}
-                    type="button"
-                    className={selected ? 'notes-list-item active' : 'notes-list-item'}
-                    onClick={() => openItem(item)}
+                    className={[
+                      'notes-list-item',
+                      selected ? 'active' : '',
+                      draggingNotePath === item.relativePath ? 'dragging' : '',
+                    ]
+                      .filter(Boolean)
+                      .join(' ')}
+                    data-note-path={item.relativePath}
+                    onPointerEnter={() => handleNotePointerEnter(item.relativePath)}
                   >
-                    <span className="notes-list-item-title">{item.frontmatter.title}</span>
-                    <span className="notes-list-item-subtitle">
-                      {getNoteTypeLabel(item.frontmatter.type)} | {item.frontmatter.date}
+                    <span
+                      className="notes-list-item-handle"
+                      role="button"
+                      tabIndex={isBusy ? -1 : 0}
+                      aria-disabled={isBusy}
+                      onPointerDown={(event) => beginNotePointerDrag(event, item.relativePath)}
+                      onKeyDown={(event) => {
+                        if (isBusy) {
+                          return;
+                        }
+
+                        const currentIndex = visibleItems.findIndex(
+                          (visibleItem) => visibleItem.relativePath === item.relativePath,
+                        );
+
+                        if (event.key === 'ArrowUp' && currentIndex > 0) {
+                          event.preventDefault();
+                          void reorderNoteToTarget(item.relativePath, visibleItems[currentIndex - 1].relativePath);
+                        }
+
+                        if (event.key === 'ArrowDown' && currentIndex < visibleItems.length - 1) {
+                          event.preventDefault();
+                          void reorderNoteToTarget(item.relativePath, visibleItems[currentIndex + 1].relativePath);
+                        }
+                      }}
+                      title={'\u62d6\u52a8\u6392\u5e8f'}
+                      aria-label={`\u62d6\u52a8\u6392\u5e8f ${item.frontmatter.title}`}
+                    >
+                      <ToolbarSvg>
+                        <path d="M5 4.2h.1" />
+                        <path d="M8 4.2h.1" />
+                        <path d="M11 4.2h.1" />
+                        <path d="M5 8h.1" />
+                        <path d="M8 8h.1" />
+                        <path d="M11 8h.1" />
+                        <path d="M5 11.8h.1" />
+                        <path d="M8 11.8h.1" />
+                        <path d="M11 11.8h.1" />
+                      </ToolbarSvg>
                     </span>
-                  </button>
+
+                    <button
+                      type="button"
+                      className="notes-list-item-button"
+                      onClick={() => openItem(item)}
+                    >
+                      <span className="notes-list-item-title">{item.frontmatter.title}</span>
+                      <span className="notes-list-item-subtitle">
+                        {getNoteTypeLabel(item.frontmatter.type)} | {item.frontmatter.date}
+                      </span>
+                    </button>
+                  </div>
                 );
               })
             ) : (
               <div className="notes-empty-list">
                 <p>
                   {selectedCategory
-                    ? 'No notes match the current category or search filter.'
-                    : 'Select or create a category first.'}
+                    ? '\u5f53\u524d\u7c7b\u76ee\u6216\u641c\u7d22\u6761\u4ef6\u4e0b\u6ca1\u6709\u5339\u914d\u7684\u7b14\u8bb0\u3002'
+                    : '\u8bf7\u5148\u9009\u62e9\u6216\u65b0\u5efa\u4e00\u4e2a\u7c7b\u76ee\u3002'}
                 </p>
+                {/*
+                <p>
+                  {selectedCategory
+                    ? '当前类目或搜索条件下没有匹配的笔记。'
+                    : '请先选择或新建一个类目。'}
+                </p>
+                */}
               </div>
             )}
           </div>
@@ -2015,8 +3407,7 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
                         key={tag}
                         type="button"
                         className={`notes-tag-chip tone-${getTagTone(tag)}`}
-                        onClick={() => toggleTag(tag)}
-                        title={`Remove tag ${tag}`}
+                        title={tag}
                       >
                         {tag}
                       </button>
@@ -2024,15 +3415,20 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
 
                     <button
                       type="button"
-                      className="notes-tag-trigger"
+                      className={isTagPickerOpen ? 'notes-tag-trigger active' : 'notes-tag-trigger'}
                       onClick={() => setIsTagPickerOpen((current) => !current)}
+                      aria-expanded={isTagPickerOpen}
                     >
-                      {tagList.length > 0 ? 'Click to add tags' : 'Click to add tags'}
+                      编辑标签
                     </button>
                   </div>
 
                   {isTagPickerOpen ? (
                     <div ref={tagPickerRef} className="notes-tag-picker">
+                      <div className="notes-tag-picker-head">
+                        <strong>编辑标签</strong>
+                      </div>
+
                       <div className="notes-tag-picker-input-row">
                         <input
                           ref={tagInputRef}
@@ -2044,7 +3440,7 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
                               commitTagInput();
                             }
                           }}
-                          placeholder="Search tags or create a new tag"
+                          placeholder="搜索已有标签，或输入新标签"
                         />
                         <button
                           type="button"
@@ -2052,11 +3448,11 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
                           onClick={commitTagInput}
                           disabled={!normalizedTagInput}
                         >
-                          Add
+                          添加
                         </button>
                       </div>
 
-                      <div className="notes-tag-picker-list" role="listbox" aria-label="Available tags">
+                      <div className="notes-tag-picker-list" role="listbox" aria-label="可选标签">
                         {filteredAvailableTags.length > 0 ? (
                           filteredAvailableTags.map((tag) => {
                             const selected = hasTag(tag);
@@ -2069,13 +3465,15 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
                               >
                                 <span className={`notes-tag-picker-swatch tone-${getTagTone(tag)}`} aria-hidden="true" />
                                 <span className="notes-tag-picker-option-label">{tag}</span>
-                                <span className="notes-tag-picker-option-state">{selected ? 'Selected' : 'Add'}</span>
+                                <span className="notes-tag-picker-option-state" aria-hidden="true">
+                                  {selected ? '✓' : ''}
+                                </span>
                               </button>
                             );
                           })
                         ) : (
                           <p className="notes-tag-picker-empty">
-                            Press Enter to create <strong>{normalizedTagInput || 'a new tag'}</strong>.
+                            按 Enter 创建 <strong>{normalizedTagInput || '新标签'}</strong>
                           </p>
                         )}
                       </div>
@@ -2111,6 +3509,15 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
                   </button>
                   <button
                     type="button"
+                    className={isMetadataDialogOpen ? 'notes-icon-button active' : 'notes-icon-button'}
+                    onClick={openMetadataDialog}
+                    disabled={isBusy}
+                    title="Edit metadata"
+                  >
+                    Edit
+                  </button>
+                  <button
+                    type="button"
                     className={draft.published ? 'notes-icon-button active' : 'notes-icon-button'}
                     onClick={() => void publishDraft()}
                     disabled={isBusy}
@@ -2130,29 +3537,11 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
                   <button
                     type="button"
                     className="notes-icon-button notes-icon-button-danger"
-                    onClick={() => void deleteDraft()}
+                    onClick={openDeleteDialog}
                     disabled={isBusy}
                     title="Delete"
                   >
                     Delete
-                  </button>
-                  <button
-                    type="button"
-                    className="notes-icon-button"
-                    onClick={() => void moveDraftToCategory()}
-                    disabled={isBusy}
-                    title="Move"
-                  >
-                    Move
-                  </button>
-                  <button
-                    type="button"
-                    className="notes-icon-button"
-                    onClick={() => void copyDraftToCurrentCategory()}
-                    disabled={isBusy}
-                    title="Copy"
-                  >
-                    Copy
                   </button>
                   <button
                     type="button"
@@ -2376,7 +3765,21 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
                         ref={editorRef}
                         className="notes-markdown-editor"
                         value={draft.body}
-                        onChange={(event) => updateDraft({ body: event.target.value })}
+                        onBeforeInput={captureEditorSelection}
+                        onPaste={captureEditorSelection}
+                        onCut={captureEditorSelection}
+                        onKeyDown={captureEditorSelection}
+                        onKeyUp={captureEditorSelection}
+                        onClick={captureEditorSelection}
+                        onFocus={captureEditorSelection}
+                        onSelect={captureEditorSelection}
+                        onChange={(event) => {
+                          updateDraft(
+                            { body: event.currentTarget.value },
+                            { undoSelection: editorSelectionRef.current },
+                          );
+                          captureEditorSelection();
+                        }}
                         onScroll={handleEditorScroll}
                         placeholder="Write Markdown content here..."
                         spellCheck={false}
@@ -2385,6 +3788,9 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
 
                     {showPreview ? (
                       <div ref={previewPaneRef} className="notes-rendered-pane" onWheel={handlePreviewWheel}>
+                        {isPreviewRenderPending ? (
+                          <span className="notes-rendered-pending">{'\u9884\u89c8\u66f4\u65b0\u4e2d'}</span>
+                        ) : null}
                         <article ref={previewArticleRef} className="notes-rendered-article">
                           {renderedPreview}
                         </article>
@@ -2409,26 +3815,671 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
                 </div>
               )}
 
-              <div className="notes-editor-statusbar">
-                <span>{validationError ?? status}</span>
-                <span>
-                  {duplicateItem
-                    ? 'Another note is already using this save path.'
-                    : saveTarget
-                      ? `content/${saveTarget}`
-                      : saveStateText}
-                </span>
-                <span>{selectedItemIsVisible ? saveStateText : 'The current filter hides the open note.'}</span>
-              </div>
             </>
           ) : (
             <div className="notes-empty-state">
-              <h2>No note selected yet</h2>
-              <p>Open a note from the list, or create a new note from the top bar.</p>
+              <h2>{'\u8fd8\u6ca1\u6709\u9009\u62e9\u7b14\u8bb0'}</h2>
+              <p>{'\u4ece\u5de6\u4fa7\u5217\u8868\u6253\u5f00\u7b14\u8bb0\uff0c\u6216\u70b9\u51fb\u9876\u90e8\u201c\u65b0\u5efa\u7b14\u8bb0\u201d\u3002'}</p>
+              {/*
+              <h2>还没有选择笔记</h2>
+              <p>从左侧列表打开笔记，或点击顶部“新建笔记”。</p>
+              */}
             </div>
           )}
         </section>
       </main>
+
+      {isMetadataDialogOpen && draft ? (
+        <div className="notes-dialog-overlay" onClick={() => setIsMetadataDialogOpen(false)}>
+          <section
+            className="notes-metadata-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="notes-metadata-dialog-title"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <header className="notes-metadata-dialog-header">
+              <div>
+                <h2 id="notes-metadata-dialog-title">{'\u7f16\u8f91\u6587\u7ae0\u5143\u6570\u636e'}</h2>
+                <span>{draft.title}</span>
+              </div>
+              <button
+                type="button"
+                className="notes-metadata-dialog-close"
+                onClick={() => setIsMetadataDialogOpen(false)}
+                aria-label={'\u5173\u95ed\u5143\u6570\u636e\u7f16\u8f91'}
+              />
+            </header>
+
+            <div className="notes-metadata-dialog-body">
+              <label className="notes-metadata-dialog-field">
+                <span>{'\u6587\u7ae0\u8def\u7531'}</span>
+                <input
+                  type="text"
+                  value={metadataSlugValue}
+                  onChange={(event) => setMetadataSlugValue(event.target.value)}
+                  placeholder="maximum-entropy-irl"
+                  aria-label={'\u6587\u7ae0\u8def\u7531'}
+                />
+              </label>
+
+              <label className="notes-metadata-dialog-field">
+                <span>{'\u6240\u5c5e\u7c7b\u76ee'}</span>
+                <select
+                  value={metadataCategoryValue}
+                  onChange={(event) => setMetadataCategoryValue(event.target.value)}
+                  disabled={metadataCategoryOptions.length === 0}
+                >
+                  {metadataCategoryOptions.map((category) => (
+                    <option key={category.slug} value={category.slug}>
+                      {category.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+
+              <label className="notes-metadata-dialog-field">
+                <span>{'\u521b\u5efa\u65f6\u95f4'}</span>
+                <input
+                  ref={metadataDateInputRef}
+                  type="date"
+                  value={metadataDateValue}
+                  onChange={(event) => setMetadataDateValue(event.target.value)}
+                  onClick={openMetadataDatePicker}
+                  onFocus={openMetadataDatePicker}
+                  onKeyDown={(event) => event.preventDefault()}
+                  onPaste={(event) => event.preventDefault()}
+                  aria-label={'\u521b\u5efa\u65f6\u95f4'}
+                />
+              </label>
+            </div>
+
+            <footer className="notes-metadata-dialog-actions">
+              <button
+                type="button"
+                className="notes-metadata-dialog-cancel"
+                onClick={() => setIsMetadataDialogOpen(false)}
+              >
+                {'\u53d6\u6d88'}
+              </button>
+              <button
+                type="button"
+                className="notes-metadata-dialog-submit"
+                onClick={() => void saveMetadata()}
+                disabled={isBusy || !metadataCategoryValue || !metadataDateValue.trim() || !metadataSlugValue.trim()}
+              >
+                {isBusy ? '\u4fdd\u5b58\u4e2d...' : '\u4fdd\u5b58'}
+              </button>
+            </footer>
+          </section>
+        </div>
+      ) : null}
+
+      {isDeleteDialogOpen && draft ? (
+        <div
+          className="notes-dialog-overlay"
+          onClick={() => {
+            if (!isBusy) {
+              setIsDeleteDialogOpen(false);
+            }
+          }}
+        >
+          <section
+            className="notes-unsaved-dialog notes-delete-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="notes-delete-dialog-title"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="notes-unsaved-dialog-header">
+              <h2 id="notes-delete-dialog-title">
+                {draft.sourceRelativePath ? '\u786e\u8ba4\u5220\u9664\u6587\u7ae0' : '\u786e\u8ba4\u4e22\u5f03\u8349\u7a3f'}
+              </h2>
+              <p>
+                {draft.sourceRelativePath
+                  ? '\u5220\u9664\u540e\u4f1a\u4ece content/ \u4e2d\u79fb\u9664\u8be5\u6587\u7ae0\u6587\u4ef6\uff0c\u6b64\u64cd\u4f5c\u4e0d\u53ef\u64a4\u9500\u3002'
+                  : '\u8be5\u8349\u7a3f\u5c1a\u672a\u4fdd\u5b58\uff0c\u4e22\u5f03\u540e\u65e0\u6cd5\u6062\u590d\u3002'}
+              </p>
+            </div>
+
+            <div className="notes-unsaved-dialog-body">
+              <span className="notes-unsaved-dialog-target">
+                {draft.sourceRelativePath ? '\u5c06\u8981\u5220\u9664\uff1a' : '\u5c06\u8981\u4e22\u5f03\uff1a'}
+                <strong>{draft.title}</strong>
+              </span>
+
+              {draft.sourceRelativePath ? (
+                <p className="notes-delete-path">{`content/${draft.sourceRelativePath}`}</p>
+              ) : null}
+
+              {draft.type === 'inknote' && linkedNotebookTarget ? (
+                <p className="notes-delete-path">{`\u5173\u8054\u5de5\u7a0b\uff1acontent/${linkedNotebookTarget}`}</p>
+              ) : null}
+            </div>
+
+            <div className="notes-unsaved-dialog-actions">
+              <button
+                type="button"
+                className="notes-unsaved-dialog-cancel"
+                onClick={() => setIsDeleteDialogOpen(false)}
+                disabled={isBusy}
+              >
+                {'\u53d6\u6d88'}
+              </button>
+              <button
+                type="button"
+                className="notes-unsaved-dialog-danger"
+                onClick={() => void deleteDraft()}
+                disabled={isBusy}
+              >
+                {isBusy
+                  ? '\u5220\u9664\u4e2d...'
+                  : draft.sourceRelativePath
+                    ? '\u5220\u9664'
+                    : '\u4e22\u5f03'}
+              </button>
+            </div>
+          </section>
+        </div>
+      ) : null}
+
+      {isSettingsOpen ? (
+        <div className="notes-dialog-overlay" onClick={() => setIsSettingsOpen(false)}>
+          <section
+            className="notes-settings-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="notes-settings-title"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <header className="notes-settings-header">
+              <div>
+                <h2 id="notes-settings-title">{'\u8bbe\u7f6e'}</h2>
+                <span className="notes-settings-save-state">
+                  {isSiteConfigSaving ? '\u81ea\u52a8\u4fdd\u5b58\u4e2d' : '\u5df2\u542f\u7528\u81ea\u52a8\u4fdd\u5b58'}
+                </span>
+              </div>
+              <button
+                type="button"
+                className="notes-settings-close"
+                onClick={() => setIsSettingsOpen(false)}
+                aria-label={'\u5173\u95ed\u8bbe\u7f6e'}
+              />
+            </header>
+
+            <div className="notes-settings-layout">
+              <nav className="notes-settings-tabs" aria-label={'\u8bbe\u7f6e\u5206\u7ec4'}>
+                <button
+                  type="button"
+                  className={settingsSection === 'categories' ? 'active' : ''}
+                  onClick={() => setSettingsSection('categories')}
+                >
+                  <strong>{'\u7c7b\u76ee\u7ba1\u7406'}</strong>
+                </button>
+                <button
+                  type="button"
+                  className={settingsSection === 'blog' ? 'active' : ''}
+                  onClick={() => setSettingsSection('blog')}
+                >
+                  <strong>{'\u535a\u5ba2\u7ba1\u7406'}</strong>
+                </button>
+                <button
+                  type="button"
+                  className={settingsSection === 'publish' ? 'active' : ''}
+                  onClick={() => {
+                    setSettingsSection('publish');
+                    void refreshPublishStatus();
+                  }}
+                >
+                  <strong>{'\u53d1\u5e03\u7ba1\u7406'}</strong>
+                </button>
+              </nav>
+
+              <div className="notes-settings-content">
+                {settingsSection === 'categories' ? (
+                  <section className="notes-settings-section">
+                    <div className="notes-settings-category-list">
+                      {categoryCounts.length > 0 ? (
+                        categoryCounts.map((category, index) => (
+                          <div
+                            key={category.slug}
+                            className={[
+                              'notes-settings-category-row',
+                              draggingCategorySlug === category.slug ? 'dragging' : '',
+                            ]
+                              .filter(Boolean)
+                              .join(' ')}
+                            data-category-slug={category.slug}
+                            onPointerEnter={() => handleCategoryPointerEnter(category.slug)}
+                          >
+                            <span
+                              className="notes-settings-icon-button tone-handle"
+                              role="button"
+                              tabIndex={isBusy ? -1 : 0}
+                              aria-disabled={isBusy}
+                              onPointerDown={(event) => beginCategoryPointerDrag(event, category.slug)}
+                              onKeyDown={(event) => {
+                                if (isBusy) {
+                                  return;
+                                }
+
+                                if (event.key === 'ArrowUp' && index > 0) {
+                                  event.preventDefault();
+                                  void reorderCategoryToTarget(category.slug, categoryCounts[index - 1].slug);
+                                }
+
+                                if (event.key === 'ArrowDown' && index < categoryCounts.length - 1) {
+                                  event.preventDefault();
+                                  void reorderCategoryToTarget(category.slug, categoryCounts[index + 1].slug);
+                                }
+                              }}
+                              title={'\u62d6\u52a8\u6392\u5e8f'}
+                              aria-label={`\u62d6\u52a8\u6392\u5e8f ${category.label}`}
+                            >
+                              <ToolbarSvg>
+                                <path d="M5 4.2h.1" />
+                                <path d="M8 4.2h.1" />
+                                <path d="M11 4.2h.1" />
+                                <path d="M5 8h.1" />
+                                <path d="M8 8h.1" />
+                                <path d="M11 8h.1" />
+                                <path d="M5 11.8h.1" />
+                                <path d="M8 11.8h.1" />
+                                <path d="M11 11.8h.1" />
+                              </ToolbarSvg>
+                            </span>
+                            <div className="notes-settings-category-main">
+                              <strong>{category.label}</strong>
+                              <span>{category.labelEn?.trim() || '\u672a\u8bbe\u7f6e\u82f1\u6587'}</span>
+                            </div>
+                            <span className="notes-settings-category-count">
+                              {category.count} {'\u7bc7'}
+                            </span>
+                            <div className="notes-settings-row-actions">
+                              <button
+                                type="button"
+                                className="notes-settings-icon-button tone-edit"
+                                onClick={() => openEditCategoryDialog(category)}
+                                disabled={isBusy}
+                                title={'\u7f16\u8f91\u7c7b\u76ee'}
+                                aria-label={`\u7f16\u8f91 ${category.label}`}
+                              >
+                                <ToolbarSvg>
+                                  <path d="M3 11.8 2.4 14l2.2-.6L12.9 5.1 10.9 3 3 11.8Z" />
+                                  <path d="m9.9 4 2.1 2.1" />
+                                </ToolbarSvg>
+                              </button>
+                              <button
+                                type="button"
+                                className="notes-settings-icon-button danger"
+                                onClick={() => void deleteSelectedCategory(category)}
+                                disabled={isBusy}
+                                title={'\u5220\u9664\u7c7b\u76ee'}
+                                aria-label={`\u5220\u9664 ${category.label}`}
+                              >
+                                <ToolbarSvg>
+                                  <path d="M5.1 3.2h5.8" />
+                                  <path d="M6.2 3.2v-1h3.6v1" />
+                                  <path d="M4.2 5h7.6l-.5 8H4.7l-.5-8Z" />
+                                  <path d="M6.6 6.6v4.6" />
+                                  <path d="M9.4 6.6v4.6" />
+                                </ToolbarSvg>
+                              </button>
+                            </div>
+                          </div>
+                        ))
+                      ) : null}
+
+                      <button
+                        type="button"
+                        className="notes-settings-category-create"
+                        onClick={openCreateCategoryDialog}
+                        disabled={isBusy}
+                        aria-label={'\u65b0\u5efa\u7c7b\u76ee'}
+                        title={'\u65b0\u5efa\u7c7b\u76ee'}
+                      >
+                        <span className="notes-settings-category-create-plus">+</span>
+                      </button>
+                    </div>
+                  </section>
+                ) : null}
+
+                {settingsSection === 'blog' ? (
+                  <section className="notes-settings-section">
+                    <div className="notes-settings-blog-grid">
+                      <div className="notes-settings-avatar-card">
+                        <button
+                          type="button"
+                          className="notes-settings-avatar"
+                          onClick={() => brandAvatarInputRef.current?.click()}
+                        >
+                          {brandAvatar ? <img src={brandAvatar} alt="" /> : <span>CB</span>}
+                        </button>
+                        <div>
+                          <strong>{'\u5934\u50cf'}</strong>
+                        </div>
+                      </div>
+
+                      <label className="notes-settings-field">
+                        <span>{'\u535a\u5ba2\u6807\u9898'}</span>
+                        <input
+                          value={siteConfigDraft.title}
+                          onChange={(event) => updateSiteConfigDraft({ title: event.target.value })}
+                        />
+                      </label>
+
+                      <label className="notes-settings-field">
+                        <span>{'\u4e2a\u6027\u7b7e\u540d'}</span>
+                        <input
+                          value={siteConfigDraft.tagline}
+                          onChange={(event) => updateSiteConfigDraft({ tagline: event.target.value })}
+                        />
+                      </label>
+
+                      <label className="notes-settings-field wide">
+                        <span>{'\u7ad9\u70b9\u5730\u5740'}</span>
+                        <input
+                          value={siteConfigDraft.baseUrl}
+                          onChange={(event) => updateSiteConfigDraft({ baseUrl: event.target.value })}
+                        />
+                      </label>
+
+                      <label className="notes-settings-field wide">
+                        <span>{'\u53cb\u94fe\u8bbe\u7f6e'}</span>
+                        <textarea
+                          value={friendLinksText}
+                          onChange={(event) => setFriendLinksText(event.target.value)}
+                          rows={5}
+                          placeholder={'\u540d\u79f0 | \u5730\u5740 | \u5907\u6ce8'}
+                        />
+                      </label>
+                    </div>
+                  </section>
+                ) : null}
+
+                {settingsSection === 'publish' ? (
+                  <section className="notes-settings-section">
+                    <div className="notes-settings-section-head actions-only">
+                      <button
+                        type="button"
+                        className="notes-settings-secondary"
+                        onClick={() => void refreshPublishStatus()}
+                        disabled={isPublishingSite}
+                      >
+                        {'\u5237\u65b0\u72b6\u6001'}
+                      </button>
+                    </div>
+
+                    <div className="notes-settings-blog-grid">
+                      <label className="notes-settings-field wide">
+                        <span>{'\u4ed3\u5e93\u5730\u5740'}</span>
+                        <input
+                          type="text"
+                          value={siteConfigDraft.repository?.remote ?? ''}
+                          onChange={(event) => updateRepositoryConfigDraft({ remote: event.target.value })}
+                          placeholder="https://github.com/user/repo.git"
+                        />
+                      </label>
+
+                      <label className="notes-settings-field">
+                        <span>{'\u53d1\u5e03\u5206\u652f'}</span>
+                        <input
+                          value={siteConfigDraft.repository?.branch ?? 'main'}
+                          onChange={(event) => updateRepositoryConfigDraft({ branch: event.target.value })}
+                        />
+                      </label>
+
+                      <label className="notes-settings-field">
+                        <span>{'Workflow'}</span>
+                        <input
+                          value={siteConfigDraft.repository?.workflow ?? 'deploy.yml'}
+                          onChange={(event) => updateRepositoryConfigDraft({ workflow: event.target.value })}
+                        />
+                      </label>
+
+                      <label className="notes-settings-field wide">
+                        <span>{'Pages URL'}</span>
+                        <input
+                          value={siteConfigDraft.repository?.pagesUrl ?? ''}
+                          onChange={(event) => updateRepositoryConfigDraft({ pagesUrl: event.target.value })}
+                          placeholder="https://user.github.io/repo/"
+                        />
+                      </label>
+
+                      <label className="notes-settings-field">
+                        <span>{'评论系统'}</span>
+                        <select
+                          value={siteConfigDraft.giscus?.enabled ? 'enabled' : 'disabled'}
+                          onChange={(event) =>
+                            updateGiscusConfigDraft({ enabled: event.target.value === 'enabled' })
+                          }
+                        >
+                          <option value="disabled">{'关闭'}</option>
+                          <option value="enabled">{'Giscus'}</option>
+                        </select>
+                      </label>
+
+                      <label className="notes-settings-field wide">
+                        <span>{'Giscus 仓库'}</span>
+                        <input
+                          value={siteConfigDraft.giscus?.repo ?? ''}
+                          onChange={(event) => updateGiscusConfigDraft({ repo: event.target.value })}
+                          placeholder="owner/repo"
+                        />
+                      </label>
+
+                      <label className="notes-settings-field">
+                        <span>{'Repo ID'}</span>
+                        <input
+                          value={siteConfigDraft.giscus?.repoId ?? ''}
+                          onChange={(event) => updateGiscusConfigDraft({ repoId: event.target.value })}
+                        />
+                      </label>
+
+                      <label className="notes-settings-field">
+                        <span>{'分类名称'}</span>
+                        <input
+                          value={siteConfigDraft.giscus?.category ?? 'Announcements'}
+                          onChange={(event) => updateGiscusConfigDraft({ category: event.target.value })}
+                          placeholder="Announcements"
+                        />
+                      </label>
+
+                      <label className="notes-settings-field wide">
+                        <span>{'Category ID'}</span>
+                        <input
+                          value={siteConfigDraft.giscus?.categoryId ?? ''}
+                          onChange={(event) => updateGiscusConfigDraft({ categoryId: event.target.value })}
+                        />
+                      </label>
+
+                      <label className="notes-settings-field">
+                        <span>{'语言'}</span>
+                        <input
+                          value={siteConfigDraft.giscus?.lang ?? 'zh-CN'}
+                          onChange={(event) => updateGiscusConfigDraft({ lang: event.target.value })}
+                          placeholder="zh-CN"
+                        />
+                      </label>
+
+                      <label className="notes-settings-field">
+                        <span>{'主题'}</span>
+                        <input
+                          value={siteConfigDraft.giscus?.theme ?? 'preferred_color_scheme'}
+                          onChange={(event) => updateGiscusConfigDraft({ theme: event.target.value })}
+                          placeholder="preferred_color_scheme"
+                        />
+                      </label>
+
+                      <pre className="notes-settings-publish-status">
+                        {publishStatus
+                          ? publishStatus.clean
+                            ? '\u5f53\u524d\u6ca1\u6709 content \u4fee\u6539\u3002'
+                            : publishStatus.shortStatus
+                          : '\u672a\u8bfb\u53d6 Git \u72b6\u6001\u3002'}
+                      </pre>
+                    </div>
+                  </section>
+                ) : null}
+              </div>
+            </div>
+          </section>
+        </div>
+      ) : null}
+
+      {categoryDialog ? (
+        <div className="notes-dialog-overlay notes-category-dialog-overlay" onClick={closeCategoryDialog}>
+          <section
+            className="notes-category-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="notes-category-dialog-title"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <header className="notes-category-dialog-header">
+              <div>
+                <h2 id="notes-category-dialog-title">
+                  {categoryDialog.mode === 'create' ? '\u65b0\u5efa\u7c7b\u76ee' : '\u7f16\u8f91\u7c7b\u76ee'}
+                </h2>
+                <span>
+                  {categoryDialog.mode === 'create'
+                    ? '\u586b\u5199\u540d\u79f0\u3001\u82f1\u6587\u540d\u548c\u8def\u7531'
+                    : '\u4fee\u6539\u663e\u793a\u540d\u548c web \u8def\u7531'}
+                </span>
+              </div>
+              <button
+                type="button"
+                className="notes-category-dialog-close"
+                onClick={closeCategoryDialog}
+                disabled={isBusy}
+                aria-label={'\u5173\u95ed\u7c7b\u76ee\u7f16\u8f91'}
+              />
+            </header>
+
+            <div className="notes-category-dialog-body">
+              <label className="notes-category-dialog-field">
+                <span>{'\u7c7b\u76ee\u540d\u79f0'}</span>
+                <input
+                  autoFocus
+                  value={categoryLabelValue}
+                  onChange={(event) => setCategoryLabelValue(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter' && categoryLabelValue.trim()) {
+                      event.preventDefault();
+                      void saveCategoryDialog();
+                    }
+                  }}
+                  placeholder={'\u4f8b\u5982\uff1a\u6570\u5b66\u7814\u7a76'}
+                />
+              </label>
+
+              <label className="notes-category-dialog-field">
+                <span>{'\u82f1\u6587\u540d\u79f0'}</span>
+                <input
+                  value={categoryLabelEnValue}
+                  onChange={(event) => setCategoryLabelEnValue(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter' && categoryLabelValue.trim()) {
+                      event.preventDefault();
+                      void saveCategoryDialog();
+                    }
+                  }}
+                  placeholder="Mathematics"
+                />
+              </label>
+
+              <label className="notes-category-dialog-field">
+                <span>{'\u8def\u7531'}</span>
+                <input
+                  value={categorySlugValue}
+                  onChange={(event) => setCategorySlugValue(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter' && categoryLabelValue.trim()) {
+                      event.preventDefault();
+                      void saveCategoryDialog();
+                    }
+                  }}
+                  placeholder="machine-learning"
+                />
+              </label>
+            </div>
+
+            <footer className="notes-category-dialog-actions">
+              <button type="button" className="notes-category-dialog-cancel" onClick={closeCategoryDialog} disabled={isBusy}>
+                {'\u53d6\u6d88'}
+              </button>
+              <button
+                type="button"
+                className="notes-category-dialog-submit"
+                onClick={() => void saveCategoryDialog()}
+                disabled={isBusy || !categoryLabelValue.trim()}
+              >
+                {isBusy
+                  ? '\u4fdd\u5b58\u4e2d...'
+                  : categoryDialog.mode === 'create'
+                    ? '\u65b0\u5efa'
+                    : '\u4fdd\u5b58'}
+              </button>
+            </footer>
+          </section>
+        </div>
+      ) : null}
+
+      {pendingSwitchItem ? (
+        <div className="notes-dialog-overlay" onClick={returnToCurrentDraft}>
+          <div
+            className="notes-unsaved-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="notes-unsaved-dialog-title"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="notes-unsaved-dialog-header">
+              <h2 id="notes-unsaved-dialog-title">{'\u6709\u672a\u4fdd\u5b58\u7684\u4fee\u6539'}</h2>
+              <p>{unsavedChangesMessage}</p>
+            </div>
+
+            <div className="notes-unsaved-dialog-body">
+              <span className="notes-unsaved-dialog-target">
+                {'\u5373\u5c06\u5207\u6362\u5230\uff1a'}
+                <strong>{pendingSwitchItem.frontmatter.title}</strong>
+              </span>
+              <p>
+                {
+                  '\u4f60\u53ef\u4ee5\u5148\u4fdd\u5b58\u5f53\u524d\u7b14\u8bb0\uff0c\u4e5f\u53ef\u4ee5\u4e22\u5f03\u672a\u4fdd\u5b58\u7684\u4fee\u6539\uff0c\u6216\u8fd4\u56de\u7ee7\u7eed\u7f16\u8f91\u3002'
+                }
+              </p>
+            </div>
+
+            <div className="notes-unsaved-dialog-actions">
+              <button
+                type="button"
+                className="notes-unsaved-dialog-primary"
+                onClick={() => void saveAndSwitchItem()}
+                disabled={isPendingSwitchSaving || isBusy}
+              >
+                {isPendingSwitchSaving ? '\u4fdd\u5b58\u4e2d...' : '\u4fdd\u5b58'}
+              </button>
+              <button
+                type="button"
+                className="notes-unsaved-dialog-danger"
+                onClick={discardAndSwitchItem}
+                disabled={isPendingSwitchSaving}
+              >
+                {'\u4e22\u5f03'}
+              </button>
+              <button
+                type="button"
+                className="notes-unsaved-dialog-cancel"
+                onClick={returnToCurrentDraft}
+                disabled={isPendingSwitchSaving}
+              >
+                {'\u8fd4\u56de'}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       {isCreateDialogOpen ? (
         <div className="notes-dialog-overlay" onClick={() => setIsCreateDialogOpen(false)}>
@@ -2440,12 +4491,104 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
             onClick={(event) => event.stopPropagation()}
           >
             <div className="notes-create-dialog-header">
-              <h2 id="notes-create-dialog-title">Create New Note</h2>
+              <h2 id="notes-create-dialog-title">{'\u65b0\u5efa\u7b14\u8bb0'}</h2>
               <button
                 type="button"
                 className="notes-create-dialog-close"
                 onClick={() => setIsCreateDialogOpen(false)}
-                aria-label="Close create note dialog"
+                aria-label={'\u5173\u95ed\u65b0\u5efa\u7b14\u8bb0\u7a97\u53e3'}
+              />
+            </div>
+
+            <div className="notes-create-dialog-body">
+              <label className="notes-create-dialog-field">
+                <span>{'\u6807\u9898'}</span>
+                <input
+                  ref={createTitleInputRef}
+                  value={createTitleValue}
+                  onChange={(event) => setCreateTitleValue(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter' && createTitleValue.trim() && createCategoryIsValid) {
+                      event.preventDefault();
+                      void confirmCreateNote();
+                    }
+                  }}
+                  placeholder={'\u8f93\u5165\u7b14\u8bb0\u6807\u9898'}
+                />
+              </label>
+
+              <label className="notes-create-dialog-field">
+                <span>{'\u8def\u7531'}</span>
+                <input
+                  value={createSlugValue}
+                  onChange={(event) => setCreateSlugValue(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter' && createTitleValue.trim() && createCategoryIsValid) {
+                      event.preventDefault();
+                      void confirmCreateNote();
+                    }
+                  }}
+                  placeholder={'\u7559\u7a7a\u5219\u6309\u6807\u9898\u81ea\u52a8\u751f\u6210'}
+                />
+              </label>
+
+              <label className="notes-create-dialog-field">
+                <span>{'\u7c7b\u76ee'}</span>
+                <select value={createCategoryValue} onChange={(event) => setCreateCategoryValue(event.target.value)}>
+                  {categories.map((category) => (
+                    <option key={category.slug} value={category.slug}>
+                      {category.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+
+              <label className="notes-create-dialog-field">
+                <span>{'\u7b14\u8bb0\u7c7b\u578b'}</span>
+                <select
+                  value={createTypeValue}
+                  onChange={(event) => setCreateTypeValue(event.target.value as ContentDraft['type'])}
+                >
+                  <option value="markdown">Markdown {'\u7b14\u8bb0'}</option>
+                  <option value="inknote">{'\u624b\u5199\u7b14\u8bb0'}</option>
+                </select>
+              </label>
+            </div>
+
+            <div className="notes-create-dialog-actions">
+              <button type="button" className="notes-create-dialog-cancel" onClick={() => setIsCreateDialogOpen(false)}>
+                {'\u53d6\u6d88'}
+              </button>
+              <button
+                type="button"
+                className="notes-create-dialog-submit"
+                onClick={() => void confirmCreateNote()}
+                disabled={!createTitleValue.trim() || !createCategoryIsValid}
+              >
+                {'\u521b\u5efa'}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {/*
+      {isCreateDialogOpen ? (
+        <div className="notes-dialog-overlay" onClick={() => setIsCreateDialogOpen(false)}>
+          <div
+            className="notes-create-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="notes-create-dialog-title"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="notes-create-dialog-header">
+              <h2 id="notes-create-dialog-title">新建笔记</h2>
+              <button
+                type="button"
+                className="notes-create-dialog-close"
+                onClick={() => setIsCreateDialogOpen(false)}
+                aria-label="关闭新建笔记窗口"
               >
                 ×
               </button>
@@ -2453,7 +4596,7 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
 
             <div className="notes-create-dialog-body">
               <label className="notes-create-dialog-field">
-                <span>Title</span>
+                <span>标题</span>
                 <input
                   ref={createTitleInputRef}
                   value={createTitleValue}
@@ -2464,14 +4607,13 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
                       confirmCreateNote();
                     }
                   }}
-                  placeholder="Enter note title"
+                  placeholder="输入笔记标题"
                 />
               </label>
 
               <label className="notes-create-dialog-field">
-                <span>Category</span>
+                <span>类目</span>
                 <select value={createCategoryValue} onChange={(event) => setCreateCategoryValue(event.target.value)}>
-                  <option value="">Select a category</option>
                   {categories.map((category) => (
                     <option key={category.slug} value={category.slug}>
                       {category.label}
@@ -2481,20 +4623,20 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
               </label>
 
               <label className="notes-create-dialog-field">
-                <span>Type</span>
+                <span>笔记类型</span>
                 <select
                   value={createTypeValue}
                   onChange={(event) => setCreateTypeValue(event.target.value as ContentDraft['type'])}
                 >
-                  <option value="markdown">Markdown</option>
-                  <option value="inknote">InkNote</option>
+                  <option value="markdown">Markdown 笔记</option>
+                  <option value="inknote">手写笔记</option>
                 </select>
               </label>
             </div>
 
             <div className="notes-create-dialog-actions">
               <button type="button" className="notes-create-dialog-cancel" onClick={() => setIsCreateDialogOpen(false)}>
-                Cancel
+                取消
               </button>
               <button
                 type="button"
@@ -2502,52 +4644,15 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
                 onClick={confirmCreateNote}
                 disabled={!createTitleValue.trim() || !createCategoryValue}
               >
-                Create
+                创建
               </button>
             </div>
           </div>
         </div>
       ) : null}
 
-      {categoryMenu && categoryMenuCategory ? (
-        <div ref={categoryMenuRef} className="notes-context-menu" style={categoryMenuStyle} role="menu">
-          <button
-            type="button"
-            className="notes-context-menu-item"
-            onClick={() => {
-              setCategoryMenu(null);
-              void renameSelectedCategory(categoryMenuCategory);
-            }}
-          >
-            <span className="notes-context-menu-icon" aria-hidden="true">
-              <ToolbarSvg>
-                <path d="M3 11.8 2.4 14l2.2-.6L12.9 5.1 10.9 3 3 11.8Z" />
-                <path d="m9.9 4 2.1 2.1" />
-              </ToolbarSvg>
-            </span>
-            <span>重命名</span>
-          </button>
-          <button
-            type="button"
-            className="notes-context-menu-item danger"
-            onClick={() => {
-              setCategoryMenu(null);
-              void deleteSelectedCategory(categoryMenuCategory);
-            }}
-          >
-            <span className="notes-context-menu-icon" aria-hidden="true">
-              <ToolbarSvg>
-                <path d="M5.1 3.2h5.8" />
-                <path d="M6.2 3.2v-1h3.6v1" />
-                <path d="M4.2 5h7.6l-.5 8H4.7l-.5-8Z" />
-                <path d="M6.6 6.6v4.6" />
-                <path d="M9.4 6.6v4.6" />
-              </ToolbarSvg>
-            </span>
-            <span>删除</span>
-          </button>
-        </div>
-      ) : null}
+      */}
+
     </div>
   );
 }

@@ -6,6 +6,7 @@ export interface BaseFrontmatter {
   type: ContentType;
   title: string;
   slug: string;
+  order?: number;
   date: string;
   updatedAt?: string;
   summary?: string;

@@ -2,8 +2,9 @@
 type: markdown
 title: 强化学习重学系列(15) Maximum Entropy IRL
 slug: 15-maximum-entropy-irl
+order: 1
 date: 2026-04-09
-updatedAt: 2026-04-09 21:06:11
+updatedAt: 2026-06-16 21:27:19
 published: true
 category: machine-learning
 ---

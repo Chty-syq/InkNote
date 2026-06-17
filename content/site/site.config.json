@@ -44,5 +44,37 @@
       "href": "/about",
       "description": "关于这个博客"
     }
-  ]
+  ],
+  "friendLinks": [
+    {
+      "label": "友链位置 A",
+      "href": "#",
+      "note": "后续可替换为朋友或常用站点。"
+    },
+    {
+      "label": "友链位置 B",
+      "href": "#",
+      "note": "保留给技术博客或项目站点。"
+    }
+  ],
+  "repository": {
+    "remote": "",
+    "branch": "main",
+    "pagesUrl": "",
+    "workflow": "deploy.yml"
+  },
+  "giscus": {
+    "enabled": true,
+    "repo": "Chty-syq/InkNote",
+    "repoId": "R_kgDOS4ofng",
+    "category": "Announcements",
+    "categoryId": "DIC_kwDOS4ofns4C_U79",
+    "mapping": "pathname",
+    "strict": false,
+    "reactionsEnabled": true,
+    "emitMetadata": false,
+    "inputPosition": "bottom",
+    "theme": "preferred_color_scheme",
+    "lang": "zh-CN"
+  }
 }

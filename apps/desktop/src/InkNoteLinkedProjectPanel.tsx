@@ -181,26 +181,55 @@ export function InkNoteProjectPreviewPanel({
 }: Pick<InkNoteProjectPanelProps, 'project' | 'projectPath' | 'status'>) {
   const [previewPages, setPreviewPages] = useState<PreviewPage[]>([]);
   const [renderError, setRenderError] = useState<string | null>(null);
+  const [isRenderPending, setIsRenderPending] = useState(false);
   const deferredProject = useDeferredValue(project);
 
   useEffect(() => {
     if (!deferredProject) {
       setPreviewPages([]);
       setRenderError(null);
+      setIsRenderPending(false);
       return;
     }
 
-    try {
-      const renderedPages = renderNotebookPages(deferredProject, 0.42).map((canvas, index) => ({
-        pageNumber: index + 1,
-        dataUrl: canvas.toDataURL('image/png'),
-      }));
-      setPreviewPages(renderedPages);
-      setRenderError(null);
-    } catch (error) {
-      setPreviewPages([]);
-      setRenderError(error instanceof Error ? error.message : 'Failed to render notebook preview.');
-    }
+    let cancelled = false;
+    setIsRenderPending(true);
+
+    const timeout = window.setTimeout(() => {
+      if (cancelled) {
+        return;
+      }
+
+      try {
+        const renderedPages = renderNotebookPages(deferredProject, 0.42).map((canvas, index) => ({
+          pageNumber: index + 1,
+          dataUrl: canvas.toDataURL('image/png'),
+        }));
+
+        if (cancelled) {
+          return;
+        }
+
+        setPreviewPages(renderedPages);
+        setRenderError(null);
+      } catch (error) {
+        if (cancelled) {
+          return;
+        }
+
+        setPreviewPages([]);
+        setRenderError(error instanceof Error ? error.message : 'Failed to render notebook preview.');
+      } finally {
+        if (!cancelled) {
+          setIsRenderPending(false);
+        }
+      }
+    }, 180);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timeout);
+    };
   }, [deferredProject]);
 
   if (!project) {
@@ -223,7 +252,7 @@ export function InkNoteProjectPreviewPanel({
           <h3>Notebook Preview</h3>
           <p>{getProjectPathLabel(projectPath)}</p>
         </div>
-        <span>{renderError ? 'Preview error' : `${previewPages.length || 1} page(s)`}</span>
+        <span>{isRenderPending ? 'Rendering...' : renderError ? 'Preview error' : `${previewPages.length || 1} page(s)`}</span>
       </div>
 
       {renderError ? (

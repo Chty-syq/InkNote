@@ -1,14 +1,15 @@
 ---
 type: markdown
 title: Generative Adversarial Imitation Learning
-slug: new-markdown
+slug: 3187429
+order: 2
 date: 2026-04-08
-updatedAt: 2026-04-09 20:53:41
+updatedAt: 2026-06-14 11:53:25
 published: true
 category: machine-learning
 ---
 
-## 1. Characterizing the Induced Optimal Policy
+## 1. *Characterizing the Induced Optimal Policy*
 
 在之前的文章 [Maximum Entropy IRL](http://blog.leanote.com/post/chty_syq/%E5%BC%BA%E5%8C%96%E5%AD%A6%E4%B9%A0%E9%87%8D%E5%AD%A6%E7%B3%BB%E5%88%97-15-Maximum-Entropy-IRL) 中，我们利用最大熵原理，将轨迹分布建模为 *Boltzmann distribution(玻尔兹曼分布)*
 

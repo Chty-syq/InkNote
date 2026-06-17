@@ -19,6 +19,7 @@ export interface ContentDraft {
   sourceRelativePath: string | null;
   title: string;
   slug: string;
+  order: number | null;
   date: string;
   updatedAt: string;
   summary: string;
@@ -50,15 +51,44 @@ export const CONTENT_TYPE_DESCRIPTIONS: Record<ContentType, string> = {
 };
 
 function toStringValue(value: unknown): string {
-  return typeof value === 'string' ? value : '';
+  if (typeof value === 'string') {
+    return value;
+  }
+
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return String(value);
+  }
+
+  if (typeof value === 'boolean') {
+    return String(value);
+  }
+
+  return '';
 }
 
 function toBooleanValue(value: unknown, fallback = false): boolean {
   return typeof value === 'boolean' ? value : fallback;
 }
 
+function toOrderValue(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return Math.trunc(value);
+  }
+
+  if (typeof value === 'string' && /^-?\d+$/.test(value.trim())) {
+    return Number.parseInt(value.trim(), 10);
+  }
+
+  return null;
+}
+
 function normalizeInlineList(value: unknown): string {
-  return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string').join(', ') : '';
+  return Array.isArray(value)
+    ? value
+        .map((item) => toStringValue(item))
+        .filter(Boolean)
+        .join(', ')
+    : '';
 }
 
 function splitInlineList(value: string): string[] {
@@ -68,9 +98,14 @@ function splitInlineList(value: string): string[] {
     .filter(Boolean);
 }
 
-function pushScalar(lines: string[], key: string, value: string | boolean | undefined) {
+function pushScalar(lines: string[], key: string, value: string | number | boolean | undefined | null) {
   if (typeof value === 'boolean') {
     lines.push(`${key}: ${value ? 'true' : 'false'}`);
+    return;
+  }
+
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    lines.push(`${key}: ${value}`);
     return;
   }
 
@@ -133,9 +168,10 @@ export function createDraftFromItem(item: ContentLibraryItem): ContentDraft {
     type: base.type,
     relativePath: item.relativePath,
     sourceRelativePath: item.relativePath,
-    title: base.title,
-    slug: base.slug,
-    date: base.date,
+    title: toStringValue(base.title) || 'Untitled',
+    slug: toStringValue(base.slug) || item.folderName,
+    order: toOrderValue(base.order),
+    date: toStringValue(base.date) || new Date().toISOString().slice(0, 10),
     updatedAt: toStringValue(base.updatedAt),
     summary: toStringValue(base.summary),
     cover: toStringValue(base.cover),
@@ -182,6 +218,7 @@ export function createEmptyDraft(type: ContentType): ContentDraft {
     sourceRelativePath: null,
     title: `Untitled ${type}`,
     slug: type === 'markdown' ? 'new-markdown' : 'new-inknote',
+    order: null,
     date: today,
     updatedAt: today,
     summary: '',
@@ -239,6 +276,7 @@ export function serializeContentDraft(draft: Omit<ContentDraft, 'savedSnapshot'>
   pushScalar(lines, 'type', draft.type);
   pushScalar(lines, 'title', draft.title);
   pushScalar(lines, 'slug', draft.slug);
+  pushScalar(lines, 'order', draft.order);
   pushScalar(lines, 'date', draft.date);
   pushScalar(lines, 'updatedAt', draft.updatedAt);
   pushScalar(lines, 'summary', draft.summary);

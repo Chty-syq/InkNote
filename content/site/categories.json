@@ -1,10 +1,20 @@
 [
   {
     "slug": "machine-learning",
-    "label": "机器学习"
+    "label": "机器学习",
+    "labelEn": "Machine Learning",
+    "order": 1
   },
   {
-    "slug": "classical-notes",
-    "label": "古典摘录"
+    "slug": "mathmatics",
+    "label": "数学研究",
+    "labelEn": "Mathmatics",
+    "order": 2
+  },
+  {
+    "slug": "classics",
+    "label": "古典摘录",
+    "labelEn": "Classics",
+    "order": 3
   }
 ]

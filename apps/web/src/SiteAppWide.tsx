@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useState, type CSSProperties, type FormEvent, type MouseEvent, type ReactNode } from 'react';
-import type { ContentFrontmatter, InkNoteFrontmatter, MarkdownFrontmatter } from '@inknote/content-schema';
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type MouseEvent, type ReactNode } from 'react';
+import type { ContentFrontmatter, GiscusConfig, InkNoteFrontmatter, MarkdownFrontmatter } from '@inknote/content-schema';
 import {
   contentIndex,
   findCategory,
@@ -11,7 +11,7 @@ import {
   getDocumentCategorySlugForRoute,
   type RoutedDocument,
 } from './lib/content';
-import { renderMarkdown } from './lib/markdown';
+import { extractMarkdownHeadings, renderInlineMarkdown, renderMarkdown, type MarkdownHeading } from './lib/markdown';
 
 type Route =
   | { type: 'home' }
@@ -34,6 +34,31 @@ type PortalEntry = {
   tags: string[];
   searchText: string;
 };
+
+type DetailMetaItem =
+  | {
+      type: 'date';
+      label: string;
+    }
+  | {
+      type: 'tag';
+      label: string;
+    };
+
+type ResolvedGiscusConfig = Pick<
+  GiscusConfig,
+  | 'repo'
+  | 'repoId'
+  | 'category'
+  | 'categoryId'
+  | 'mapping'
+  | 'strict'
+  | 'reactionsEnabled'
+  | 'emitMetadata'
+  | 'inputPosition'
+  | 'theme'
+  | 'lang'
+>;
 
 const CATEGORY_ACCENTS = ['orange', 'blue', 'green', 'amber', 'slate'] as const;
 
@@ -58,6 +83,38 @@ const FRIEND_LINKS = [
 
 const VISIBLE_MARKDOWN = contentIndex.notes.filter((note) => note.frontmatter.published);
 const VISIBLE_INKNOTES = contentIndex.inknotes.filter((note) => note.frontmatter.published);
+const ACTIVE_FRIEND_LINKS =
+  contentIndex.siteConfig.friendLinks && contentIndex.siteConfig.friendLinks.length > 0
+    ? contentIndex.siteConfig.friendLinks
+    : FRIEND_LINKS;
+
+function resolveGiscusConfig(config: GiscusConfig | undefined): ResolvedGiscusConfig | null {
+  if (
+    !config?.enabled ||
+    !config.repo.trim() ||
+    !config.repoId.trim() ||
+    !config.category.trim() ||
+    !config.categoryId.trim()
+  ) {
+    return null;
+  }
+
+  return {
+    repo: config.repo.trim(),
+    repoId: config.repoId.trim(),
+    category: config.category.trim(),
+    categoryId: config.categoryId.trim(),
+    mapping: config.mapping || 'pathname',
+    strict: Boolean(config.strict),
+    reactionsEnabled: config.reactionsEnabled !== false,
+    emitMetadata: Boolean(config.emitMetadata),
+    inputPosition: config.inputPosition === 'top' ? 'top' : 'bottom',
+    theme: config.theme?.trim() || 'preferred_color_scheme',
+    lang: config.lang?.trim() || 'zh-CN',
+  };
+}
+
+const ACTIVE_GISCUS_CONFIG = resolveGiscusConfig(contentIndex.siteConfig.giscus);
 
 function normalizePathname(pathname: string): string {
   if (!pathname || pathname === '/') {
@@ -276,6 +333,16 @@ function buildTagCloud(entries: PortalEntry[]): Array<{ tag: string; count: numb
 
 const GLOBAL_TAG_CLOUD = buildTagCloud(GLOBAL_ENTRIES);
 
+function getTagTone(tag: string): 'blue' | 'teal' | 'green' | 'amber' | 'violet' {
+  const tones = ['blue', 'teal', 'green', 'amber', 'violet'] as const;
+  let hash = 0;
+  for (const character of tag) {
+    hash = (hash * 31 + character.charCodeAt(0)) | 0;
+  }
+
+  return tones[Math.abs(hash) % tones.length];
+}
+
 function handleInternalLink(event: MouseEvent<HTMLAnchorElement>, href: string, navigate: (href: string) => void) {
   if (!href.startsWith('/') || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) {
     return;
@@ -355,7 +422,9 @@ function CategoryBar({ route, navigate }: { route: Route; navigate: (href: strin
             className={isActive ? `blog-category-pill ${accentClass} active` : `blog-category-pill ${accentClass}`}
           >
             <span className="blog-category-pill-label">{normalizeLabel(category.label)}</span>
-            <span className="blog-category-pill-subtitle">{toCategorySubtitle(category.slug)}</span>
+            <span className="blog-category-pill-subtitle">
+              {category.labelEn?.trim() || toCategorySubtitle(category.slug)}
+            </span>
           </SiteLink>
         );
       })}
@@ -460,7 +529,7 @@ function SiteSidebar({
               <button
                 key={tag.tag}
                 type="button"
-                className="blog-tag-chip"
+                className={`blog-tag-chip tone-${getTagTone(tag.tag)}`}
                 onClick={() => {
                   setQuery(tag.tag);
                   navigate('/');
@@ -478,7 +547,7 @@ function SiteSidebar({
 
       <SidebarSection title="友情链接">
         <ul className="blog-link-list" id="blog-links">
-          {FRIEND_LINKS.map((link) => (
+          {ACTIVE_FRIEND_LINKS.map((link) => (
             <li key={link.label}>
               <SmartLink href={link.href} navigate={navigate} className="blog-link-item">
                 <strong>{link.label}</strong>
@@ -489,6 +558,101 @@ function SiteSidebar({
         </ul>
       </SidebarSection>
     </aside>
+  );
+}
+
+function ArticleTocSidebar({ headings, extra }: { headings: MarkdownHeading[]; extra?: ReactNode }) {
+  const handleTocJump = (id: string) => {
+    if (typeof document === 'undefined' || typeof window === 'undefined') {
+      return;
+    }
+
+    const target = document.getElementById(id);
+    if (!target) {
+      return;
+    }
+
+    target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+
+    const url = new URL(window.location.href);
+    url.hash = id;
+    window.history.replaceState(null, '', url.toString());
+  };
+
+  return (
+    <aside className="blog-sidebar blog-sidebar-toc">
+      <SidebarSection title="目录">
+        {headings.length > 0 ? (
+          <ol className="blog-toc-list">
+            {headings.map((heading) => (
+              <li key={heading.id} className="blog-toc-item" style={{ '--toc-level': heading.level } as CSSProperties}>
+                <button
+                  type="button"
+                  className="blog-toc-link"
+                  onClick={() => handleTocJump(heading.id)}
+                  aria-label={heading.text}
+                >
+                  <span className="blog-toc-link-label">{renderInlineMarkdown(heading.markdown)}</span>
+                </button>
+              </li>
+            ))}
+          </ol>
+        ) : (
+          <p className="blog-sidebar-note">正文里还没有可加入目录的标题。</p>
+        )}
+      </SidebarSection>
+
+      {extra}
+    </aside>
+  );
+}
+
+function GiscusThread({ threadKey }: { threadKey: string }) {
+  const containerRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!ACTIVE_GISCUS_CONFIG || !containerRef.current) {
+      return;
+    }
+
+    const container = containerRef.current;
+    container.innerHTML = '';
+
+    const script = document.createElement('script');
+    script.src = 'https://giscus.app/client.js';
+    script.async = true;
+    script.crossOrigin = 'anonymous';
+    script.setAttribute('data-repo', ACTIVE_GISCUS_CONFIG.repo);
+    script.setAttribute('data-repo-id', ACTIVE_GISCUS_CONFIG.repoId);
+    script.setAttribute('data-category', ACTIVE_GISCUS_CONFIG.category);
+    script.setAttribute('data-category-id', ACTIVE_GISCUS_CONFIG.categoryId);
+    script.setAttribute('data-mapping', ACTIVE_GISCUS_CONFIG.mapping);
+    script.setAttribute('data-strict', ACTIVE_GISCUS_CONFIG.strict ? '1' : '0');
+    script.setAttribute('data-reactions-enabled', ACTIVE_GISCUS_CONFIG.reactionsEnabled ? '1' : '0');
+    script.setAttribute('data-emit-metadata', ACTIVE_GISCUS_CONFIG.emitMetadata ? '1' : '0');
+    script.setAttribute('data-input-position', ACTIVE_GISCUS_CONFIG.inputPosition);
+    script.setAttribute('data-theme', ACTIVE_GISCUS_CONFIG.theme);
+    script.setAttribute('data-lang', ACTIVE_GISCUS_CONFIG.lang);
+    script.setAttribute('data-loading', 'lazy');
+
+    container.appendChild(script);
+
+    return () => {
+      container.innerHTML = '';
+    };
+  }, [threadKey]);
+
+  if (!ACTIVE_GISCUS_CONFIG) {
+    return null;
+  }
+
+  return (
+    <section className="blog-comments-panel">
+      <div className="blog-comments-head">
+        <h3>评论</h3>
+      </div>
+      <div ref={containerRef} className="blog-comments-embed" />
+    </section>
   );
 }
 
@@ -507,13 +671,8 @@ function ArticleCard({ entry, navigate }: { entry: PortalEntry; navigate: (href:
             <span className="blog-card-meta-icon clock" aria-hidden="true" />
             <span>{entry.date}</span>
           </span>
-          <span className="blog-card-meta-item">
-            <span className="blog-card-meta-icon folder" aria-hidden="true" />
-            <span>{entry.categoryLabel}</span>
-          </span>
-          <span className={`blog-card-badge ${entry.accentClass}`}>{entry.typeLabel}</span>
           {entry.tags.slice(0, 2).map((tag) => (
-            <span key={tag} className="blog-card-tag">
+            <span key={tag} className={`blog-card-tag tone-${getTagTone(tag)}`}>
               {tag}
             </span>
           ))}
@@ -666,31 +825,40 @@ function DetailPage<TFrontmatter extends ContentFrontmatter>({
   eyebrow,
   document,
   meta,
-  navigate,
-  query,
-  setQuery,
   aside,
+  showComments = false,
 }: {
   eyebrow: string;
   document: RoutedDocument<TFrontmatter>;
-  meta: string[];
-  navigate: (href: string) => void;
-  query: string;
-  setQuery: (value: string) => void;
+  meta: DetailMetaItem[];
   aside?: ReactNode;
+  showComments?: boolean;
 }) {
+  const headings = useMemo(() => extractMarkdownHeadings(document.body, { minLevel: 1, maxLevel: 4 }), [document.body]);
+
   return (
     <div className="blog-layout detail">
       <section className="blog-main-column">
         <section className="blog-panel detail-header">
-          <p className="blog-panel-eyebrow">{eyebrow}</p>
           <div className="blog-panel-head single">
             <div>
               <h2>{document.frontmatter.title}</h2>
               <div className="blog-detail-meta">
-                {meta.map((item, index) => (
-                  <span key={`${item}-${index}`}>{item}</span>
-                ))}
+                {meta.map((item, index) =>
+                  item.type === 'date' ? (
+                    <span key={`${item.type}-${item.label}-${index}`} className="blog-card-meta-item">
+                      <span className="blog-card-meta-icon clock" aria-hidden="true" />
+                      <span>{item.label}</span>
+                    </span>
+                  ) : (
+                    <span
+                      key={`${item.type}-${item.label}-${index}`}
+                      className={`blog-card-tag tone-${getTagTone(item.label)}`}
+                    >
+                      {item.label}
+                    </span>
+                  ),
+                )}
               </div>
               {document.frontmatter.summary ? <p>{document.frontmatter.summary}</p> : null}
             </div>
@@ -698,9 +866,10 @@ function DetailPage<TFrontmatter extends ContentFrontmatter>({
         </section>
 
         <article className="markdown-body">{renderMarkdown(document.body)}</article>
+        {showComments ? <GiscusThread key={document.href} threadKey={document.href} /> : null}
       </section>
 
-      <SiteSidebar navigate={navigate} query={query} setQuery={setQuery} extra={aside} />
+      <ArticleTocSidebar headings={headings} extra={aside} />
     </div>
   );
 }
@@ -805,13 +974,10 @@ export default function SiteAppWide() {
         eyebrow="Markdown"
         document={note}
         meta={[
-          note.frontmatter.date,
-          normalizeLabel(getDocumentCategoryLabel(note.frontmatter)),
-          note.frontmatter.readingTime ?? formatTags(note.frontmatter.tags),
+          { type: 'date', label: note.frontmatter.date },
+          ...(note.frontmatter.tags ?? []).map((tag) => ({ type: 'tag' as const, label: tag })),
         ]}
-        navigate={navigate}
-        query={searchQuery}
-        setQuery={setSearchQuery}
+        showComments
       />
     ) : (
       <NotFoundPage navigate={navigate} query={searchQuery} setQuery={setSearchQuery} />
@@ -823,15 +989,12 @@ export default function SiteAppWide() {
         eyebrow="InkNote"
         document={note}
         meta={[
-          note.frontmatter.date,
-          normalizeLabel(getDocumentCategoryLabel(note.frontmatter)),
-          note.frontmatter.paperStyle,
-          note.frontmatter.handwritingStyle,
+          { type: 'date', label: note.frontmatter.date },
+          { type: 'tag', label: note.frontmatter.paperStyle },
+          { type: 'tag', label: note.frontmatter.handwritingStyle },
         ]}
-        navigate={navigate}
-        query={searchQuery}
-        setQuery={setSearchQuery}
         aside={<InkNoteAside note={note} />}
+        showComments
       />
     ) : (
       <NotFoundPage navigate={navigate} query={searchQuery} setQuery={setSearchQuery} />
@@ -842,10 +1005,7 @@ export default function SiteAppWide() {
       <DetailPage
         eyebrow="Page"
         document={pageDocument}
-        meta={[pageDocument.frontmatter.date]}
-        navigate={navigate}
-        query={searchQuery}
-        setQuery={setSearchQuery}
+        meta={[{ type: 'date', label: pageDocument.frontmatter.date }]}
       />
     ) : (
       <NotFoundPage navigate={navigate} query={searchQuery} setQuery={setSearchQuery} />

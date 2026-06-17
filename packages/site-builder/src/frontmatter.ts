@@ -11,10 +11,6 @@ function parseScalarValue(value: string): unknown {
     return false;
   }
 
-  if (/^-?\d+$/.test(trimmed)) {
-    return Number.parseInt(trimmed, 10);
-  }
-
   if (
     (trimmed.startsWith('"') && trimmed.endsWith('"')) ||
     (trimmed.startsWith("'") && trimmed.endsWith("'"))
@@ -87,6 +83,41 @@ export function parseMarkdownDocument<T extends ContentFrontmatter = ContentFron
   };
 }
 
+export function getFrontmatterOrderValue(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return Math.trunc(value);
+  }
+
+  if (typeof value === 'string' && /^-?\d+$/.test(value.trim())) {
+    return Number.parseInt(value.trim(), 10);
+  }
+
+  return null;
+}
+
 export function sortDocumentsByDate<T extends { frontmatter: { date: string } }>(documents: T[]): T[] {
   return [...documents].sort((left, right) => right.frontmatter.date.localeCompare(left.frontmatter.date));
+}
+
+export function sortDocumentsByOrderAndDate<T extends { frontmatter: { order?: unknown; date: string } }>(
+  documents: T[],
+): T[] {
+  return [...documents].sort((left, right) => {
+    const leftOrder = getFrontmatterOrderValue(left.frontmatter.order);
+    const rightOrder = getFrontmatterOrderValue(right.frontmatter.order);
+
+    if (leftOrder !== null && rightOrder !== null && leftOrder !== rightOrder) {
+      return leftOrder - rightOrder;
+    }
+
+    if (leftOrder !== null && rightOrder === null) {
+      return -1;
+    }
+
+    if (leftOrder === null && rightOrder !== null) {
+      return 1;
+    }
+
+    return right.frontmatter.date.localeCompare(left.frontmatter.date);
+  });
 }

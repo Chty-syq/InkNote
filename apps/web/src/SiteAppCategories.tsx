@@ -279,7 +279,7 @@ function CategoryBar({ route, navigate }: { route: Route; navigate: (href: strin
             className={isActive ? `portal-category-link ${accentClass} active` : `portal-category-link ${accentClass}`}
           >
             <span className="portal-category-title">{category.label}</span>
-            <span className="portal-category-subtitle">{category.slug}</span>
+            <span className="portal-category-subtitle">{category.labelEn?.trim() || category.slug}</span>
             <span className="portal-category-count">{documents.length}</span>
           </SiteLink>
         );

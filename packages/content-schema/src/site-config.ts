@@ -9,6 +9,34 @@ export interface ChannelConfig {
   description: string;
 }
 
+export interface FriendLinkConfig {
+  label: string;
+  href: string;
+  note: string;
+}
+
+export interface RepositoryConfig {
+  remote: string;
+  branch: string;
+  pagesUrl: string;
+  workflow: string;
+}
+
+export interface GiscusConfig {
+  enabled: boolean;
+  repo: string;
+  repoId: string;
+  category: string;
+  categoryId: string;
+  mapping: 'pathname' | 'url' | 'title' | 'og:title' | 'specific' | 'number';
+  strict: boolean;
+  reactionsEnabled: boolean;
+  emitMetadata: boolean;
+  inputPosition: 'top' | 'bottom';
+  theme: string;
+  lang: string;
+}
+
 export interface SiteConfig {
   title: string;
   tagline: string;
@@ -24,6 +52,9 @@ export interface SiteConfig {
     secondaryLink?: HeroLink;
   };
   channels: ChannelConfig[];
+  friendLinks?: FriendLinkConfig[];
+  repository?: RepositoryConfig;
+  giscus?: GiscusConfig;
 }
 
 export interface NavigationItem {
@@ -39,4 +70,6 @@ export interface SocialLink {
 export interface ContentCategory {
   slug: string;
   label: string;
+  labelEn?: string;
+  order?: number;
 }

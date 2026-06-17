@@ -23,6 +23,15 @@ export interface PublishStatusResponse {
   clean: boolean;
 }
 
+export interface BlogPreviewServerResponse {
+  origin: string;
+  port: number;
+  running: boolean;
+  started: boolean;
+  ready: boolean;
+  message: string;
+}
+
 export function isTauri(): boolean {
   return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
 }
@@ -83,6 +92,33 @@ export async function getPublishStatus(): Promise<PublishStatusResponse> {
 
 export async function publishContentChanges(message: string): Promise<GitCommandResult> {
   return invoke('publish_content_changes', { message });
+}
+
+export async function ensureBlogPreviewServer(): Promise<BlogPreviewServerResponse> {
+  if (!isTauri()) {
+    return {
+      origin: 'http://localhost:4321',
+      port: 4321,
+      running: true,
+      started: false,
+      ready: true,
+      message: 'Browser preview mode.',
+    };
+  }
+
+  return invoke('ensure_blog_preview_server');
+}
+
+export async function openExternalUrl(url: string): Promise<void> {
+  if (isTauri()) {
+    await invoke('open_external_url', { url });
+    return;
+  }
+
+  const openedWindow = window.open(url, '_blank', 'noopener,noreferrer');
+  if (!openedWindow) {
+    throw new Error(`Unable to open ${url}`);
+  }
 }
 
 export function saveBlobWithBrowser(blob: Blob, filename: string): void {

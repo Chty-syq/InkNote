@@ -21,15 +21,21 @@ export function slugifyCategoryLabel(label: string): string {
     .toLowerCase();
 }
 
-function normalizeCategory(candidate: unknown): ContentCategory | null {
+function toOptionalString(value: unknown): string {
+  return typeof value === 'string' ? value.trim() : '';
+}
+
+function normalizeCategory(candidate: unknown, index: number): ContentCategory | null {
   if (!candidate || typeof candidate !== 'object') {
     return null;
   }
 
   const record = candidate as Record<string, unknown>;
-  const label = typeof record.label === 'string' ? record.label.trim() : '';
-  const slugSource = typeof record.slug === 'string' ? record.slug.trim() : label;
+  const label = toOptionalString(record.label);
+  const labelEn = toOptionalString(record.labelEn ?? record.english ?? record.subtitle);
+  const slugSource = toOptionalString(record.slug) || labelEn || label;
   const slug = slugifyCategoryLabel(slugSource);
+  const order = typeof record.order === 'number' && Number.isFinite(record.order) ? record.order : index + 1;
 
   if (!label || !slug) {
     return null;
@@ -38,6 +44,8 @@ function normalizeCategory(candidate: unknown): ContentCategory | null {
   return {
     slug,
     label,
+    ...(labelEn ? { labelEn } : {}),
+    order,
   };
 }
 
@@ -49,15 +57,25 @@ export function parseCategoryConfig(raw: string): ContentCategory[] {
     }
 
     return parsed
-      .map((entry) => normalizeCategory(entry))
-      .filter((entry): entry is ContentCategory => Boolean(entry));
+      .map((entry, index) => normalizeCategory(entry, index))
+      .filter((entry): entry is ContentCategory => Boolean(entry))
+      .sort((left, right) => (left.order ?? 0) - (right.order ?? 0));
   } catch {
     return [];
   }
 }
 
+export function normalizeCategoryOrder(categories: ContentCategory[]): ContentCategory[] {
+  return categories.map((category, index) => ({
+    slug: category.slug,
+    label: category.label,
+    ...(category.labelEn?.trim() ? { labelEn: category.labelEn.trim() } : {}),
+    order: index + 1,
+  }));
+}
+
 export function serializeCategoryConfig(categories: ContentCategory[]): string {
-  return `${JSON.stringify(categories, null, 2)}\n`;
+  return `${JSON.stringify(normalizeCategoryOrder(categories), null, 2)}\n`;
 }
 
 export function ensureUniqueCategorySlug(

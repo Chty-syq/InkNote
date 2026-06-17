@@ -1,15 +1,12 @@
 ---
 type: inknote
 title: 古诗古文摘录
-slug: classical-notes
+slug: 6719042
 date: 2026-04-08
 updatedAt: 2026-04-09 18:42:05
 summary: 示例 InkNote 条目，用来展示古诗古文摘录在桌面端和博客前端中的联动方式。
-tags:
-  - inknote
-  - classical
 published: true
-category: classical-notes
+category: classics
 paperStyle: school
 handwritingStyle: classical
 projectFile: notebook.inknote.json
