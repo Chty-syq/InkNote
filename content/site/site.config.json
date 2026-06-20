@@ -1,7 +1,7 @@
-﻿{
+{
   "title": "Chty's Blog",
   "tagline": "秋阴不散霜飞晚，留得残荷听雨声",
-  "description": "记录技术学习、长期写作与古典摘录的个人博客，内容由桌面端统一管理并同步发布到 web。",
+  "description": "记录技术学习、长期写作与古典摘录的个人博客。",
   "baseUrl": "https://example.github.io/inknote",
   "language": "zh-CN",
   "author": "Chty",
@@ -71,10 +71,15 @@
     "categoryId": "DIC_kwDOS4ofns4C_U79",
     "mapping": "pathname",
     "strict": false,
-    "reactionsEnabled": true,
+    "reactionsEnabled": false,
     "emitMetadata": false,
     "inputPosition": "bottom",
-    "theme": "preferred_color_scheme",
+    "theme": "noborder_light",
     "lang": "zh-CN"
+  },
+  "goatcounter": {
+    "enabled": true,
+    "endpoint": "https://chty.goatcounter.com/count",
+    "scriptUrl": "https://gc.zgo.at/count.js"
   }
 }

@@ -37,6 +37,12 @@ export interface GiscusConfig {
   lang: string;
 }
 
+export interface GoatCounterConfig {
+  enabled: boolean;
+  endpoint: string;
+  scriptUrl: string;
+}
+
 export interface SiteConfig {
   title: string;
   tagline: string;
@@ -55,6 +61,7 @@ export interface SiteConfig {
   friendLinks?: FriendLinkConfig[];
   repository?: RepositoryConfig;
   giscus?: GiscusConfig;
+  goatcounter?: GoatCounterConfig;
 }
 
 export interface NavigationItem {

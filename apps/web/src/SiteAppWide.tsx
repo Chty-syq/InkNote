@@ -1,5 +1,11 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type MouseEvent, type ReactNode } from 'react';
-import type { ContentFrontmatter, GiscusConfig, InkNoteFrontmatter, MarkdownFrontmatter } from '@inknote/content-schema';
+import type {
+  ContentFrontmatter,
+  GoatCounterConfig,
+  GiscusConfig,
+  InkNoteFrontmatter,
+  MarkdownFrontmatter,
+} from '@inknote/content-schema';
 import {
   contentIndex,
   findCategory,
@@ -15,6 +21,7 @@ import { extractMarkdownHeadings, renderInlineMarkdown, renderMarkdown, type Mar
 
 type Route =
   | { type: 'home' }
+  | { type: 'archive' }
   | { type: 'notes-list' }
   | { type: 'inknote-list' }
   | { type: 'category'; slug: string }
@@ -59,6 +66,12 @@ type ResolvedGiscusConfig = Pick<
   | 'theme'
   | 'lang'
 >;
+
+type ResolvedGoatCounterConfig = {
+  baseUrl: string;
+  endpoint: string;
+  scriptUrl: string;
+};
 
 const CATEGORY_ACCENTS = ['orange', 'blue', 'green', 'amber', 'slate'] as const;
 
@@ -109,12 +122,41 @@ function resolveGiscusConfig(config: GiscusConfig | undefined): ResolvedGiscusCo
     reactionsEnabled: config.reactionsEnabled !== false,
     emitMetadata: Boolean(config.emitMetadata),
     inputPosition: config.inputPosition === 'top' ? 'top' : 'bottom',
-    theme: config.theme?.trim() || 'preferred_color_scheme',
+    theme: config.theme?.trim() || 'noborder_light',
     lang: config.lang?.trim() || 'zh-CN',
   };
 }
 
 const ACTIVE_GISCUS_CONFIG = resolveGiscusConfig(contentIndex.siteConfig.giscus);
+
+function resolveGoatCounterConfig(config: GoatCounterConfig | undefined): ResolvedGoatCounterConfig | null {
+  if (!config?.enabled) {
+    return null;
+  }
+
+  const rawEndpoint = config.endpoint.trim().replace(/\/+$/, '');
+  if (!rawEndpoint) {
+    return null;
+  }
+
+  const baseUrl = rawEndpoint.endsWith('/count') ? rawEndpoint.slice(0, -'/count'.length) : rawEndpoint;
+  const endpoint = rawEndpoint.endsWith('/count') ? rawEndpoint : `${rawEndpoint}/count`;
+  const scriptUrl = config.scriptUrl.trim() || 'https://gc.zgo.at/count.js';
+
+  if (!baseUrl) {
+    return null;
+  }
+
+  return {
+    baseUrl,
+    endpoint,
+    scriptUrl,
+  };
+}
+
+const ACTIVE_GOATCOUNTER_CONFIG = resolveGoatCounterConfig(contentIndex.siteConfig.goatcounter);
+const goatCounterCountCache = new Map<string, string>();
+const goatCounterCountPending = new Map<string, Promise<string>>();
 
 function normalizePathname(pathname: string): string {
   if (!pathname || pathname === '/') {
@@ -172,6 +214,71 @@ function toAssetPath(path: string): string {
   return BASE_PATH ? `${BASE_PATH}${normalized}` : normalized;
 }
 
+function getGoatCounterPathForRoute(route: Route): string | null {
+  if (route.type === 'notes-detail') {
+    return `/notes/${route.slug}`;
+  }
+
+  if (route.type === 'inknote-detail') {
+    return `/inknote/${route.slug}`;
+  }
+
+  return null;
+}
+
+function getGoatCounterCacheKey(baseUrl: string, path: string): string {
+  return `${baseUrl}::${path}`;
+}
+
+async function fetchGoatCounterCount(config: ResolvedGoatCounterConfig, path: string): Promise<string> {
+  const cacheKey = getGoatCounterCacheKey(config.baseUrl, path);
+  const cached = goatCounterCountCache.get(cacheKey);
+  if (cached !== undefined) {
+    return cached;
+  }
+
+  const pending = goatCounterCountPending.get(cacheKey);
+  if (pending) {
+    return pending;
+  }
+
+  const request = fetch(`${config.baseUrl}/counter/${encodeURIComponent(path)}.json`, {
+    headers: {
+      Accept: 'application/json',
+    },
+  })
+    .then(async (response) => {
+      if (response.status === 404) {
+        return '0';
+      }
+
+      if (!response.ok) {
+        throw new Error(`GoatCounter request failed: ${response.status}`);
+      }
+
+      const payload = (await response.json()) as { count?: number | string };
+      if (typeof payload.count === 'number') {
+        return String(payload.count);
+      }
+
+      if (typeof payload.count === 'string' && payload.count.trim()) {
+        return payload.count.trim();
+      }
+
+      return '0';
+    })
+    .then((count) => {
+      goatCounterCountCache.set(cacheKey, count);
+      return count;
+    })
+    .finally(() => {
+      goatCounterCountPending.delete(cacheKey);
+    });
+
+  goatCounterCountPending.set(cacheKey, request);
+  return request;
+}
+
 function getInitialPathname(): string {
   const search = new URLSearchParams(window.location.search);
   const redirected = search.get('p');
@@ -194,6 +301,10 @@ function matchRoute(pathname: string): Route {
 
   if (normalized === '/') {
     return { type: 'home' };
+  }
+
+  if (normalized === '/archive') {
+    return { type: 'archive' };
   }
 
   if (normalized === '/notes' || normalized === '/projects') {
@@ -307,6 +418,66 @@ const GLOBAL_ENTRIES = [...VISIBLE_MARKDOWN, ...VISIBLE_INKNOTES]
   .sort((left, right) => right.frontmatter.date.localeCompare(left.frontmatter.date))
   .map((document) => toPortalEntry(document));
 
+function getArchiveGroupKey(date: string): string {
+  const match = date.trim().match(/^(\d{4})-(\d{2})/);
+  if (!match) {
+    return 'unknown';
+  }
+
+  return `${match[1]}-${Number(match[2])}`;
+}
+
+function getArchiveDateLabel(date: string): string {
+  const match = date.trim().match(/^(\d{4}-\d{2}-\d{2})/);
+  return match ? match[1] : date.trim();
+}
+
+function getArchiveGroupMeta(key: string): {
+  title: string;
+  year: string;
+  month: string;
+  summary: string;
+} {
+  if (key === 'unknown') {
+    return {
+      title: '未标注日期',
+      year: '--',
+      month: '--',
+      summary: '日期缺失',
+    };
+  }
+
+  const [year, monthValue] = key.split('-');
+  const month = monthValue.padStart(2, '0');
+
+  return {
+    title: `${year} 年 ${month} 月`,
+    year,
+    month,
+    summary: `${month} 月归档`,
+  };
+}
+
+function buildArchiveGroups(entries: PortalEntry[]): Array<{ key: string; label: string; entries: PortalEntry[] }> {
+  const groups = new Map<string, PortalEntry[]>();
+
+  for (const entry of entries) {
+    const key = getArchiveGroupKey(entry.date);
+    const existing = groups.get(key);
+    if (existing) {
+      existing.push(entry);
+    } else {
+      groups.set(key, [entry]);
+    }
+  }
+
+  return [...groups.entries()].map(([key, groupedEntries]) => ({
+    key,
+    label: key === 'unknown' ? '未标注日期' : key,
+    entries: groupedEntries,
+  }));
+}
+
 function filterEntries(entries: PortalEntry[], query: string): PortalEntry[] {
   const normalized = query.trim().toLowerCase();
   if (!normalized) {
@@ -332,6 +503,76 @@ function buildTagCloud(entries: PortalEntry[]): Array<{ tag: string; count: numb
 }
 
 const GLOBAL_TAG_CLOUD = buildTagCloud(GLOBAL_ENTRIES);
+
+function useGoatCounterCounts(entries: PortalEntry[]): Record<string, string> {
+  const [counts, setCounts] = useState<Record<string, string>>({});
+
+  useEffect(() => {
+    if (!ACTIVE_GOATCOUNTER_CONFIG) {
+      setCounts({});
+      return;
+    }
+
+    const paths = [...new Set(entries.map((entry) => entry.href))];
+    const nextCached: Record<string, string> = {};
+    const missingPaths: string[] = [];
+
+    paths.forEach((path) => {
+      const cached = goatCounterCountCache.get(getGoatCounterCacheKey(ACTIVE_GOATCOUNTER_CONFIG.baseUrl, path));
+      if (cached !== undefined) {
+        nextCached[path] = cached;
+      } else {
+        missingPaths.push(path);
+      }
+    });
+
+    setCounts((current) => {
+      const next = { ...current, ...nextCached };
+      return next;
+    });
+
+    if (missingPaths.length === 0) {
+      return;
+    }
+
+    let cancelled = false;
+
+    void Promise.all(
+      missingPaths.map(async (path) => {
+        try {
+          const count = await fetchGoatCounterCount(ACTIVE_GOATCOUNTER_CONFIG, path);
+          return [path, count] as const;
+        } catch (error) {
+          console.warn('GoatCounter count fetch failed', path, error);
+          return null;
+        }
+      }),
+    ).then((results) => {
+      if (cancelled) {
+        return;
+      }
+
+      const resolvedEntries = results.filter((item): item is readonly [string, string] => item !== null);
+      if (resolvedEntries.length === 0) {
+        return;
+      }
+
+      setCounts((current) => {
+        const next = { ...current };
+        resolvedEntries.forEach(([path, count]) => {
+          next[path] = count;
+        });
+        return next;
+      });
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [entries]);
+
+  return counts;
+}
 
 function getTagTone(tag: string): 'blue' | 'teal' | 'green' | 'amber' | 'violet' {
   const tones = ['blue', 'teal', 'green', 'amber', 'violet'] as const;
@@ -656,7 +897,15 @@ function GiscusThread({ threadKey }: { threadKey: string }) {
   );
 }
 
-function ArticleCard({ entry, navigate }: { entry: PortalEntry; navigate: (href: string) => void }) {
+function ArticleCard({
+  entry,
+  navigate,
+  viewCount,
+}: {
+  entry: PortalEntry;
+  navigate: (href: string) => void;
+  viewCount?: string;
+}) {
   return (
     <article className={`blog-card ${entry.accentClass}`}>
       <div className="blog-card-body">
@@ -671,6 +920,12 @@ function ArticleCard({ entry, navigate }: { entry: PortalEntry; navigate: (href:
             <span className="blog-card-meta-icon clock" aria-hidden="true" />
             <span>{entry.date}</span>
           </span>
+          {ACTIVE_GOATCOUNTER_CONFIG && viewCount !== undefined ? (
+            <span className="blog-card-meta-item">
+              <span className="blog-card-meta-icon views" aria-hidden="true" />
+              <span>{viewCount} 阅读</span>
+            </span>
+          ) : null}
           {entry.tags.slice(0, 2).map((tag) => (
             <span key={tag} className={`blog-card-tag tone-${getTagTone(tag)}`}>
               {tag}
@@ -704,6 +959,8 @@ function ArticleFeed({
   emptyTitle: string;
   emptyCopy: string;
 }) {
+  const viewCounts = useGoatCounterCounts(entries);
+
   if (entries.length === 0) {
     return (
       <section className="blog-empty-state">
@@ -716,7 +973,12 @@ function ArticleFeed({
   return (
     <section className="blog-feed">
       {entries.map((entry) => (
-        <ArticleCard key={entry.id} entry={entry} navigate={navigate} />
+        <ArticleCard
+          key={entry.id}
+          entry={entry}
+          navigate={navigate}
+          viewCount={ACTIVE_GOATCOUNTER_CONFIG ? (viewCounts[entry.href] ?? '0') : undefined}
+        />
       ))}
     </section>
   );
@@ -778,6 +1040,88 @@ function CollectionPage<TFrontmatter extends ContentFrontmatter>({
           emptyTitle="当前列表没有匹配结果"
           emptyCopy="可以尝试清空搜索，或者切换到别的类目继续浏览。"
         />
+      </section>
+
+      <SiteSidebar navigate={navigate} query={query} setQuery={setQuery} />
+    </div>
+  );
+}
+
+function ArchivePage({
+  navigate,
+  query,
+  setQuery,
+}: {
+  navigate: (href: string) => void;
+  query: string;
+  setQuery: (value: string) => void;
+}) {
+  const filteredEntries = useMemo(() => filterEntries(GLOBAL_ENTRIES, query), [query]);
+  const archiveGroups = useMemo(() => buildArchiveGroups(filteredEntries), [filteredEntries]);
+  const archiveDescription = query.trim()
+    ? '当前筛选结果会按年月归档展示。'
+    : '按年月整理所有已发布文章，方便回顾与检索。';
+
+  return (
+    <div className="blog-layout">
+      <section className="blog-main-column">
+        <section className="blog-panel blog-archive-hero">
+          <p className="blog-panel-eyebrow">Archive</p>
+          <div className="blog-panel-head">
+            <div>
+              <h2>归档</h2>
+              <p>{archiveDescription}</p>
+            </div>
+            <div className="blog-metrics">
+              <span>{filteredEntries.length} 篇文章</span>
+              <span>{archiveGroups.length} 个归档月份</span>
+            </div>
+          </div>
+        </section>
+
+        <section className="blog-panel blog-archive-panel">
+          {archiveGroups.length > 0 ? (
+            <div className="blog-archive-groups">
+              {archiveGroups.map((group) => {
+                const meta = getArchiveGroupMeta(group.key);
+
+                return (
+                <section key={group.key} className="blog-archive-group">
+                  <div className="blog-archive-group-head">
+                    <div className="blog-archive-group-stamp" aria-hidden="true">
+                      <span className="blog-archive-group-year">{meta.year}</span>
+                      <span className="blog-archive-group-month">{meta.month}</span>
+                    </div>
+                    <div className="blog-archive-group-copy">
+                      <h2>{meta.title}</h2>
+                      <p>
+                        {meta.summary}
+                        <span> · {group.entries.length} 篇</span>
+                      </p>
+                    </div>
+                  </div>
+                  <ul className="blog-archive-list">
+                    {group.entries.map((entry) => (
+                      <li key={entry.id} className="blog-archive-item">
+                        <span className="blog-archive-item-bullet" aria-hidden="true" />
+                        <span className="blog-archive-item-date">{getArchiveDateLabel(entry.date)}</span>
+                        <SiteLink href={entry.href} navigate={navigate} className="blog-archive-item-link">
+                          {entry.title}
+                        </SiteLink>
+                      </li>
+                    ))}
+                  </ul>
+                </section>
+                );
+              })}
+            </div>
+          ) : (
+            <section className="blog-empty-state">
+              <h3>当前没有可显示的归档内容</h3>
+              <p>可以尝试清空搜索，或先发布文章后再回来查看归档。</p>
+            </section>
+          )}
+        </section>
       </section>
 
       <SiteSidebar navigate={navigate} query={query} setQuery={setQuery} />
@@ -905,7 +1249,89 @@ function NotFoundPage({
 export default function SiteAppWide() {
   const [pathname, setPathname] = useState(() => getInitialPathname());
   const [searchQuery, setSearchQuery] = useState('');
+  const [isGoatCounterReady, setIsGoatCounterReady] = useState(
+    () => typeof window !== 'undefined' && typeof (window as { goatcounter?: { count?: unknown } }).goatcounter?.count === 'function',
+  );
+  const goatCounterTrackedPathRef = useRef<string | null>(null);
   const route = matchRoute(pathname);
+
+  useEffect(() => {
+    if (!ACTIVE_GOATCOUNTER_CONFIG) {
+      return;
+    }
+
+    if (typeof (window as { goatcounter?: { count?: unknown } }).goatcounter?.count === 'function') {
+      setIsGoatCounterReady(true);
+      return;
+    }
+
+    const existingWindowConfig = (window as { goatcounter?: Record<string, unknown> }).goatcounter ?? {};
+    (window as { goatcounter?: Record<string, unknown> }).goatcounter = {
+      ...existingWindowConfig,
+      no_onload: true,
+    };
+
+    const existingScript = document.getElementById('goatcounter-script') as HTMLScriptElement | null;
+    if (existingScript) {
+      const handleLoad = () => setIsGoatCounterReady(true);
+      existingScript.addEventListener('load', handleLoad);
+      return () => existingScript.removeEventListener('load', handleLoad);
+    }
+
+    const script = document.createElement('script');
+    script.id = 'goatcounter-script';
+    script.async = true;
+    script.src = ACTIVE_GOATCOUNTER_CONFIG.scriptUrl;
+    script.dataset.goatcounter = ACTIVE_GOATCOUNTER_CONFIG.endpoint;
+    script.addEventListener('load', () => setIsGoatCounterReady(true), { once: true });
+    document.head.appendChild(script);
+  }, []);
+
+  useEffect(() => {
+    const nextPath = getGoatCounterPathForRoute(route);
+    if (!nextPath) {
+      goatCounterTrackedPathRef.current = null;
+      return;
+    }
+
+    if (!ACTIVE_GOATCOUNTER_CONFIG || !isGoatCounterReady) {
+      return;
+    }
+
+    if (goatCounterTrackedPathRef.current === nextPath) {
+      return;
+    }
+
+    const counter = (window as { goatcounter?: { count?: (options?: { path?: string }) => void } }).goatcounter;
+    if (typeof counter?.count !== 'function') {
+      return;
+    }
+
+    counter.count({ path: nextPath });
+    goatCounterTrackedPathRef.current = nextPath;
+  }, [isGoatCounterReady, route]);
+
+  useEffect(() => {
+    const blogTitle = contentIndex.siteConfig.title?.trim() || "Chty's Blog";
+    let nextTitle = blogTitle;
+
+    if (route.type === 'notes-detail') {
+      const note = findMarkdownNote(route.slug);
+      nextTitle = note?.frontmatter.title?.trim() || blogTitle;
+    } else if (route.type === 'inknote-detail') {
+      const note = findInkNote(route.slug);
+      nextTitle = note?.frontmatter.title?.trim() || blogTitle;
+    } else if (route.type === 'archive') {
+      nextTitle = `归档 | ${blogTitle}`;
+    } else if (route.type === 'page') {
+      const pageDocument = findPage(route.slug);
+      nextTitle = pageDocument?.frontmatter.title?.trim() || blogTitle;
+    } else if (route.type === 'not-found') {
+      nextTitle = `404 | ${blogTitle}`;
+    }
+
+    document.title = nextTitle;
+  }, [route]);
 
   useEffect(() => {
     const handlePopState = () => {
@@ -936,6 +1362,8 @@ export default function SiteAppWide() {
 
   if (route.type === 'home') {
     page = <HomePage navigate={navigate} query={searchQuery} setQuery={setSearchQuery} />;
+  } else if (route.type === 'archive') {
+    page = <ArchivePage navigate={navigate} query={searchQuery} setQuery={setSearchQuery} />;
   } else if (route.type === 'notes-list') {
     page = (
       <CollectionPage

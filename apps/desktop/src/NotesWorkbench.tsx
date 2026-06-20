@@ -24,6 +24,7 @@ import {
 import type {
   ContentCategory,
   FriendLinkConfig,
+  GoatCounterConfig,
   GiscusConfig,
   RepositoryConfig,
   SiteConfig,
@@ -177,18 +178,23 @@ const DEFAULT_SITE_CONFIG: SiteConfig = {
     workflow: 'deploy.yml',
   },
   giscus: {
-    enabled: false,
-    repo: '',
-    repoId: '',
+    enabled: true,
+    repo: 'Chty-syq/InkNote',
+    repoId: 'R_kgDOS4ofng',
     category: 'Announcements',
-    categoryId: '',
+    categoryId: 'DIC_kwDOS4ofns4C_U79',
     mapping: 'pathname',
     strict: false,
-    reactionsEnabled: true,
+    reactionsEnabled: false,
     emitMetadata: false,
     inputPosition: 'bottom',
-    theme: 'preferred_color_scheme',
+    theme: 'noborder_light',
     lang: 'zh-CN',
+  },
+  goatcounter: {
+    enabled: true,
+    endpoint: 'https://chty.goatcounter.com/count',
+    scriptUrl: 'https://gc.zgo.at/count.js',
   },
 };
 
@@ -380,7 +386,7 @@ function normalizeSiteConfig(value: unknown): SiteConfig {
     reactionsEnabled:
       typeof giscusInput.reactionsEnabled === 'boolean'
         ? giscusInput.reactionsEnabled
-        : fallback.giscus?.reactionsEnabled ?? true,
+        : fallback.giscus?.reactionsEnabled ?? false,
     emitMetadata:
       typeof giscusInput.emitMetadata === 'boolean'
         ? giscusInput.emitMetadata
@@ -389,8 +395,24 @@ function normalizeSiteConfig(value: unknown): SiteConfig {
       giscusInput.inputPosition === 'top' || giscusInput.inputPosition === 'bottom'
         ? giscusInput.inputPosition
         : fallback.giscus?.inputPosition ?? 'bottom',
-    theme: typeof giscusInput.theme === 'string' ? giscusInput.theme : fallback.giscus?.theme ?? 'preferred_color_scheme',
+    theme: typeof giscusInput.theme === 'string' ? giscusInput.theme : fallback.giscus?.theme ?? 'noborder_light',
     lang: typeof giscusInput.lang === 'string' ? giscusInput.lang : fallback.giscus?.lang ?? 'zh-CN',
+  };
+  const goatcounterInput =
+    input.goatcounter && typeof input.goatcounter === 'object'
+      ? (input.goatcounter as Partial<GoatCounterConfig>)
+      : {};
+  const goatcounter: GoatCounterConfig = {
+    enabled:
+      typeof goatcounterInput.enabled === 'boolean' ? goatcounterInput.enabled : fallback.goatcounter?.enabled ?? false,
+    endpoint:
+      typeof goatcounterInput.endpoint === 'string'
+        ? goatcounterInput.endpoint
+        : fallback.goatcounter?.endpoint ?? '',
+    scriptUrl:
+      typeof goatcounterInput.scriptUrl === 'string'
+        ? goatcounterInput.scriptUrl
+        : fallback.goatcounter?.scriptUrl ?? 'https://gc.zgo.at/count.js',
   };
 
   return {
@@ -420,6 +442,7 @@ function normalizeSiteConfig(value: unknown): SiteConfig {
     friendLinks,
     repository,
     giscus,
+    goatcounter,
   };
 }
 
@@ -1490,6 +1513,16 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
       ...current,
       giscus: {
         ...(current.giscus ?? cloneDefaultSiteConfig().giscus!),
+        ...patch,
+      },
+    }));
+  };
+
+  const updateGoatCounterConfigDraft = (patch: Partial<GoatCounterConfig>) => {
+    setSiteConfigDraft((current) => ({
+      ...current,
+      goatcounter: {
+        ...(current.goatcounter ?? cloneDefaultSiteConfig().goatcounter!),
         ...patch,
       },
     }));
@@ -4243,6 +4276,37 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
                           value={siteConfigDraft.repository?.pagesUrl ?? ''}
                           onChange={(event) => updateRepositoryConfigDraft({ pagesUrl: event.target.value })}
                           placeholder="https://user.github.io/repo/"
+                        />
+                      </label>
+
+                      <label className="notes-settings-field">
+                        <span>{'阅读统计'}</span>
+                        <select
+                          value={siteConfigDraft.goatcounter?.enabled ? 'enabled' : 'disabled'}
+                          onChange={(event) =>
+                            updateGoatCounterConfigDraft({ enabled: event.target.value === 'enabled' })
+                          }
+                        >
+                          <option value="disabled">{'关闭'}</option>
+                          <option value="enabled">{'GoatCounter'}</option>
+                        </select>
+                      </label>
+
+                      <label className="notes-settings-field wide">
+                        <span>{'GoatCounter Endpoint'}</span>
+                        <input
+                          value={siteConfigDraft.goatcounter?.endpoint ?? ''}
+                          onChange={(event) => updateGoatCounterConfigDraft({ endpoint: event.target.value })}
+                          placeholder="https://your-code.goatcounter.com/count"
+                        />
+                      </label>
+
+                      <label className="notes-settings-field wide">
+                        <span>{'统计脚本'}</span>
+                        <input
+                          value={siteConfigDraft.goatcounter?.scriptUrl ?? 'https://gc.zgo.at/count.js'}
+                          onChange={(event) => updateGoatCounterConfigDraft({ scriptUrl: event.target.value })}
+                          placeholder="https://gc.zgo.at/count.js"
                         />
                       </label>
 
