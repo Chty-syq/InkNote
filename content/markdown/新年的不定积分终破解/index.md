@@ -3,7 +3,7 @@ type: markdown
 title: 新年的不定积分
 slug: 8043157
 date: 2026-06-15
-updatedAt: 2026-06-16 21:41:10
+updatedAt: 2026-06-21 21:36:53
 tags:
   - 微积分
 published: true
@@ -30,7 +30,7 @@ $(5)\int \frac{x^2+2x+3+4\sin{x}\cos{x}}{(\cos{x}+2\sin{x}+3x\cos{x}+4x\sin{x})^
 
 ---
 
-## 2. Solved (1),(2) by Prof.JJhen
+## 2. Solve (1),(2) by Prof.JJhen
 
 前两个积分的破解方法 **JJchen** 老师已经给出：
 
@@ -46,7 +46,7 @@ $$\begin{aligned}\int \frac{x^2}{(\cos{x}+x\sin{x})^2}dx&=\int \frac{x^2\cos^2{x
 
 ---
 
-## 3. Solved (3) by Construction(构造)
+## 3. Solve (3) by Construction(构造)
 
 看到这里方法已经很明显了，我们求出分母的微分，然后想办法构造分子，利用分部积分把后面的积分抵消掉，照此思路，当时的我独立破解了
 
@@ -62,7 +62,7 @@ $$\begin{aligned}\int \frac{(1-x^4)\sin{2x}+2x\cos{2x}}{(\cos^2{x}+x^2\sin^2{x})
 
 ---
 
-## 4. Solved (4),(5) by Substitution(换元)
+## 4. Solve (4),(5) by Substitution(换元)
 
 $(4)$ 式越来越复杂了，为了不被三角函数迷晕，我们引入 $\tan x$ 进行简化，根据万能公式处理分母
 
@@ -142,7 +142,7 @@ $$\frac{(x-1) \sin x-2 \cos x}{(12 x+6) \sin x+(9 x+3) \cos x} + \frac{(x+1)(\co
 
 ---
 
-## 5. Solved Final Boss
+## 5. Solve Final Boss
 
 终于轮到最后的 BOSS 了，我们发现它和 $(5)$ 式的形式一模一样，就是换了几个数字，我们还是用 $t=\tan{x}$ 写成较为对称的形式
 

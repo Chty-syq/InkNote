@@ -13,6 +13,7 @@
     "@inknote/content-schema": "file:../../packages/content-schema",
     "@inknote/inknote-core": "file:../../packages/inknote-core",
     "@inknote/site-builder": "file:../../packages/site-builder",
+    "@tabler/icons-react": "^3.44.0",
     "@tauri-apps/api": "^2.3.0",
     "@tauri-apps/plugin-dialog": "^2.3.0",
     "katex": "^0.16.45",

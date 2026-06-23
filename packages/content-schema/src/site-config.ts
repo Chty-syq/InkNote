@@ -13,6 +13,10 @@ export interface FriendLinkConfig {
   label: string;
   href: string;
   note: string;
+  icon?: string;
+  iconSource?: string;
+  iconTarget?: string;
+  iconFetchedAt?: string;
 }
 
 export interface RepositoryConfig {

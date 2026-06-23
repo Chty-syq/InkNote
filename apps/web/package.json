@@ -11,6 +11,7 @@
   "dependencies": {
     "@inknote/content-schema": "file:../../packages/content-schema",
     "@inknote/site-builder": "file:../../packages/site-builder",
+    "@tabler/icons-react": "^3.44.0",
     "react": "^19.1.0",
     "react-dom": "^19.1.0"
   },

@@ -47,14 +47,22 @@
   ],
   "friendLinks": [
     {
-      "label": "友链位置 A",
-      "href": "#",
-      "note": "后续可替换为朋友或常用站点。"
+      "label": "科学空间",
+      "href": "https://spaces.ac.cn",
+      "note": "",
+      "icon": "",
+      "iconSource": "",
+      "iconTarget": "",
+      "iconFetchedAt": ""
     },
     {
-      "label": "友链位置 B",
-      "href": "#",
-      "note": "保留给技术博客或项目站点。"
+      "label": "YangWC‘s Blog",
+      "href": "https://yangwc.com/",
+      "note": "",
+      "icon": "/generated/friend-icons/d78b3313dc394f60517bf6b2.png",
+      "iconSource": "https://cdn.jsdelivr.net/gh/ZeusYang/CDN-for-yangwc.com@1.1//globalImage/logo.ico",
+      "iconTarget": "https://yangwc.com/",
+      "iconFetchedAt": "2026-06-22T08:39:56.179Z"
     }
   ],
   "repository": {

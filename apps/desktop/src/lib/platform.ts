@@ -32,6 +32,17 @@ export interface BlogPreviewServerResponse {
   message: string;
 }
 
+export interface FriendLinkIconResponse {
+  iconPath: string;
+  sourceUrl: string;
+  resolvedPageUrl: string;
+}
+
+export interface CachedExternalImageResponse {
+  publicPath: string;
+  sourceUrl: string;
+}
+
 export function isTauri(): boolean {
   return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
 }
@@ -84,6 +95,18 @@ export async function writeContentFile(path: string, contents: string): Promise<
 
 export async function deleteContentFile(path: string): Promise<void> {
   await invoke('delete_content_path', { path });
+}
+
+export async function fetchFriendLinkIcon(pageUrl: string): Promise<FriendLinkIconResponse> {
+  return invoke('fetch_friend_link_icon', { pageUrl });
+}
+
+export async function cacheExternalImage(imageUrl: string): Promise<CachedExternalImageResponse> {
+  const result = await invoke<FriendLinkIconResponse>('cache_external_image', { imageUrl });
+  return {
+    publicPath: result.iconPath,
+    sourceUrl: result.sourceUrl,
+  };
 }
 
 export async function getPublishStatus(): Promise<PublishStatusResponse> {

@@ -4,7 +4,7 @@ title: Generative Adversarial Imitation Learning
 slug: 3187429
 order: 2
 date: 2026-04-08
-updatedAt: 2026-06-14 11:53:25
+updatedAt: 2026-06-22 22:59:36
 published: true
 category: machine-learning
 ---
@@ -301,7 +301,7 @@ $$G(u) = u^{T}x - F(x)$$
 
 我们解释一下勒让德变换的几何意义，如下图所示
 
-<center><img src="https://leanote.com/api/file/getImage?fileId=68428ee0ab644172fc3f9872" width=250px></center>
+<center><img src="/content-images/external/9e85efeb2a64d785f4cb6a732631a4cc.jpg" width=250px></center>
 
 蓝色的曲线是 $F(x)$，我们在点 $x$ 处做一条切线，设切线斜率为 $s$，那么
 
@@ -311,7 +311,7 @@ $$G(s) = sx - F(x)$$
 
 可如果函数 $F$ 非凸或者不可微，那么勒让德变换将会不可解，如下图所示
 
-<center><img src="https://leanote.com/api/file/getImage?fileId=684292feab644172fc3f987a" width=300px></center>
+<center><img src="/content-images/external/4c3d16b1630d5d77274ba3356d4d2bb9.jpg" width=300px></center>
 
 对于斜率 $s$，函数 $F(x)$ 上存在两条切线与之对应，那么 $G(s)$ 的值是取 $-b_{0}$ 还是 $-b_{1}$ 呢？
 

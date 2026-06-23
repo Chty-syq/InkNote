@@ -309,8 +309,51 @@ export function patchDraft(draft: ContentDraft, patch: Partial<ContentDraft>): C
   };
 }
 
+function stripAutoSavedMetadata(snapshot: string): string {
+  const lines = snapshot.replace(/\r/g, '').split('\n');
+  const output: string[] = [];
+  let inFrontmatter = false;
+  let skippingTags = false;
+
+  lines.forEach((line, index) => {
+    if (index === 0 && line.trim() === '---') {
+      inFrontmatter = true;
+      output.push(line);
+      return;
+    }
+
+    if (inFrontmatter && line.trim() === '---') {
+      inFrontmatter = false;
+      skippingTags = false;
+      output.push(line);
+      return;
+    }
+
+    if (inFrontmatter) {
+      if (/^title\s*:/.test(line)) {
+        return;
+      }
+
+      if (/^tags\s*:/.test(line)) {
+        skippingTags = true;
+        return;
+      }
+
+      if (skippingTags && /^\s+-\s+/.test(line)) {
+        return;
+      }
+
+      skippingTags = false;
+    }
+
+    output.push(line);
+  });
+
+  return output.join('\n');
+}
+
 export function isDraftDirty(draft: ContentDraft): boolean {
-  return serializeContentDraft(draft) !== draft.savedSnapshot;
+  return stripAutoSavedMetadata(serializeContentDraft(draft)) !== stripAutoSavedMetadata(draft.savedSnapshot);
 }
 
 export function getDraftValidationError(draft: ContentDraft): string | null {

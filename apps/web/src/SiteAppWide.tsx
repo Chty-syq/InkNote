@@ -1,4 +1,15 @@
-import { useEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type MouseEvent, type ReactNode } from 'react';
+import {
+  useDeferredValue,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type FormEvent,
+  type MouseEvent,
+  type ReactNode,
+} from 'react';
+import { IconCalendar, IconExternalLink, IconEye, IconLink, IconMessageCircle, IconSearch } from '@tabler/icons-react';
 import type {
   ContentFrontmatter,
   GoatCounterConfig,
@@ -21,6 +32,7 @@ import { extractMarkdownHeadings, renderInlineMarkdown, renderMarkdown, type Mar
 
 type Route =
   | { type: 'home' }
+  | { type: 'search' }
   | { type: 'archive' }
   | { type: 'notes-list' }
   | { type: 'inknote-list' }
@@ -39,7 +51,19 @@ type PortalEntry = {
   typeLabel: string;
   accentClass: string;
   tags: string[];
+  summary: string;
+  bodyText: string;
   searchText: string;
+};
+
+type SearchMatchField = 'title' | 'tag' | 'category' | 'summary' | 'body';
+
+type SearchResult = {
+  entry: PortalEntry;
+  score: number;
+  terms: string[];
+  matchedFields: SearchMatchField[];
+  snippet: string;
 };
 
 type DetailMetaItem =
@@ -73,10 +97,22 @@ type ResolvedGoatCounterConfig = {
   scriptUrl: string;
 };
 
+type ResolvedGitHubRepo = {
+  owner: string;
+  name: string;
+};
+
+type GitHubDiscussionSummary = {
+  title: string;
+  body: string;
+  comments: number;
+  categoryId: string;
+};
+
 const CATEGORY_ACCENTS = ['orange', 'blue', 'green', 'amber', 'slate'] as const;
 
 const DEFAULT_TOOL_LINKS = [
-  { label: '搜索', href: '#blog-search', description: '站内检索' },
+  { label: '搜索', href: '/search', description: '站内检索' },
   { label: '归档', href: '#', description: '文章归档' },
   { label: 'RSS', href: '#', description: '订阅更新' },
   { label: '友链', href: '#blog-links', description: '友情链接' },
@@ -88,18 +124,36 @@ const KNOWN_LABEL_FIXES: Record<string, string> = {
   '鍙ゅ吀鎽樺綍': '古典摘录',
 };
 
-const FRIEND_LINKS = [
-  { label: '友链位置 A', href: '#', note: '后续可替换为常用博客或项目站点。' },
-  { label: '友链位置 B', href: '#', note: '保留给技术写作者或朋友站点。' },
-  { label: '友链位置 C', href: '#', note: '也可以改成资料库、论文索引或工具页。' },
-];
-
 const VISIBLE_MARKDOWN = contentIndex.notes.filter((note) => note.frontmatter.published);
 const VISIBLE_INKNOTES = contentIndex.inknotes.filter((note) => note.frontmatter.published);
-const ACTIVE_FRIEND_LINKS =
-  contentIndex.siteConfig.friendLinks && contentIndex.siteConfig.friendLinks.length > 0
-    ? contentIndex.siteConfig.friendLinks
-    : FRIEND_LINKS;
+const ACTIVE_FRIEND_LINKS = (contentIndex.siteConfig.friendLinks ?? []).filter(
+  (link) => link.label.trim() && link.href.trim(),
+);
+
+function FriendLinkAvatar({ label, icon }: { label: string; icon?: string }) {
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    setFailed(false);
+  }, [icon]);
+
+  const source = icon?.trim() ? toAssetPath(icon) : '';
+
+  return (
+    <span className="blog-link-avatar" aria-hidden="true">
+      <span>{label.trim() ? label.trim().slice(0, 1).toUpperCase() : <IconLink />}</span>
+      {source && !failed ? (
+        <img
+          key={source}
+          src={source}
+          alt=""
+          loading="lazy"
+          onError={() => setFailed(true)}
+        />
+      ) : null}
+    </span>
+  );
+}
 
 function resolveGiscusConfig(config: GiscusConfig | undefined): ResolvedGiscusConfig | null {
   if (
@@ -157,6 +211,23 @@ function resolveGoatCounterConfig(config: GoatCounterConfig | undefined): Resolv
 const ACTIVE_GOATCOUNTER_CONFIG = resolveGoatCounterConfig(contentIndex.siteConfig.goatcounter);
 const goatCounterCountCache = new Map<string, string>();
 const goatCounterCountPending = new Map<string, Promise<string>>();
+const goatCounterOptimisticCounts = new Map<string, number>();
+const GOATCOUNTER_COUNT_UPDATED_EVENT = 'inknote:goatcounter-count-updated';
+const gitHubDiscussionListCache = new Map<string, GitHubDiscussionSummary[]>();
+const gitHubDiscussionListPending = new Map<string, Promise<GitHubDiscussionSummary[]>>();
+const giscusCommentCountCache = new Map<string, string>();
+
+function resolveGitHubRepo(value: string): ResolvedGitHubRepo | null {
+  const [owner = '', name = ''] = value.split('/');
+  if (!owner.trim() || !name.trim()) {
+    return null;
+  }
+
+  return {
+    owner: owner.trim(),
+    name: name.trim(),
+  };
+}
 
 function normalizePathname(pathname: string): string {
   if (!pathname || pathname === '/') {
@@ -200,18 +271,35 @@ function resolveDefaultPath(pathname: string): string {
   return normalized === '/' ? getDefaultCategoryPath() : normalized;
 }
 
+function parseInternalHref(href: string): URL {
+  return new URL(href, window.location.origin);
+}
+
 function toBrowserPath(pathname: string): string {
   const normalized = resolveDefaultPath(stripBasePath(pathname));
   return BASE_PATH ? `${BASE_PATH}${normalized === '/' ? '' : normalized}` : normalized;
 }
 
 function toPublicHref(href: string): string {
-  return href.startsWith('/') ? toBrowserPath(href) : href;
+  if (!href.startsWith('/')) {
+    return href;
+  }
+
+  const target = parseInternalHref(href);
+  return `${toBrowserPath(target.pathname)}${target.search}${target.hash}`;
 }
 
 function toAssetPath(path: string): string {
   const normalized = path.startsWith('/') ? path : `/${path}`;
   return BASE_PATH ? `${BASE_PATH}${normalized}` : normalized;
+}
+
+function resolveWebContentImages(markdown: string): string {
+  const assetPrefix = toAssetPath('/content-images/');
+
+  return markdown
+    .replace(/(\]\(\s*)\/content-images\//g, `$1${assetPrefix}`)
+    .replace(/(\bsrc\s*=\s*["'])\/content-images\//gi, `$1${assetPrefix}`);
 }
 
 function getGoatCounterPathForRoute(route: Route): string | null {
@@ -230,11 +318,182 @@ function getGoatCounterCacheKey(baseUrl: string, path: string): string {
   return `${baseUrl}::${path}`;
 }
 
+function getGiscusCommentCacheKey(repo: string, categoryId: string, path: string): string {
+  return `${repo}::${categoryId}::${path}`;
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function normalizeDiscussionMatchPath(path: string): string {
+  return normalizePathname(path);
+}
+
+function getDiscussionMatchCandidates(path: string): string[] {
+  const normalized = normalizeDiscussionMatchPath(path);
+  const candidates = new Set<string>();
+
+  candidates.add(normalized);
+  candidates.add(normalized.replace(/^\/+/, ''));
+
+  return [...candidates].filter(Boolean).sort((left, right) => right.length - left.length);
+}
+
+function doesDiscussionMatchPath(discussion: GitHubDiscussionSummary, path: string): boolean {
+  const candidates = getDiscussionMatchCandidates(path);
+  const sources = [discussion.title, discussion.body];
+
+  return candidates.some((candidate) => {
+    const pattern = new RegExp(`(^|[^A-Za-z0-9])${escapeRegExp(candidate)}($|[^A-Za-z0-9])`);
+    return sources.some((source) => pattern.test(source));
+  });
+}
+
+async function fetchGitHubDiscussions(config: ResolvedGiscusConfig): Promise<GitHubDiscussionSummary[]> {
+  const repo = resolveGitHubRepo(config.repo);
+  if (!repo) {
+    return [];
+  }
+
+  const cacheKey = `${config.repo}::${config.categoryId}`;
+  const cached = gitHubDiscussionListCache.get(cacheKey);
+  if (cached) {
+    return cached;
+  }
+
+  const pending = gitHubDiscussionListPending.get(cacheKey);
+  if (pending) {
+    return pending;
+  }
+
+  const request = (async () => {
+    const discussions: GitHubDiscussionSummary[] = [];
+
+    for (let page = 1; page <= 10; page += 1) {
+      const url = new URL(`https://api.github.com/repos/${repo.owner}/${repo.name}/discussions`);
+      url.searchParams.set('per_page', '100');
+      url.searchParams.set('page', String(page));
+
+      const response = await fetch(url.toString(), {
+        headers: {
+          Accept: 'application/vnd.github+json',
+        },
+      });
+
+      if (!response.ok) {
+        throw new Error(`GitHub discussions request failed: ${response.status}`);
+      }
+
+      const payload = (await response.json()) as Array<{
+        title?: string;
+        body?: string;
+        comments?: number;
+        category?: {
+          node_id?: string;
+        };
+      }>;
+
+      const pageItems = payload
+        .filter((item) => (item.category?.node_id ?? '') === config.categoryId)
+        .map((item) => ({
+          title: item.title ?? '',
+          body: item.body ?? '',
+          comments: typeof item.comments === 'number' ? item.comments : 0,
+          categoryId: item.category?.node_id ?? '',
+        }));
+
+      discussions.push(...pageItems);
+
+      if (payload.length < 100) {
+        break;
+      }
+    }
+
+    gitHubDiscussionListCache.set(cacheKey, discussions);
+    return discussions;
+  })().finally(() => {
+    gitHubDiscussionListPending.delete(cacheKey);
+  });
+
+  gitHubDiscussionListPending.set(cacheKey, request);
+  return request;
+}
+
+function resolveGiscusCommentCountForPath(discussions: GitHubDiscussionSummary[], path: string): string {
+  const discussion = discussions.find((item) => doesDiscussionMatchPath(item, path));
+  return String(discussion?.comments ?? 0);
+}
+
+function parseGoatCounterCount(value: string | undefined): number | null {
+  if (!value) {
+    return null;
+  }
+
+  // GoatCounter returns a locale-formatted string (for example "1,234" or
+  // "1 234"), so it cannot be passed to Number() unchanged.
+  const normalized = value.replace(/[^0-9]/g, '');
+  if (!normalized) {
+    return null;
+  }
+
+  const numeric = Number(normalized);
+  return Number.isFinite(numeric) ? numeric : null;
+}
+
+function formatGoatCounterCount(value: number): string {
+  return new Intl.NumberFormat('zh-CN').format(value);
+}
+
+function getGoatCounterLookupPaths(path: string): string[] {
+  const canonicalPath = normalizePathname(path.startsWith('/') ? path : `/${path}`);
+  const paths = [canonicalPath];
+
+  // Older GitHub Pages deployments were tracked with the repository base in
+  // the path. Keep those views visible after moving to canonical SPA routes.
+  if (BASE_PATH) {
+    paths.push(normalizePathname(`${BASE_PATH}${canonicalPath === '/' ? '' : canonicalPath}`));
+  }
+
+  return [...new Set(paths)];
+}
+
+function getGoatCounterDisplayCount(config: ResolvedGoatCounterConfig, path: string): string | undefined {
+  const cacheKey = getGoatCounterCacheKey(config.baseUrl, path);
+  const cachedCount = goatCounterCountCache.get(cacheKey);
+  const optimisticCount = goatCounterOptimisticCounts.get(cacheKey) ?? 0;
+
+  if (cachedCount === undefined) {
+    return optimisticCount > 0 ? formatGoatCounterCount(optimisticCount) : undefined;
+  }
+
+  if (optimisticCount === 0) {
+    return cachedCount;
+  }
+
+  const baseCount = parseGoatCounterCount(cachedCount);
+  return baseCount === null ? cachedCount : formatGoatCounterCount(baseCount + optimisticCount);
+}
+
+function notifyGoatCounterCountUpdated() {
+  if (typeof window === 'undefined') {
+    return;
+  }
+
+  window.dispatchEvent(new CustomEvent(GOATCOUNTER_COUNT_UPDATED_EVENT));
+}
+
+function applyOptimisticGoatCounterCount(config: ResolvedGoatCounterConfig, path: string) {
+  const cacheKey = getGoatCounterCacheKey(config.baseUrl, path);
+  goatCounterOptimisticCounts.set(cacheKey, (goatCounterOptimisticCounts.get(cacheKey) ?? 0) + 1);
+  notifyGoatCounterCountUpdated();
+}
+
 async function fetchGoatCounterCount(config: ResolvedGoatCounterConfig, path: string): Promise<string> {
   const cacheKey = getGoatCounterCacheKey(config.baseUrl, path);
-  const cached = goatCounterCountCache.get(cacheKey);
-  if (cached !== undefined) {
-    return cached;
+  const cachedBase = goatCounterCountCache.get(cacheKey);
+  if (cachedBase !== undefined) {
+    return getGoatCounterDisplayCount(config, path) ?? cachedBase;
   }
 
   const pending = goatCounterCountPending.get(cacheKey);
@@ -242,14 +501,20 @@ async function fetchGoatCounterCount(config: ResolvedGoatCounterConfig, path: st
     return pending;
   }
 
-  const request = fetch(`${config.baseUrl}/counter/${encodeURIComponent(path)}.json`, {
-    headers: {
-      Accept: 'application/json',
-    },
-  })
-    .then(async (response) => {
+  const request = Promise.all(
+    getGoatCounterLookupPaths(path).map(async (lookupPath) => {
+      const response = await fetch(`${config.baseUrl}/counter/${encodeURIComponent(lookupPath)}.json`, {
+        headers: {
+          Accept: 'application/json',
+        },
+      });
+
       if (response.status === 404) {
-        return '0';
+        return 0;
+      }
+
+      if (response.status === 403) {
+        throw new Error('GoatCounter public visitor counter is disabled in site settings');
       }
 
       if (!response.ok) {
@@ -257,19 +522,14 @@ async function fetchGoatCounterCount(config: ResolvedGoatCounterConfig, path: st
       }
 
       const payload = (await response.json()) as { count?: number | string };
-      if (typeof payload.count === 'number') {
-        return String(payload.count);
-      }
-
-      if (typeof payload.count === 'string' && payload.count.trim()) {
-        return payload.count.trim();
-      }
-
-      return '0';
-    })
+      const count = parseGoatCounterCount(payload.count === undefined ? undefined : String(payload.count));
+      return count ?? 0;
+    }),
+  )
+    .then((counts) => formatGoatCounterCount(counts.reduce((total, count) => total + count, 0)))
     .then((count) => {
       goatCounterCountCache.set(cacheKey, count);
-      return count;
+      return getGoatCounterDisplayCount(config, path) ?? count;
     })
     .finally(() => {
       goatCounterCountPending.delete(cacheKey);
@@ -283,17 +543,27 @@ function getInitialPathname(): string {
   const search = new URLSearchParams(window.location.search);
   const redirected = search.get('p');
   if (redirected) {
-    const nextPath = resolveDefaultPath(stripBasePath(redirected));
-    window.history.replaceState({}, '', toBrowserPath(nextPath));
+    const target = parseInternalHref(redirected);
+    const nextPath = resolveDefaultPath(stripBasePath(target.pathname));
+    window.history.replaceState({}, '', `${toBrowserPath(nextPath)}${target.search}${target.hash}`);
     return nextPath;
   }
 
   const nextPath = resolveDefaultPath(stripBasePath(window.location.pathname));
   if (toBrowserPath(nextPath) !== normalizePathname(window.location.pathname)) {
-    window.history.replaceState({}, '', toBrowserPath(nextPath));
+    window.history.replaceState({}, '', `${toBrowserPath(nextPath)}${window.location.search}${window.location.hash}`);
   }
 
   return nextPath;
+}
+
+function getSearchQueryFromLocation(): string {
+  const currentPath = resolveDefaultPath(stripBasePath(window.location.pathname));
+  if (currentPath !== '/search') {
+    return '';
+  }
+
+  return new URLSearchParams(window.location.search).get('q') ?? '';
 }
 
 function matchRoute(pathname: string): Route {
@@ -301,6 +571,10 @@ function matchRoute(pathname: string): Route {
 
   if (normalized === '/') {
     return { type: 'home' };
+  }
+
+  if (normalized === '/search') {
+    return { type: 'search' };
   }
 
   if (normalized === '/archive') {
@@ -400,17 +674,24 @@ function toCategorySubtitle(slug: string): string {
 
 function toPortalEntry(document: RoutedDocument<MarkdownFrontmatter | InkNoteFrontmatter>): PortalEntry {
   const categorySlug = getDocumentCategorySlugForRoute(document.frontmatter);
+  const categoryLabel = normalizeLabel(getDocumentCategoryLabel(document.frontmatter));
+  const summary = document.frontmatter.summary?.trim() ?? '';
+  const bodyText = stripMarkdown(document.body);
 
   return {
     id: document.id,
     href: document.href,
     title: document.frontmatter.title,
     date: document.frontmatter.date,
-    categoryLabel: normalizeLabel(getDocumentCategoryLabel(document.frontmatter)),
+    categoryLabel,
     typeLabel: document.frontmatter.type === 'inknote' ? 'InkNote' : 'Markdown',
     accentClass: categorySlug ? getCategoryAccentBySlug(categorySlug) : getAccentClass(0),
     tags: document.frontmatter.tags ?? [],
-    searchText: `${document.frontmatter.title} ${document.frontmatter.summary ?? ''} ${formatTags(document.frontmatter.tags)} ${stripMarkdown(document.body)}`.toLowerCase(),
+    summary,
+    bodyText,
+    searchText: normalizeSearchText(
+      `${document.frontmatter.title} ${summary} ${formatTags(document.frontmatter.tags)} ${categoryLabel} ${bodyText}`,
+    ),
   };
 }
 
@@ -478,13 +759,165 @@ function buildArchiveGroups(entries: PortalEntry[]): Array<{ key: string; label:
   }));
 }
 
-function filterEntries(entries: PortalEntry[], query: string): PortalEntry[] {
-  const normalized = query.trim().toLowerCase();
-  if (!normalized) {
-    return entries;
+function normalizeSearchText(value: string): string {
+  return value.normalize('NFKC').toLocaleLowerCase().replace(/\s+/g, ' ').trim();
+}
+
+function parseSearchTerms(query: string): string[] {
+  const matches = query.match(/“[^”]+”|"[^"]+"|\S+/g) ?? [];
+  const uniqueTerms = new Set<string>();
+
+  matches.forEach((match) => {
+    const unquoted = match.replace(/^[“"]|[”"]$/g, '');
+    const normalized = normalizeSearchText(unquoted);
+    if (normalized) {
+      uniqueTerms.add(normalized);
+    }
+  });
+
+  return [...uniqueTerms];
+}
+
+function createSearchSnippet(entry: PortalEntry, terms: string[]): string {
+  const sources = [entry.summary, entry.bodyText].filter(Boolean);
+  const source =
+    sources
+      .map((candidate, index) => ({
+        candidate,
+        index,
+        matches: terms.filter((term) => normalizeSearchText(candidate).includes(term)).length,
+      }))
+      .sort((left, right) => right.matches - left.matches || left.index - right.index)[0]?.candidate ?? '';
+  if (!source) {
+    return '';
   }
 
-  return entries.filter((entry) => entry.searchText.includes(normalized));
+  const normalizedSource = normalizeSearchText(source);
+  const matchIndexes = terms
+    .map((term) => normalizedSource.indexOf(term))
+    .filter((index) => index >= 0);
+  const firstMatch = matchIndexes.length > 0 ? Math.min(...matchIndexes) : 0;
+  const radiusBefore = 42;
+  const maxLength = 168;
+  let start = Math.max(0, firstMatch - radiusBefore);
+  let end = Math.min(source.length, start + maxLength);
+
+  if (start > 0) {
+    const nextBoundary = source.slice(start, Math.min(start + 16, source.length)).search(/[，。！？；：,.!?;:\s]/);
+    if (nextBoundary >= 0) {
+      start += nextBoundary + 1;
+    }
+  }
+
+  if (end < source.length) {
+    const previousBoundary = source.slice(Math.max(start, end - 18), end).search(/[，。！？；：,.!?;:\s][^，。！？；：,.!?;:\s]*$/);
+    if (previousBoundary >= 0) {
+      end = Math.max(start + 60, end - 18 + previousBoundary + 1);
+    }
+  }
+
+  const snippet = source.slice(start, end).trim();
+  return `${start > 0 ? '…' : ''}${snippet}${end < source.length ? '…' : ''}`;
+}
+
+function searchEntries(entries: PortalEntry[], query: string): SearchResult[] {
+  const terms = parseSearchTerms(query);
+  if (terms.length === 0) {
+    return [];
+  }
+
+  const fieldWeights: Record<SearchMatchField, number> = {
+    title: 72,
+    tag: 48,
+    category: 28,
+    summary: 18,
+    body: 8,
+  };
+  const fieldOrder: SearchMatchField[] = ['title', 'tag', 'category', 'summary', 'body'];
+
+  return entries
+    .map((entry): SearchResult | null => {
+      const normalizedTags = entry.tags.map(normalizeSearchText);
+      const fields: Record<SearchMatchField, string> = {
+        title: normalizeSearchText(entry.title),
+        tag: normalizedTags.join(' '),
+        category: normalizeSearchText(entry.categoryLabel),
+        summary: normalizeSearchText(entry.summary),
+        body: normalizeSearchText(entry.bodyText),
+      };
+      const matchedFields = new Set<SearchMatchField>();
+      let score = 0;
+
+      for (const term of terms) {
+        let termScore = 0;
+
+        for (const field of fieldOrder) {
+          if (!fields[field].includes(term)) {
+            continue;
+          }
+
+          matchedFields.add(field);
+          termScore = Math.max(termScore, fieldWeights[field]);
+        }
+
+        if (termScore === 0) {
+          return null;
+        }
+
+        if (fields.title === term) {
+          termScore += 92;
+        } else if (fields.title.startsWith(term)) {
+          termScore += 34;
+        }
+
+        if (normalizedTags.some((tag) => tag === term)) {
+          termScore += 54;
+        }
+
+        score += termScore + Math.min(term.length, 24);
+      }
+
+      const phrase = terms.join(' ');
+      if (fields.title === phrase) {
+        score += 160;
+      } else if (fields.title.includes(phrase)) {
+        score += 64;
+      } else if (fields.summary.includes(phrase)) {
+        score += 24;
+      } else if (entry.searchText.includes(phrase)) {
+        score += 10;
+      }
+
+      return {
+        entry,
+        score,
+        terms,
+        matchedFields: fieldOrder.filter((field) => matchedFields.has(field)),
+        snippet: createSearchSnippet(entry, terms),
+      };
+    })
+    .filter((result): result is SearchResult => result !== null)
+    .sort(
+      (left, right) =>
+        right.score - left.score ||
+        right.entry.date.localeCompare(left.entry.date) ||
+        left.entry.title.localeCompare(right.entry.title),
+    );
+}
+
+function highlightSearchText(text: string, terms: string[]): ReactNode {
+  if (!text || terms.length === 0) {
+    return text;
+  }
+
+  const escapedTerms = [...terms]
+    .sort((left, right) => right.length - left.length)
+    .map((term) => term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+  const pattern = new RegExp(`(${escapedTerms.join('|')})`, 'gi');
+
+  return text.split(pattern).map((part, index) =>
+    terms.includes(normalizeSearchText(part)) ? <mark key={`${part}-${index}`}>{part}</mark> : part,
+  );
 }
 
 function buildTagCloud(entries: PortalEntry[]): Array<{ tag: string; count: number }> {
@@ -505,6 +938,11 @@ function buildTagCloud(entries: PortalEntry[]): Array<{ tag: string; count: numb
 const GLOBAL_TAG_CLOUD = buildTagCloud(GLOBAL_ENTRIES);
 
 function useGoatCounterCounts(entries: PortalEntry[]): Record<string, string> {
+  const paths = useMemo(() => [...new Set(entries.map((entry) => entry.href))], [entries]);
+  return useGoatCounterCountsForPaths(paths);
+}
+
+function useGoatCounterCountsForPaths(paths: string[]): Record<string, string> {
   const [counts, setCounts] = useState<Record<string, string>>({});
 
   useEffect(() => {
@@ -513,15 +951,19 @@ function useGoatCounterCounts(entries: PortalEntry[]): Record<string, string> {
       return;
     }
 
-    const paths = [...new Set(entries.map((entry) => entry.href))];
     const nextCached: Record<string, string> = {};
     const missingPaths: string[] = [];
 
     paths.forEach((path) => {
-      const cached = goatCounterCountCache.get(getGoatCounterCacheKey(ACTIVE_GOATCOUNTER_CONFIG.baseUrl, path));
-      if (cached !== undefined) {
-        nextCached[path] = cached;
-      } else {
+      const cacheKey = getGoatCounterCacheKey(ACTIVE_GOATCOUNTER_CONFIG.baseUrl, path);
+      const cachedBase = goatCounterCountCache.get(cacheKey);
+      const cachedDisplay = getGoatCounterDisplayCount(ACTIVE_GOATCOUNTER_CONFIG, path);
+
+      if (cachedDisplay !== undefined) {
+        nextCached[path] = cachedDisplay;
+      }
+
+      if (cachedBase === undefined) {
         missingPaths.push(path);
       }
     });
@@ -569,19 +1011,104 @@ function useGoatCounterCounts(entries: PortalEntry[]): Record<string, string> {
     return () => {
       cancelled = true;
     };
-  }, [entries]);
+  }, [paths]);
+
+  useEffect(() => {
+    if (!ACTIVE_GOATCOUNTER_CONFIG) {
+      return;
+    }
+
+    const handleCountUpdated = () => {
+      const nextCounts: Record<string, string> = {};
+      paths.forEach((path) => {
+        const count = getGoatCounterDisplayCount(ACTIVE_GOATCOUNTER_CONFIG, path);
+        if (count !== undefined) {
+          nextCounts[path] = count;
+        }
+      });
+
+      setCounts((current) => ({ ...current, ...nextCounts }));
+    };
+
+    window.addEventListener(GOATCOUNTER_COUNT_UPDATED_EVENT, handleCountUpdated);
+    return () => window.removeEventListener(GOATCOUNTER_COUNT_UPDATED_EVENT, handleCountUpdated);
+  }, [paths]);
 
   return counts;
 }
 
-function getTagTone(tag: string): 'blue' | 'teal' | 'green' | 'amber' | 'violet' {
-  const tones = ['blue', 'teal', 'green', 'amber', 'violet'] as const;
+function useGiscusCommentCounts(entries: PortalEntry[]): Record<string, string> {
+  const paths = useMemo(() => [...new Set(entries.map((entry) => entry.href))], [entries]);
+  return useGiscusCommentCountsForPaths(paths);
+}
+
+function useGiscusCommentCountsForPaths(paths: string[]): Record<string, string> {
+  const [counts, setCounts] = useState<Record<string, string>>({});
+
+  useEffect(() => {
+    if (!ACTIVE_GISCUS_CONFIG) {
+      setCounts({});
+      return;
+    }
+
+    const nextCached: Record<string, string> = {};
+    const missingPaths: string[] = [];
+
+    paths.forEach((path) => {
+      const cacheKey = getGiscusCommentCacheKey(ACTIVE_GISCUS_CONFIG.repo, ACTIVE_GISCUS_CONFIG.categoryId, path);
+      const cached = giscusCommentCountCache.get(cacheKey);
+      if (cached !== undefined) {
+        nextCached[path] = cached;
+      } else {
+        missingPaths.push(path);
+      }
+    });
+
+    setCounts((current) => ({ ...current, ...nextCached }));
+
+    if (missingPaths.length === 0) {
+      return;
+    }
+
+    let cancelled = false;
+
+    void fetchGitHubDiscussions(ACTIVE_GISCUS_CONFIG)
+      .then((discussions) => {
+        if (cancelled) {
+          return;
+        }
+
+        const resolvedCounts: Record<string, string> = {};
+        paths.forEach((path) => {
+          const count = resolveGiscusCommentCountForPath(discussions, path);
+          const cacheKey = getGiscusCommentCacheKey(ACTIVE_GISCUS_CONFIG.repo, ACTIVE_GISCUS_CONFIG.categoryId, path);
+          giscusCommentCountCache.set(cacheKey, count);
+          resolvedCounts[path] = count;
+        });
+
+        setCounts((current) => ({ ...current, ...resolvedCounts }));
+      })
+      .catch((error) => {
+        console.warn('GitHub discussion count fetch failed', error);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [paths]);
+
+  return counts;
+}
+
+const TAG_TONES = ['blue', 'teal', 'green', 'amber', 'violet', 'cyan', 'olive', 'orange', 'rose', 'indigo'] as const;
+
+function getTagTone(tag: string): (typeof TAG_TONES)[number] {
   let hash = 0;
   for (const character of tag) {
     hash = (hash * 31 + character.charCodeAt(0)) | 0;
   }
 
-  return tones[Math.abs(hash) % tones.length];
+  return TAG_TONES[Math.abs(hash) % TAG_TONES.length];
 }
 
 function handleInternalLink(event: MouseEvent<HTMLAnchorElement>, href: string, navigate: (href: string) => void) {
@@ -630,10 +1157,14 @@ function SmartLink({
     );
   }
 
+  const external = /^(https?:)?\/\//i.test(href);
+
   return (
     <a
       className={className}
       href={href}
+      target={external ? '_blank' : undefined}
+      rel={external ? 'noreferrer noopener' : undefined}
       onClick={(event) => {
         if (href === '#') {
           event.preventDefault();
@@ -682,7 +1213,18 @@ function Shell({
   navigate: (href: string) => void;
   children: ReactNode;
 }) {
-  const toolLinks = contentIndex.siteConfig.channels.length > 0 ? contentIndex.siteConfig.channels : DEFAULT_TOOL_LINKS;
+  const configuredToolLinks = contentIndex.siteConfig.channels.length > 0 ? contentIndex.siteConfig.channels : DEFAULT_TOOL_LINKS;
+  const toolLinks = configuredToolLinks.map((tool) => {
+    if (tool.label === '搜索' && tool.href === '#blog-search') {
+      return { ...tool, href: '/search' };
+    }
+
+    if (tool.label === '归档' && tool.href === '#') {
+      return { ...tool, href: '/archive' };
+    }
+
+    return tool;
+  });
   const headerStyle = {
     '--blog-header-image': `url("${toAssetPath('/blog-header-bg.png')}")`,
   } as CSSProperties;
@@ -729,6 +1271,38 @@ function SidebarSection({ title, children }: { title: string; children: ReactNod
   );
 }
 
+function SearchForm({
+  navigate,
+  query,
+  setQuery,
+}: {
+  navigate: (href: string) => void;
+  query: string;
+  setQuery: (value: string) => void;
+}) {
+  const handleSearchSubmit = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const normalizedQuery = query.trim();
+    navigate(normalizedQuery ? `/search?q=${encodeURIComponent(normalizedQuery)}` : '/search');
+  };
+
+  return (
+    <form className="blog-search" onSubmit={handleSearchSubmit}>
+      <label className="blog-search-input-wrap" htmlFor="blog-search">
+        <input
+          id="blog-search"
+          type="search"
+          value={query}
+          onChange={(event) => setQuery(event.target.value)}
+          placeholder="检索标题、标签或正文"
+          autoComplete="off"
+        />
+      </label>
+      <button type="submit">搜索</button>
+    </form>
+  );
+}
+
 function SiteSidebar({
   navigate,
   query,
@@ -740,27 +1314,13 @@ function SiteSidebar({
   setQuery: (value: string) => void;
   extra?: ReactNode;
 }) {
-  const handleSearchSubmit = (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    navigate('/');
-  };
-
   return (
     <aside className="blog-sidebar">
       {extra}
 
       <SidebarSection title="搜索">
-        <form className="blog-search" onSubmit={handleSearchSubmit}>
-          <input
-            id="blog-search"
-            type="search"
-            value={query}
-            onChange={(event) => setQuery(event.target.value)}
-            placeholder="检索标题、标签、正文关键词"
-          />
-          <button type="submit">查找</button>
-        </form>
-        <p className="blog-sidebar-note">搜索会即时筛选首页和列表页中的已发布内容。</p>
+        <SearchForm navigate={navigate} query={query} setQuery={setQuery} />
+        <p className="blog-sidebar-note">多个关键词用空格分隔，结果会按相关度排序。</p>
       </SidebarSection>
 
       <SidebarSection title="标签云">
@@ -773,7 +1333,7 @@ function SiteSidebar({
                 className={`blog-tag-chip tone-${getTagTone(tag.tag)}`}
                 onClick={() => {
                   setQuery(tag.tag);
-                  navigate('/');
+                  navigate(`/search?q=${encodeURIComponent(tag.tag)}`);
                 }}
               >
                 <span>{tag.tag}</span>
@@ -786,18 +1346,26 @@ function SiteSidebar({
         </div>
       </SidebarSection>
 
-      <SidebarSection title="友情链接">
-        <ul className="blog-link-list" id="blog-links">
-          {ACTIVE_FRIEND_LINKS.map((link) => (
-            <li key={link.label}>
-              <SmartLink href={link.href} navigate={navigate} className="blog-link-item">
-                <strong>{link.label}</strong>
-                <span>{link.note}</span>
-              </SmartLink>
-            </li>
-          ))}
-        </ul>
-      </SidebarSection>
+      {ACTIVE_FRIEND_LINKS.length > 0 ? (
+        <SidebarSection title="友情链接">
+          <ul className="blog-link-list" id="blog-links">
+            {ACTIVE_FRIEND_LINKS.map((link) => (
+              <li key={`${link.label}-${link.href}`}>
+                <SmartLink href={link.href} navigate={navigate} className="blog-link-item">
+                  <FriendLinkAvatar label={link.label} icon={link.icon} />
+                  <span className="blog-link-content">
+                    <strong>
+                      <span>{link.label}</span>
+                      <IconExternalLink aria-hidden="true" />
+                    </strong>
+                    {link.note?.trim() ? <span>{link.note}</span> : null}
+                  </span>
+                </SmartLink>
+              </li>
+            ))}
+          </ul>
+        </SidebarSection>
+      ) : null}
     </aside>
   );
 }
@@ -901,10 +1469,12 @@ function ArticleCard({
   entry,
   navigate,
   viewCount,
+  commentCount,
 }: {
   entry: PortalEntry;
   navigate: (href: string) => void;
   viewCount?: string;
+  commentCount?: string;
 }) {
   return (
     <article className={`blog-card ${entry.accentClass}`}>
@@ -917,13 +1487,19 @@ function ArticleCard({
 
         <div className="blog-card-meta-row">
           <span className="blog-card-meta-item">
-            <span className="blog-card-meta-icon clock" aria-hidden="true" />
+            <IconCalendar className="blog-card-meta-icon" aria-hidden="true" stroke={1.8} />
             <span>{entry.date}</span>
           </span>
           {ACTIVE_GOATCOUNTER_CONFIG && viewCount !== undefined ? (
             <span className="blog-card-meta-item">
-              <span className="blog-card-meta-icon views" aria-hidden="true" />
+              <IconEye className="blog-card-meta-icon" aria-hidden="true" stroke={1.8} />
               <span>{viewCount} 阅读</span>
+            </span>
+          ) : null}
+          {ACTIVE_GISCUS_CONFIG && commentCount !== undefined ? (
+            <span className="blog-card-meta-item">
+              <IconMessageCircle className="blog-card-meta-icon" aria-hidden="true" stroke={1.8} />
+              <span>{commentCount} 评论</span>
             </span>
           ) : null}
           {entry.tags.slice(0, 2).map((tag) => (
@@ -960,6 +1536,7 @@ function ArticleFeed({
   emptyCopy: string;
 }) {
   const viewCounts = useGoatCounterCounts(entries);
+  const commentCounts = useGiscusCommentCounts(entries);
 
   if (entries.length === 0) {
     return (
@@ -977,10 +1554,144 @@ function ArticleFeed({
           key={entry.id}
           entry={entry}
           navigate={navigate}
-          viewCount={ACTIVE_GOATCOUNTER_CONFIG ? (viewCounts[entry.href] ?? '0') : undefined}
+          viewCount={ACTIVE_GOATCOUNTER_CONFIG ? viewCounts[entry.href] : undefined}
+          commentCount={ACTIVE_GISCUS_CONFIG ? commentCounts[entry.href] : undefined}
         />
       ))}
     </section>
+  );
+}
+
+const SEARCH_FIELD_LABELS: Record<SearchMatchField, string> = {
+  title: '标题',
+  tag: '标签',
+  category: '类目',
+  summary: '摘要',
+  body: '正文',
+};
+
+function SearchResultCard({
+  result,
+  navigate,
+  viewCount,
+  commentCount,
+}: {
+  result: SearchResult;
+  navigate: (href: string) => void;
+  viewCount?: string;
+  commentCount?: string;
+}) {
+  const { entry, terms } = result;
+
+  return (
+    <article className={`blog-search-result ${entry.accentClass}`}>
+      <div className="blog-search-result-main">
+        <SiteLink href={entry.href} navigate={navigate} className="blog-search-result-title">
+          {highlightSearchText(entry.title, terms)}
+        </SiteLink>
+
+        <div className="blog-search-result-meta">
+          <span className="blog-card-meta-item">
+            <IconCalendar className="blog-card-meta-icon" aria-hidden="true" stroke={1.8} />
+            <span>{entry.date}</span>
+          </span>
+          <span>{entry.categoryLabel}</span>
+          {ACTIVE_GOATCOUNTER_CONFIG && viewCount !== undefined ? (
+            <span className="blog-card-meta-item">
+              <IconEye className="blog-card-meta-icon" aria-hidden="true" stroke={1.8} />
+              <span>{viewCount} 阅读</span>
+            </span>
+          ) : null}
+          {ACTIVE_GISCUS_CONFIG && commentCount !== undefined ? (
+            <span className="blog-card-meta-item">
+              <IconMessageCircle className="blog-card-meta-icon" aria-hidden="true" stroke={1.8} />
+              <span>{commentCount} 评论</span>
+            </span>
+          ) : null}
+        </div>
+
+        {result.snippet ? (
+          <p className="blog-search-result-snippet">{highlightSearchText(result.snippet, terms)}</p>
+        ) : null}
+
+        <footer className="blog-search-result-footer">
+          <div className="blog-search-match-fields" aria-label="命中位置">
+            {result.matchedFields.map((field) => (
+              <span key={field}>{SEARCH_FIELD_LABELS[field]}</span>
+            ))}
+          </div>
+          <SiteLink href={entry.href} navigate={navigate} className="blog-search-result-link">
+            阅读全文
+          </SiteLink>
+        </footer>
+      </div>
+    </article>
+  );
+}
+
+function SearchResultFeed({
+  results,
+  navigate,
+}: {
+  results: SearchResult[];
+  navigate: (href: string) => void;
+}) {
+  const entries = useMemo(() => results.map((result) => result.entry), [results]);
+  const viewCounts = useGoatCounterCounts(entries);
+  const commentCounts = useGiscusCommentCounts(entries);
+
+  return (
+    <section className="blog-search-results" aria-live="polite">
+      {results.map((result) => (
+        <SearchResultCard
+          key={result.entry.id}
+          result={result}
+          navigate={navigate}
+          viewCount={ACTIVE_GOATCOUNTER_CONFIG ? viewCounts[result.entry.href] : undefined}
+          commentCount={ACTIVE_GISCUS_CONFIG ? commentCounts[result.entry.href] : undefined}
+        />
+      ))}
+    </section>
+  );
+}
+
+function SearchPage({
+  navigate,
+  query,
+  submittedQuery,
+  setQuery,
+}: {
+  navigate: (href: string) => void;
+  query: string;
+  submittedQuery: string;
+  setQuery: (value: string) => void;
+}) {
+  const deferredQuery = useDeferredValue(submittedQuery);
+  const terms = useMemo(() => parseSearchTerms(deferredQuery), [deferredQuery]);
+  const results = useMemo(() => searchEntries(GLOBAL_ENTRIES, deferredQuery), [deferredQuery]);
+
+  return (
+    <div className="blog-layout">
+      <section className="blog-main-column">
+        {terms.length === 0 ? (
+          <section className="blog-empty-state blog-search-empty">
+            <IconSearch aria-hidden="true" />
+            <h3>输入关键词开始搜索</h3>
+            <p>可检索文章标题、标签、类目、摘要和正文内容。</p>
+          </section>
+        ) : results.length > 0 ? (
+          <SearchResultFeed results={results} navigate={navigate} />
+        ) : (
+          <section className="blog-empty-state blog-search-empty">
+            <IconSearch aria-hidden="true" />
+            <h3>没有找到相关内容</h3>
+            <p>可以减少关键词数量，或换一个更简短的表达再试。</p>
+          </section>
+        )}
+      </section>
+
+      <SiteSidebar navigate={navigate} query={query} setQuery={setQuery} />
+    </div>
   );
 }
 
@@ -993,13 +1704,11 @@ function HomePage({
   query: string;
   setQuery: (value: string) => void;
 }) {
-  const filteredEntries = useMemo(() => filterEntries(GLOBAL_ENTRIES, query), [query]);
-
     return (
       <div className="blog-layout">
         <section className="blog-main-column">
           <ArticleFeed
-            entries={filteredEntries}
+            entries={GLOBAL_ENTRIES}
             navigate={navigate}
           emptyTitle="没有找到匹配的文章"
           emptyCopy="换一个关键词试试，或者直接从上方类目栏进入相应分区。"
@@ -1029,13 +1738,12 @@ function CollectionPage<TFrontmatter extends ContentFrontmatter>({
         .map((document) => toPortalEntry(document as RoutedDocument<MarkdownFrontmatter | InkNoteFrontmatter>)),
     [documents],
   );
-  const filteredEntries = useMemo(() => filterEntries(publishedEntries, query), [publishedEntries, query]);
 
     return (
       <div className="blog-layout">
         <section className="blog-main-column">
           <ArticleFeed
-            entries={filteredEntries}
+            entries={publishedEntries}
             navigate={navigate}
           emptyTitle="当前列表没有匹配结果"
           emptyCopy="可以尝试清空搜索，或者切换到别的类目继续浏览。"
@@ -1056,11 +1764,8 @@ function ArchivePage({
   query: string;
   setQuery: (value: string) => void;
 }) {
-  const filteredEntries = useMemo(() => filterEntries(GLOBAL_ENTRIES, query), [query]);
-  const archiveGroups = useMemo(() => buildArchiveGroups(filteredEntries), [filteredEntries]);
-  const archiveDescription = query.trim()
-    ? '当前筛选结果会按年月归档展示。'
-    : '按年月整理所有已发布文章，方便回顾与检索。';
+  const archiveGroups = useMemo(() => buildArchiveGroups(GLOBAL_ENTRIES), []);
+  const archiveDescription = '按年月整理所有已发布文章，方便回顾与检索。';
 
   return (
     <div className="blog-layout">
@@ -1073,7 +1778,7 @@ function ArchivePage({
               <p>{archiveDescription}</p>
             </div>
             <div className="blog-metrics">
-              <span>{filteredEntries.length} 篇文章</span>
+              <span>{GLOBAL_ENTRIES.length} 篇文章</span>
               <span>{archiveGroups.length} 个归档月份</span>
             </div>
           </div>
@@ -1179,6 +1884,11 @@ function DetailPage<TFrontmatter extends ContentFrontmatter>({
   showComments?: boolean;
 }) {
   const headings = useMemo(() => extractMarkdownHeadings(document.body, { minLevel: 1, maxLevel: 4 }), [document.body]);
+  const statPaths = useMemo(() => [document.href], [document.href]);
+  const viewCounts = useGoatCounterCountsForPaths(statPaths);
+  const commentCounts = useGiscusCommentCountsForPaths(statPaths);
+  const viewCount = ACTIVE_GOATCOUNTER_CONFIG ? viewCounts[document.href] : undefined;
+  const commentCount = ACTIVE_GISCUS_CONFIG && showComments ? commentCounts[document.href] : undefined;
 
   return (
     <div className="blog-layout detail">
@@ -1188,10 +1898,22 @@ function DetailPage<TFrontmatter extends ContentFrontmatter>({
             <div>
               <h2>{document.frontmatter.title}</h2>
               <div className="blog-detail-meta">
+                {viewCount !== undefined ? (
+                  <span className="blog-card-meta-item">
+                    <IconEye className="blog-card-meta-icon" aria-hidden="true" stroke={1.8} />
+                    <span>{viewCount} 阅读</span>
+                  </span>
+                ) : null}
+                {commentCount !== undefined ? (
+                  <span className="blog-card-meta-item">
+                    <IconMessageCircle className="blog-card-meta-icon" aria-hidden="true" stroke={1.8} />
+                    <span>{commentCount} 评论</span>
+                  </span>
+                ) : null}
                 {meta.map((item, index) =>
                   item.type === 'date' ? (
                     <span key={`${item.type}-${item.label}-${index}`} className="blog-card-meta-item">
-                      <span className="blog-card-meta-icon clock" aria-hidden="true" />
+                      <IconCalendar className="blog-card-meta-icon" aria-hidden="true" stroke={1.8} />
                       <span>{item.label}</span>
                     </span>
                   ) : (
@@ -1209,7 +1931,7 @@ function DetailPage<TFrontmatter extends ContentFrontmatter>({
           </div>
         </section>
 
-        <article className="markdown-body">{renderMarkdown(document.body)}</article>
+        <article className="markdown-body">{renderMarkdown(resolveWebContentImages(document.body))}</article>
         {showComments ? <GiscusThread key={document.href} threadKey={document.href} /> : null}
       </section>
 
@@ -1248,7 +1970,8 @@ function NotFoundPage({
 
 export default function SiteAppWide() {
   const [pathname, setPathname] = useState(() => getInitialPathname());
-  const [searchQuery, setSearchQuery] = useState('');
+  const [searchQuery, setSearchQuery] = useState(() => getSearchQueryFromLocation());
+  const [submittedSearchQuery, setSubmittedSearchQuery] = useState(() => getSearchQueryFromLocation());
   const [isGoatCounterReady, setIsGoatCounterReady] = useState(
     () => typeof window !== 'undefined' && typeof (window as { goatcounter?: { count?: unknown } }).goatcounter?.count === 'function',
   );
@@ -1268,6 +1991,7 @@ export default function SiteAppWide() {
     const existingWindowConfig = (window as { goatcounter?: Record<string, unknown> }).goatcounter ?? {};
     (window as { goatcounter?: Record<string, unknown> }).goatcounter = {
       ...existingWindowConfig,
+      allow_local: true,
       no_onload: true,
     };
 
@@ -1283,6 +2007,10 @@ export default function SiteAppWide() {
     script.async = true;
     script.src = ACTIVE_GOATCOUNTER_CONFIG.scriptUrl;
     script.dataset.goatcounter = ACTIVE_GOATCOUNTER_CONFIG.endpoint;
+    script.dataset.goatcounterSettings = JSON.stringify({
+      allow_local: true,
+      no_onload: true,
+    });
     script.addEventListener('load', () => setIsGoatCounterReady(true), { once: true });
     document.head.appendChild(script);
   }, []);
@@ -1302,12 +2030,28 @@ export default function SiteAppWide() {
       return;
     }
 
-    const counter = (window as { goatcounter?: { count?: (options?: { path?: string }) => void } }).goatcounter;
+    const counter = (window as {
+      goatcounter?: {
+        count?: (options?: { path?: string; no_session?: boolean; title?: string }) => void;
+        filter?: () => string | false;
+      };
+    }).goatcounter;
     if (typeof counter?.count !== 'function') {
       return;
     }
 
-    counter.count({ path: nextPath });
+    const filteredReason = typeof counter.filter === 'function' ? counter.filter() : false;
+    if (filteredReason) {
+      console.warn('GoatCounter skipped pageview:', filteredReason);
+      return;
+    }
+
+    counter.count({
+      path: nextPath,
+      title: document.title,
+      no_session: window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1',
+    });
+    applyOptimisticGoatCounterCount(ACTIVE_GOATCOUNTER_CONFIG, nextPath);
     goatCounterTrackedPathRef.current = nextPath;
   }, [isGoatCounterReady, route]);
 
@@ -1323,6 +2067,10 @@ export default function SiteAppWide() {
       nextTitle = note?.frontmatter.title?.trim() || blogTitle;
     } else if (route.type === 'archive') {
       nextTitle = `归档 | ${blogTitle}`;
+    } else if (route.type === 'search') {
+      nextTitle = submittedSearchQuery.trim()
+        ? `搜索：${submittedSearchQuery.trim()} | ${blogTitle}`
+        : `搜索 | ${blogTitle}`;
     } else if (route.type === 'page') {
       const pageDocument = findPage(route.slug);
       nextTitle = pageDocument?.frontmatter.title?.trim() || blogTitle;
@@ -1331,15 +2079,22 @@ export default function SiteAppWide() {
     }
 
     document.title = nextTitle;
-  }, [route]);
+  }, [route, submittedSearchQuery]);
 
   useEffect(() => {
     const handlePopState = () => {
       const nextPath = resolveDefaultPath(stripBasePath(window.location.pathname));
       if (toBrowserPath(nextPath) !== normalizePathname(window.location.pathname)) {
-        window.history.replaceState({}, '', toBrowserPath(nextPath));
+        window.history.replaceState(
+          {},
+          '',
+          `${toBrowserPath(nextPath)}${window.location.search}${window.location.hash}`,
+        );
       }
       setPathname(nextPath);
+      const nextSearchQuery = getSearchQueryFromLocation();
+      setSearchQuery(nextSearchQuery);
+      setSubmittedSearchQuery(nextSearchQuery);
       window.scrollTo({ top: 0, behavior: 'auto' });
     };
 
@@ -1348,13 +2103,19 @@ export default function SiteAppWide() {
   }, []);
 
   const navigate = (href: string) => {
-    const nextPath = resolveDefaultPath(stripBasePath(href));
-    if (nextPath === pathname) {
+    const target = parseInternalHref(href);
+    const nextPath = resolveDefaultPath(stripBasePath(target.pathname));
+    const nextQuery = target.searchParams.get('q') ?? '';
+    const nextBrowserHref = `${toBrowserPath(nextPath)}${target.search}${target.hash}`;
+    const currentBrowserHref = `${window.location.pathname}${window.location.search}${window.location.hash}`;
+    if (nextBrowserHref === currentBrowserHref) {
       return;
     }
 
-    window.history.pushState({}, '', toBrowserPath(nextPath));
+    window.history.pushState({}, '', nextBrowserHref);
     setPathname(nextPath);
+    setSearchQuery(nextQuery);
+    setSubmittedSearchQuery(nextPath === '/search' ? nextQuery : '');
     window.scrollTo({ top: 0, behavior: 'auto' });
   };
 
@@ -1362,6 +2123,15 @@ export default function SiteAppWide() {
 
   if (route.type === 'home') {
     page = <HomePage navigate={navigate} query={searchQuery} setQuery={setSearchQuery} />;
+  } else if (route.type === 'search') {
+    page = (
+      <SearchPage
+        navigate={navigate}
+        query={searchQuery}
+        submittedQuery={submittedSearchQuery}
+        setQuery={setSearchQuery}
+      />
+    );
   } else if (route.type === 'archive') {
     page = <ArchivePage navigate={navigate} query={searchQuery} setQuery={setSearchQuery} />;
   } else if (route.type === 'notes-list') {

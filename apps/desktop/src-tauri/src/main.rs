@@ -1,5 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod favicon;
+
 use serde::Serialize;
 use std::{
     fs,
@@ -179,6 +181,11 @@ fn delete_content_path(path: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+async fn fetch_friend_link_icon(page_url: String) -> Result<favicon::FriendLinkIconResult, String> {
+    favicon::fetch_and_cache(page_url).await
+}
+
+#[tauri::command]
 fn get_publish_status() -> Result<PublishStatus, String> {
     ensure_git_repository()?;
 
@@ -282,7 +289,7 @@ fn open_external_url(url: String) -> Result<(), String> {
 fn ensure_blog_preview_server(
     server: tauri::State<'_, BlogPreviewServer>,
 ) -> Result<BlogPreviewServerStatus, String> {
-    ensure_blog_preview_server_state(server.inner(), false)
+    ensure_blog_preview_server_state(server.inner(), true)
 }
 
 fn ensure_parent_directory(path: &str) -> Result<(), String> {
@@ -462,11 +469,14 @@ fn wait_for_blog_preview_server(should_wait: bool) -> bool {
 }
 
 fn is_blog_preview_server_ready() -> bool {
-    TcpStream::connect_timeout(&blog_preview_socket_addr(), Duration::from_millis(120)).is_ok()
-}
+    let addresses = [
+        SocketAddr::from(([127, 0, 0, 1], BLOG_PREVIEW_PORT)),
+        SocketAddr::from(([0, 0, 0, 0, 0, 0, 0, 1], BLOG_PREVIEW_PORT)),
+    ];
 
-fn blog_preview_socket_addr() -> SocketAddr {
-    SocketAddr::from(([127, 0, 0, 1], BLOG_PREVIEW_PORT))
+    addresses
+        .iter()
+        .any(|address| TcpStream::connect_timeout(address, Duration::from_millis(120)).is_ok())
 }
 
 fn get_workspace_root() -> Result<PathBuf, String> {
@@ -542,6 +552,8 @@ fn main() {
             read_content_file,
             write_content_file,
             delete_content_path,
+            fetch_friend_link_icon,
+            favicon::cache_external_image,
             get_publish_status,
             publish_content_changes,
             open_external_url,

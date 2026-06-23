@@ -6,11 +6,39 @@ import {
   useRef,
   useState,
   type ChangeEvent,
+  type ClipboardEvent as ReactClipboardEvent,
   type KeyboardEvent,
   type PointerEvent as ReactPointerEvent,
-  type ReactNode,
   type WheelEvent,
 } from 'react';
+import {
+  IconArrowBackUp,
+  IconArrowDown,
+  IconArrowForwardUp,
+  IconArrowUp,
+  IconAlignCenter,
+  IconBlockquote,
+  IconBold,
+  IconBook2,
+  IconCheck,
+  IconCode,
+  IconDots,
+  IconDownload,
+  IconGripVertical,
+  IconHeading,
+  IconItalic,
+  IconLink,
+  IconList,
+  IconListNumbers,
+  IconLoader2,
+  IconPencil,
+  IconPhoto,
+  IconPlus,
+  IconRefresh,
+  IconTrash,
+  IconWriting,
+  IconX,
+} from '@tabler/icons-react';
 import {
   createDefaultProject,
   deserializeProject,
@@ -57,15 +85,18 @@ import {
 import { MarkdownPreview } from './lib/markdown-preview';
 import {
   chooseFileToSave,
+  cacheExternalImage,
   deleteContentFile,
   ensureBlogPreviewServer,
   ensureExtension,
+  fetchFriendLinkIcon,
   getContentIndex,
   getPublishStatus,
   isTauri,
   openExternalUrl,
   publishContentChanges,
   readContentFile,
+  writeBinaryFile,
   writeContentFile,
   writeTextFile,
   type PublishStatusResponse,
@@ -102,13 +133,316 @@ interface DraftUndoEntry {
   selection: EditorSelectionState | null;
 }
 
+interface DraftAutoSaveMetadata {
+  sourceRelativePath: string;
+  title?: string;
+  tagsText?: string;
+}
+
 const DRAFT_UNDO_LIMIT = 100;
+const DRAFT_TITLE_AUTOSAVE_DELAY = 350;
 const NOTE_HISTORY_LIMIT = 24;
 const BRAND_AVATAR_STORAGE_KEY = 'inknote.desktop.brandAvatar';
 const SITE_CONFIG_PATH = 'site/site.config.json';
 const LOCAL_BLOG_PREVIEW_ORIGIN = 'http://localhost:4321';
+const PASTED_IMAGE_MAX_BYTES = 25 * 1024 * 1024;
+const PASTED_IMAGE_EXTENSIONS: Record<string, string> = {
+  'image/png': 'png',
+  'image/jpeg': 'jpg',
+  'image/webp': 'webp',
+  'image/gif': 'gif',
+};
+const TABLER_ICON_OVERRIDES = `
+  .notes-settings-close::before,
+  .notes-category-dialog-close::before,
+  .notes-metadata-dialog-close::before,
+  .notes-create-dialog-close::before { content: none; }
+  .notes-settings-close svg,
+  .notes-category-dialog-close svg,
+  .notes-metadata-dialog-close svg,
+  .notes-create-dialog-close svg { width: 16px; height: 16px; stroke-width: 1.9; }
+  .notes-settings-category-create-plus svg,
+  .notes-tag-picker-option-state svg { width: 15px; height: 15px; }
+  .notes-editor-toolbar { padding-left: calc(0.75rem - 0.44rem); }
+`;
 
-type SettingsSection = 'categories' | 'blog' | 'publish';
+type SettingsSection = 'categories' | 'blog' | 'images' | 'publish';
+
+type ImageReferenceLocation = 'body' | 'cover' | 'previewImage';
+
+interface ParsedImageReference {
+  source: string;
+  alt: string;
+  start: number;
+  end: number;
+}
+
+interface ManagedImageUsage {
+  notePath: string;
+  noteTitle: string;
+  location: ImageReferenceLocation;
+}
+
+interface ManagedImageAsset {
+  source: string;
+  alt: string;
+  kind: 'internal' | 'external';
+  occurrences: number;
+  usages: ManagedImageUsage[];
+}
+
+type ImageLocalizationStatus = 'processing' | 'success' | 'error';
+
+function padDatePart(value: number, length = 2): string {
+  return String(value).padStart(length, '0');
+}
+
+function createPastedImageFileName(date: Date, index: number, total: number, extension: string): string {
+  const stamp = [
+    date.getFullYear(),
+    padDatePart(date.getMonth() + 1),
+    padDatePart(date.getDate()),
+    '-',
+    padDatePart(date.getHours()),
+    padDatePart(date.getMinutes()),
+    padDatePart(date.getSeconds()),
+    '-',
+    padDatePart(date.getMilliseconds(), 3),
+  ].join('');
+  const nonce = Math.random().toString(36).slice(2, 6).padEnd(4, '0');
+  const sequence = total > 1 ? `-${padDatePart(index + 1)}` : '';
+  return `image-${stamp}-${nonce}${sequence}.${extension}`;
+}
+
+function getPastedImageTargetPath(
+  contentRoot: string,
+  noteType: ContentDraft['type'],
+  noteSlug: string,
+  fileName: string,
+): { filePath: string; publicPath: string } {
+  const normalizedRoot = contentRoot.replace(/[\\/]+$/, '');
+  const rootMatch = normalizedRoot.match(/^(.*)[\\/]content$/i);
+  if (!rootMatch) {
+    throw new Error('无法从内容仓路径定位项目目录。');
+  }
+  if (!/^[a-z0-9_-]+$/i.test(noteSlug)) {
+    throw new Error('当前文章路由不适合用作图片目录。');
+  }
+
+  const separator = normalizedRoot.includes('\\') ? '\\' : '/';
+  const collection = noteType === 'inknote' ? 'inknotes' : 'markdown';
+  const relativeSegments = ['apps', 'web', 'public', 'content-images', collection, noteSlug, fileName];
+
+  return {
+    filePath: `${rootMatch[1]}${separator}${relativeSegments.join(separator)}`,
+    publicPath: `/content-images/${collection}/${noteSlug}/${fileName}`,
+  };
+}
+
+function resolveDesktopContentImages(markdown: string): string {
+  const publicPrefix = '/content-images/';
+  const previewPrefix = `${LOCAL_BLOG_PREVIEW_ORIGIN}${publicPrefix}`;
+
+  return markdown
+    .replace(/(\]\(\s*)\/content-images\//g, `$1${previewPrefix}`)
+    .replace(/(\bsrc\s*=\s*["'])\/content-images\//gi, `$1${previewPrefix}`);
+}
+
+function parseImageReferences(markdown: string): ParsedImageReference[] {
+  const references: ParsedImageReference[] = [];
+  const markdownImagePattern = /!\[([^\]]*)\]\(\s*(?:<([^>\r\n]+)>|([^\s)\r\n]+))/g;
+  const htmlImagePattern = /<img\b[^>]*\bsrc\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))[^>]*>/gi;
+
+  for (const match of markdown.matchAll(markdownImagePattern)) {
+    const source = (match[2] || match[3] || '').trim();
+    if (!source || match.index === undefined) {
+      continue;
+    }
+    const sourceOffset = match[0].indexOf(source);
+    references.push({
+      source,
+      alt: match[1].trim(),
+      start: match.index + sourceOffset,
+      end: match.index + sourceOffset + source.length,
+    });
+  }
+
+  for (const match of markdown.matchAll(htmlImagePattern)) {
+    const source = (match[1] || match[2] || match[3] || '').trim();
+    if (!source || match.index === undefined) {
+      continue;
+    }
+    const sourceOffset = match[0].indexOf(source);
+    const altMatch = match[0].match(/\balt\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/i);
+    references.push({
+      source,
+      alt: (altMatch?.[1] || altMatch?.[2] || altMatch?.[3] || '').trim(),
+      start: match.index + sourceOffset,
+      end: match.index + sourceOffset + source.length,
+    });
+  }
+
+  return references.sort((left, right) => left.start - right.start);
+}
+
+function replaceImageReferenceSources(markdown: string, replacements: Map<string, string>): string {
+  const references = parseImageReferences(markdown)
+    .filter((reference) => replacements.has(reference.source))
+    .sort((left, right) => right.start - left.start);
+  let nextMarkdown = markdown;
+
+  for (const reference of references) {
+    nextMarkdown = `${nextMarkdown.slice(0, reference.start)}${replacements.get(reference.source)}${nextMarkdown.slice(reference.end)}`;
+  }
+
+  return nextMarkdown;
+}
+
+function isExternalImageSource(source: string): boolean {
+  return /^https?:\/\//i.test(source.trim());
+}
+
+function getManagedImagePreviewSource(source: string): string {
+  const trimmed = source.trim();
+  if (isExternalImageSource(trimmed) || /^(?:data:|blob:)/i.test(trimmed)) {
+    return trimmed;
+  }
+  if (trimmed.startsWith('/')) {
+    return `${LOCAL_BLOG_PREVIEW_ORIGIN}${trimmed}`;
+  }
+  return '';
+}
+
+function collectManagedImages(items: ContentLibraryItem[], draft: ContentDraft | null): ManagedImageAsset[] {
+  const assets = new Map<string, ManagedImageAsset>();
+
+  for (const item of items) {
+    const itemDraft =
+      draft?.sourceRelativePath === item.relativePath ? draft : createDraftFromItem(item);
+    const usageBase = {
+      notePath: item.relativePath,
+      noteTitle: itemDraft.title,
+    };
+    const foundReferences: Array<{
+      source: string;
+      alt: string;
+      location: ImageReferenceLocation;
+    }> = [
+      ...parseImageReferences(itemDraft.body).map((reference) => ({
+        source: reference.source,
+        alt: reference.alt,
+        location: 'body' as const,
+      })),
+      ...(itemDraft.cover.trim()
+        ? [{ source: itemDraft.cover.trim(), alt: '封面', location: 'cover' as const }]
+        : []),
+      ...(itemDraft.previewImage.trim()
+        ? [{ source: itemDraft.previewImage.trim(), alt: '预览图', location: 'previewImage' as const }]
+        : []),
+    ];
+
+    for (const reference of foundReferences) {
+      const existing = assets.get(reference.source);
+      const usage: ManagedImageUsage = { ...usageBase, location: reference.location };
+      if (existing) {
+        existing.occurrences += 1;
+        if (
+          !existing.usages.some(
+            (current) => current.notePath === usage.notePath && current.location === usage.location,
+          )
+        ) {
+          existing.usages.push(usage);
+        }
+        if (!existing.alt && reference.alt) {
+          existing.alt = reference.alt;
+        }
+        continue;
+      }
+
+      assets.set(reference.source, {
+        source: reference.source,
+        alt: reference.alt,
+        kind: isExternalImageSource(reference.source) ? 'external' : 'internal',
+        occurrences: 1,
+        usages: [usage],
+      });
+    }
+  }
+
+  return [...assets.values()].sort(
+    (left, right) =>
+      Number(right.kind === 'external') - Number(left.kind === 'external') ||
+      left.source.localeCompare(right.source),
+  );
+}
+
+function ManagedImageCard({
+  asset,
+  localizationStatus,
+}: {
+  asset: ManagedImageAsset;
+  localizationStatus?: ImageLocalizationStatus;
+}) {
+  const [failed, setFailed] = useState(false);
+  const previewSource = getManagedImagePreviewSource(asset.source);
+
+  useEffect(() => {
+    setFailed(false);
+  }, [previewSource]);
+
+  return (
+    <article className="notes-settings-image-card">
+      <div className="notes-settings-image-preview">
+        {previewSource && !failed ? (
+          <img
+            src={previewSource}
+            alt={asset.alt || ''}
+            loading="lazy"
+            referrerPolicy="no-referrer"
+            onError={() => setFailed(true)}
+          />
+        ) : (
+          <IconPhoto aria-hidden="true" />
+        )}
+        <span className={`notes-settings-image-kind ${asset.kind}`}>
+          {asset.kind === 'external' ? '外部' : '内部'}
+        </span>
+        {localizationStatus ? (
+          <span
+            className={`notes-settings-image-status ${localizationStatus}`}
+            title={
+              localizationStatus === 'processing'
+                ? '正在保存'
+                : localizationStatus === 'success'
+                  ? '保存完成'
+                  : '保存失败'
+            }
+            aria-label={
+              localizationStatus === 'processing'
+                ? '正在保存'
+                : localizationStatus === 'success'
+                  ? '保存完成'
+                  : '保存失败'
+            }
+          >
+            {localizationStatus === 'processing' ? (
+              <IconLoader2 className="spinning" aria-hidden="true" />
+            ) : localizationStatus === 'success' ? (
+              <IconCheck aria-hidden="true" />
+            ) : (
+              <IconX aria-hidden="true" />
+            )}
+          </span>
+        ) : null}
+      </div>
+      <div className="notes-settings-image-copy">
+        <strong title={asset.alt || asset.source}>{asset.alt || '无标题'}</strong>
+        <span title={asset.source}>{asset.source}</span>
+        <small>{asset.usages.length} 篇笔记 · {asset.occurrences} 处引用</small>
+      </div>
+    </article>
+  );
+}
 
 const DEFAULT_SITE_CONFIG: SiteConfig = {
   title: "Chty's Blog",
@@ -297,8 +631,22 @@ function createHistoryEntry(label: string, detail = ''): NoteHistoryEntry {
 }
 
 function getDraftEditorSnapshot(draft: ContentDraft): string {
-  const { savedSnapshot: _savedSnapshot, ...editorState } = draft;
+  const {
+    savedSnapshot: _savedSnapshot,
+    title: _title,
+    tagsText: _tagsText,
+    ...editorState
+  } = draft;
   return JSON.stringify(editorState);
+}
+
+function preserveAutoSavedMetadata(target: ContentDraft, current: ContentDraft): ContentDraft {
+  return patchDraft(target, {
+    title: current.title,
+    tagsText: current.tagsText,
+    updatedAt: current.updatedAt,
+    savedSnapshot: current.savedSnapshot,
+  });
 }
 
 function cloneDefaultSiteConfig(): SiteConfig {
@@ -330,12 +678,16 @@ function normalizeSiteConfig(value: unknown): SiteConfig {
     : fallback.channels;
   const friendLinks = Array.isArray(input.friendLinks)
     ? input.friendLinks
-        .map((link) =>
+        .map<FriendLinkConfig | null>((link) =>
           link && typeof link === 'object'
             ? {
                 label: typeof link.label === 'string' ? link.label : '',
                 href: typeof link.href === 'string' ? link.href : '',
                 note: typeof link.note === 'string' ? link.note : '',
+                icon: typeof link.icon === 'string' ? link.icon : '',
+                iconSource: typeof link.iconSource === 'string' ? link.iconSource : '',
+                iconTarget: typeof link.iconTarget === 'string' ? link.iconTarget : '',
+                iconFetchedAt: typeof link.iconFetchedAt === 'string' ? link.iconFetchedAt : '',
               }
             : null,
         )
@@ -468,28 +820,6 @@ function parseSiteChannelsText(value: string): SiteConfig['channels'] {
     .filter((channel) => channel.label && channel.href);
 }
 
-function formatFriendLinks(links: FriendLinkConfig[] = []): string {
-  return links
-    .map((link) => [link.label, link.href, link.note].map((part) => part.trim()).join(' | '))
-    .join('\n');
-}
-
-function parseFriendLinksText(value: string): FriendLinkConfig[] {
-  return value
-    .split('\n')
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .map((line) => {
-      const [label = '', href = '', ...noteParts] = line.split('|').map((part) => part.trim());
-      return {
-        label,
-        href,
-        note: noteParts.join(' | '),
-      };
-    })
-    .filter((link) => link.label && link.href);
-}
-
 function getProjectSnapshot(project: ProjectData): string {
   return JSON.stringify(
     {
@@ -585,14 +915,15 @@ function getFrontmatterTags(value: unknown): string[] {
   return [];
 }
 
-function getTagTone(tag: string): 'blue' | 'teal' | 'green' | 'amber' | 'violet' {
-  const tones = ['blue', 'teal', 'green', 'amber', 'violet'] as const;
+const TAG_TONES = ['blue', 'teal', 'green', 'amber', 'violet', 'cyan', 'olive', 'orange', 'rose', 'indigo'] as const;
+
+function getTagTone(tag: string): (typeof TAG_TONES)[number] {
   let hash = 0;
   for (const character of tag) {
     hash = (hash * 31 + character.charCodeAt(0)) | 0;
   }
 
-  return tones[Math.abs(hash) % tones.length];
+  return TAG_TONES[Math.abs(hash) % TAG_TONES.length];
 }
 
 function getCategoryLabel(categories: ContentCategory[], slug: string): string {
@@ -695,17 +1026,25 @@ function insertSnippet(
   };
 }
 
-function ToolbarSvg({
-  children,
-  viewBox = '0 0 16 16',
-}: {
-  children: ReactNode;
-  viewBox?: string;
-}) {
+function FriendLinkAvatar({ label, icon, fetchedAt }: { label: string; icon?: string; fetchedAt?: string }) {
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    setFailed(false);
+  }, [fetchedAt, icon]);
+
+  const cacheKey = fetchedAt?.trim() ? `?v=${encodeURIComponent(fetchedAt)}` : '';
+  const source = icon?.trim()
+    ? `${LOCAL_BLOG_PREVIEW_ORIGIN}${icon.startsWith('/') ? icon : `/${icon}`}${cacheKey}`
+    : '';
+
   return (
-    <svg viewBox={viewBox} aria-hidden="true" focusable="false">
-      {children}
-    </svg>
+    <span className="notes-settings-friend-avatar" aria-hidden="true">
+      <span>{label.trim() ? label.trim().slice(0, 1).toUpperCase() : <IconLink />}</span>
+      {source && !failed ? (
+        <img key={source} src={source} alt="" onError={() => setFailed(true)} />
+      ) : null}
+    </span>
   );
 }
 
@@ -731,10 +1070,10 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
   const [brandAvatar, setBrandAvatar] = useState('');
   const [siteConfigDraft, setSiteConfigDraft] = useState<SiteConfig>(() => cloneDefaultSiteConfig());
   const [siteChannelsText, setSiteChannelsText] = useState(() => formatSiteChannels(DEFAULT_SITE_CONFIG.channels));
-  const [friendLinksText, setFriendLinksText] = useState(() =>
-    formatFriendLinks(DEFAULT_SITE_CONFIG.friendLinks ?? []),
-  );
   const [isSiteConfigSaving, setIsSiteConfigSaving] = useState(false);
+  const [friendIconLoadingIndex, setFriendIconLoadingIndex] = useState<number | null>(null);
+  const [isLocalizingImages, setIsLocalizingImages] = useState(false);
+  const [imageLocalizationStatus, setImageLocalizationStatus] = useState<Record<string, ImageLocalizationStatus>>({});
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [settingsSection, setSettingsSection] = useState<SettingsSection>('categories');
   const [categoryDialog, setCategoryDialog] = useState<CategoryDialogState | null>(null);
@@ -747,12 +1086,10 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
   const [isMetadataDialogOpen, setIsMetadataDialogOpen] = useState(false);
   const [isDeleteDialogOpen, setIsDeleteDialogOpen] = useState(false);
   const [createTitleValue, setCreateTitleValue] = useState('');
-  const [createSlugValue, setCreateSlugValue] = useState('');
   const [createCategoryValue, setCreateCategoryValue] = useState('');
   const [createTypeValue, setCreateTypeValue] = useState<ContentDraft['type']>('markdown');
   const [metadataCategoryValue, setMetadataCategoryValue] = useState('');
   const [metadataDateValue, setMetadataDateValue] = useState('');
-  const [metadataSlugValue, setMetadataSlugValue] = useState('');
   const [pendingSwitchItem, setPendingSwitchItem] = useState<ContentLibraryItem | null>(null);
   const [isPendingSwitchSaving, setIsPendingSwitchSaving] = useState(false);
   const [isTagPickerOpen, setIsTagPickerOpen] = useState(false);
@@ -769,6 +1106,7 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
   const previewArticleRef = useRef<HTMLElement | null>(null);
   const tagPickerRef = useRef<HTMLDivElement | null>(null);
   const tagInputRef = useRef<HTMLInputElement | null>(null);
+  const friendIconAutoRequestedRef = useRef(new Set<string>());
   const metadataDateInputRef = useRef<HTMLInputElement | null>(null);
   const brandAvatarInputRef = useRef<HTMLInputElement | null>(null);
   const createTitleInputRef = useRef<HTMLInputElement | null>(null);
@@ -792,6 +1130,9 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
   const siteConfigLoadedRef = useRef(false);
   const siteConfigSnapshotRef = useRef('');
   const siteConfigSaveTimerRef = useRef<number | null>(null);
+  const draftMetadataSaveTimerRef = useRef<number | null>(null);
+  const pendingDraftMetadataRef = useRef<DraftAutoSaveMetadata | null>(null);
+  const draftMetadataSaveQueueRef = useRef<Promise<void>>(Promise.resolve());
 
   useEffect(() => {
     linkedNotebookRef.current = linkedNotebook;
@@ -1144,7 +1485,7 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
   const previewBody = draft?.body ?? '';
   const deferredPreviewBody = useDeferredValue(previewRenderBody);
   const renderedPreview = useMemo(
-    () => <MarkdownPreview markdown={deferredPreviewBody} />,
+    () => <MarkdownPreview markdown={resolveDesktopContentImages(deferredPreviewBody)} />,
     [deferredPreviewBody],
   );
 
@@ -1450,7 +1791,6 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
     const applyConfig = (nextConfig: SiteConfig) => {
       setSiteConfigDraft(nextConfig);
       setSiteChannelsText(formatSiteChannels(nextConfig.channels));
-      setFriendLinksText(formatFriendLinks(nextConfig.friendLinks ?? []));
       siteConfigSnapshotRef.current = JSON.stringify(nextConfig);
       siteConfigLoadedRef.current = true;
     };
@@ -1479,7 +1819,6 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
     const nextConfig = normalizeSiteConfig({
       ...siteConfigDraft,
       channels: parseSiteChannelsText(siteChannelsText),
-      friendLinks: parseFriendLinksText(friendLinksText),
     });
 
     setIsSiteConfigSaving(true);
@@ -1496,6 +1835,98 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
 
   const updateSiteConfigDraft = (patch: Partial<SiteConfig>) => {
     setSiteConfigDraft((current) => ({ ...current, ...patch }));
+  };
+
+  const updateFriendLinkDraft = (index: number, patch: Partial<FriendLinkConfig>) => {
+    setSiteConfigDraft((current) => ({
+      ...current,
+      friendLinks: (current.friendLinks ?? []).map((link, linkIndex) =>
+        linkIndex === index ? { ...link, ...patch } : link,
+      ),
+    }));
+  };
+
+  const addFriendLinkDraft = () => {
+    setSiteConfigDraft((current) => ({
+      ...current,
+      friendLinks: [
+        ...(current.friendLinks ?? []),
+        { label: '', href: '', note: '' },
+      ],
+    }));
+  };
+
+  const removeFriendLinkDraft = (index: number) => {
+    setSiteConfigDraft((current) => ({
+      ...current,
+      friendLinks: (current.friendLinks ?? []).filter((_, linkIndex) => linkIndex !== index),
+    }));
+  };
+
+  const moveFriendLinkDraft = (index: number, direction: -1 | 1) => {
+    setSiteConfigDraft((current) => {
+      const links = [...(current.friendLinks ?? [])];
+      const targetIndex = index + direction;
+      if (targetIndex < 0 || targetIndex >= links.length) {
+        return current;
+      }
+
+      [links[index], links[targetIndex]] = [links[targetIndex], links[index]];
+      return { ...current, friendLinks: links };
+    });
+  };
+
+  const refreshFriendLinkIcon = async (index: number) => {
+    if (friendIconLoadingIndex !== null) {
+      return;
+    }
+
+    const link = siteConfigDraft.friendLinks?.[index];
+    const target = link?.href.trim() ?? '';
+    if (!target || target === '#') {
+      setStatus('\u8bf7\u5148\u586b\u5199\u6709\u6548\u7684\u53cb\u94fe\u7f51\u5740\u3002');
+      return;
+    }
+    if (!isTauri()) {
+      setStatus('\u7ad9\u70b9\u56fe\u6807\u9700\u8981\u5728 Tauri \u684c\u9762\u7aef\u4e2d\u6293\u53d6\u3002');
+      return;
+    }
+
+    setFriendIconLoadingIndex(index);
+    try {
+      const result = await fetchFriendLinkIcon(target);
+      setSiteConfigDraft((current) => ({
+        ...current,
+        friendLinks: (current.friendLinks ?? []).map((currentLink, linkIndex) =>
+          linkIndex === index && currentLink.href.trim() === target
+            ? {
+                ...currentLink,
+                icon: result.iconPath,
+                iconSource: result.sourceUrl,
+                iconTarget: target,
+                iconFetchedAt: new Date().toISOString(),
+              }
+            : currentLink,
+        ),
+      }));
+      setStatus(`\u5df2\u4ece ${result.resolvedPageUrl} \u66f4\u65b0\u7ad9\u70b9\u56fe\u6807\u3002`);
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : typeof error === 'string' ? error : '';
+      setStatus(
+        detail
+          ? `\u672a\u80fd\u83b7\u53d6\u7ad9\u70b9\u56fe\u6807\uff1a${detail}`
+          : '\u672a\u80fd\u83b7\u53d6\u7ad9\u56fe\u6807\uff0c\u5c06\u4f7f\u7528\u9996\u5b57\u6bcd\u3002',
+      );
+    } finally {
+      setFriendIconLoadingIndex((current) => (current === index ? null : current));
+    }
+  };
+
+  const refreshFriendLinkIconIfNeeded = (index: number) => {
+    const link = siteConfigDraft.friendLinks?.[index];
+    if (link?.href.trim() && (!link.icon?.trim() || link.iconTarget !== link.href.trim())) {
+      void refreshFriendLinkIcon(index);
+    }
   };
 
   const updateRepositoryConfigDraft = (patch: Partial<RepositoryConfig>) => {
@@ -1583,7 +2014,7 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
         selection: readEditorSelection() ?? editorSelectionRef.current,
       },
     ];
-    setDraft(previousDraft.draft);
+    setDraft(preserveAutoSavedMetadata(previousDraft.draft, draft));
     restoreEditorSelection(previousDraft.selection);
     appendHistoryEntry('Undo', draft.title);
     setStatus('Undid the latest editor change.');
@@ -1607,7 +2038,7 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
         selection: readEditorSelection() ?? editorSelectionRef.current,
       },
     ];
-    setDraft(nextDraft.draft);
+    setDraft(preserveAutoSavedMetadata(nextDraft.draft, draft));
     restoreEditorSelection(nextDraft.selection);
     appendHistoryEntry('Redo', draft.title);
     setStatus('Reapplied the latest editor change.');
@@ -1732,7 +2163,6 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
     const nextConfig = normalizeSiteConfig({
       ...siteConfigDraft,
       channels: parseSiteChannelsText(siteChannelsText),
-      friendLinks: parseFriendLinksText(friendLinksText),
     });
     const nextSnapshot = JSON.stringify(nextConfig);
 
@@ -1756,7 +2186,36 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
       }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [friendLinksText, siteChannelsText, siteConfigDraft]);
+  }, [siteChannelsText, siteConfigDraft]);
+
+  useEffect(() => {
+    if (!isSettingsOpen || settingsSection !== 'blog' || !isTauri()) {
+      return;
+    }
+
+    const missingIcons = (siteConfigDraft.friendLinks ?? [])
+      .map((link, index) => ({ link, index }))
+      .filter(({ link }) => {
+        const href = link.href.trim();
+        return href && href !== '#' && !link.icon?.trim() && !friendIconAutoRequestedRef.current.has(href);
+      });
+    if (missingIcons.length === 0) {
+      return;
+    }
+
+    for (const { link } of missingIcons) {
+      friendIconAutoRequestedRef.current.add(link.href.trim());
+    }
+
+    const refreshMissingIcons = async () => {
+      for (const { index } of missingIcons) {
+        await refreshFriendLinkIcon(index);
+      }
+    };
+    void refreshMissingIcons();
+    // Opening the blog settings is the intentional refresh boundary.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isSettingsOpen, settingsSection]);
 
   useEffect(() => {
     if (!draft || draft.type !== 'inknote' || !linkedNotebookTarget) {
@@ -2448,7 +2907,6 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
     }
 
     setCreateTitleValue('');
-    setCreateSlugValue('');
     setCreateCategoryValue(fallbackCategory);
     setCreateTypeValue('markdown');
     setIsCreateDialogOpen(true);
@@ -2459,18 +2917,6 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
     if (!normalizedTitle) {
       setStatus('\u8bf7\u8f93\u5165\u7b14\u8bb0\u6807\u9898\u3002');
       createTitleInputRef.current?.focus();
-      return;
-    }
-
-    const routeInput = createSlugValue.trim();
-    const requestedSlug = routeInput ? slugifyCategoryLabel(routeInput) : '';
-    if (routeInput && !requestedSlug) {
-      setStatus('\u8bf7\u586b\u5199\u6709\u6548\u7684\u6587\u7ae0\u8def\u7531\u3002');
-      return;
-    }
-
-    if (requestedSlug && items.some((item) => item.frontmatter.slug === requestedSlug)) {
-      setStatus(`\u6587\u7ae0\u8def\u7531\u300c${requestedSlug}\u300d\u5df2\u5b58\u5728\u3002`);
       return;
     }
 
@@ -2486,7 +2932,7 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
 
     const nextDraft = patchDraft(createEmptyDraft(createTypeValue), {
       title: normalizedTitle,
-      slug: requestedSlug || createRandomDraftSlug(),
+      slug: createRandomDraftSlug(),
       order: categoryUsesManualOrder(items, targetCategory.slug) ? getNextCategoryOrder(items, targetCategory.slug) : null,
       category: targetCategory.slug,
     });
@@ -2554,6 +3000,130 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
     linkedNotebookSessionIdRef.current = draftSessionId;
   };
 
+  const persistDraftAutoMetadata = async (metadata: DraftAutoSaveMetadata) => {
+    if (!isTauri()) {
+      return;
+    }
+
+    const raw = await readContentFile(metadata.sourceRelativePath);
+    const diskItem = toContentLibraryItem(metadata.sourceRelativePath, raw);
+    if (!diskItem) {
+      throw new Error(`无法读取 content/${metadata.sourceRelativePath} 的文章元数据。`);
+    }
+
+    const metadataPatch: Partial<ContentDraft> = {
+      updatedAt: getTimestampValue(),
+    };
+    if (typeof metadata.title === 'string') {
+      metadataPatch.title = metadata.title;
+    }
+    if (typeof metadata.tagsText === 'string') {
+      metadataPatch.tagsText = metadata.tagsText;
+    }
+
+    const savedDraft = patchDraft(createDraftFromItem(diskItem), metadataPatch);
+    const payload = serializeContentDraft(savedDraft);
+    await writeContentFile(metadata.sourceRelativePath, payload);
+
+    const savedItem = toContentLibraryItem(metadata.sourceRelativePath, payload);
+    if (!savedItem) {
+      throw new Error(`content/${metadata.sourceRelativePath} 的文章元数据保存后无法重新解析。`);
+    }
+
+    draftCacheRef.current.delete(metadata.sourceRelativePath);
+    setItems((current) => {
+      const nextItems = sortLibraryItems(
+        current.map((item) => (item.relativePath === metadata.sourceRelativePath ? savedItem : item)),
+      );
+      itemsRef.current = nextItems;
+      return nextItems;
+    });
+
+    setDraft((current) => {
+      if (current?.sourceRelativePath !== metadata.sourceRelativePath) {
+        return current;
+      }
+
+      const currentPatch: Partial<ContentDraft> = {
+        updatedAt: savedDraft.updatedAt,
+        savedSnapshot: payload,
+      };
+      if (typeof metadata.title === 'string' && current.title === diskItem.frontmatter.title) {
+        currentPatch.title = metadata.title;
+      }
+      if (
+        typeof metadata.tagsText === 'string' &&
+        current.tagsText === getFrontmatterTags(diskItem.frontmatter.tags).join(', ')
+      ) {
+        currentPatch.tagsText = metadata.tagsText;
+      }
+
+      return patchDraft(current, currentPatch);
+    });
+  };
+
+  const queueDraftMetadataSave = (metadata: DraftAutoSaveMetadata) => {
+    draftMetadataSaveQueueRef.current = draftMetadataSaveQueueRef.current
+      .catch(() => undefined)
+      .then(async () => {
+        try {
+          await persistDraftAutoMetadata(metadata);
+        } catch (error) {
+          setStatus(error instanceof Error ? error.message : '标题或标签自动保存失败。');
+        }
+      });
+
+    return draftMetadataSaveQueueRef.current;
+  };
+
+  const scheduleDraftMetadataSave = (metadata: DraftAutoSaveMetadata, delay: number) => {
+    const pending = pendingDraftMetadataRef.current;
+    if (pending && pending.sourceRelativePath !== metadata.sourceRelativePath) {
+      void queueDraftMetadataSave(pending);
+    }
+
+    pendingDraftMetadataRef.current =
+      pending?.sourceRelativePath === metadata.sourceRelativePath
+        ? { ...pending, ...metadata }
+        : metadata;
+
+    if (draftMetadataSaveTimerRef.current !== null) {
+      window.clearTimeout(draftMetadataSaveTimerRef.current);
+    }
+
+    const nextMetadata = pendingDraftMetadataRef.current;
+    const hasChanges = typeof nextMetadata.title === 'string' || typeof nextMetadata.tagsText === 'string';
+    if (!hasChanges) {
+      pendingDraftMetadataRef.current = null;
+      draftMetadataSaveTimerRef.current = null;
+      return;
+    }
+
+    draftMetadataSaveTimerRef.current = window.setTimeout(() => {
+      const queuedMetadata = pendingDraftMetadataRef.current;
+      pendingDraftMetadataRef.current = null;
+      draftMetadataSaveTimerRef.current = null;
+      if (queuedMetadata) {
+        void queueDraftMetadataSave(queuedMetadata);
+      }
+    }, delay);
+  };
+
+  const flushDraftMetadataSave = async () => {
+    if (draftMetadataSaveTimerRef.current !== null) {
+      window.clearTimeout(draftMetadataSaveTimerRef.current);
+      draftMetadataSaveTimerRef.current = null;
+    }
+
+    const pending = pendingDraftMetadataRef.current;
+    pendingDraftMetadataRef.current = null;
+    if (pending) {
+      queueDraftMetadataSave(pending);
+    }
+
+    await draftMetadataSaveQueueRef.current;
+  };
+
   const persistDraft = async (
     draftInput: ContentDraft,
     options?: {
@@ -2565,6 +3135,8 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
       resetUndoStack?: boolean;
     },
   ): Promise<ContentLibraryItem | null> => {
+    await flushDraftMetadataSave();
+
     const timestampedDraft = patchDraft(draftInput, { updatedAt: getTimestampValue() });
     const nextSaveTarget = getDraftSavePath(timestampedDraft);
     const nextLinkedNotebookTarget =
@@ -2726,7 +3298,9 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
     const nextPublishedState = !draft.published;
 
     await persistDraft(patchDraft(draft, { published: nextPublishedState }), {
-      successMessage: nextPublishedState ? `Published "${draft.title}".` : `Moved "${draft.title}" back to draft.`,
+      successMessage: nextPublishedState
+        ? `已将《${draft.title}》设为发布状态，本地博客将自动刷新；线上站点仍需执行“发布站点”。`
+        : `已将《${draft.title}》切换为草稿，本地博客将自动刷新；线上站点仍需执行“发布站点”。`,
       historyLabel: nextPublishedState ? 'Published note' : 'Unpublished note',
       historyDetail: draft.title,
     });
@@ -2777,7 +3351,6 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
 
     setMetadataCategoryValue(draft.category || categories[0]?.slug || '');
     setMetadataDateValue(getDatePart(draft.date));
-    setMetadataSlugValue(draft.slug);
     setIsMetadataDialogOpen(true);
   };
 
@@ -2804,24 +3377,9 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
       metadataCategoryOptions.find((category) => category.slug === metadataCategoryValue) ??
       null;
     const nextDate = getDatePart(metadataDateValue);
-    const nextSlug = slugifyCategoryLabel(metadataSlugValue.trim());
 
     if (!nextCategory) {
       setStatus('\u8bf7\u9009\u62e9\u6709\u6548\u7684\u6240\u5c5e\u7c7b\u76ee\u3002');
-      return;
-    }
-
-    if (!nextSlug) {
-      setStatus('\u8bf7\u586b\u5199\u6709\u6548\u7684\u6587\u7ae0\u8def\u7531\u3002');
-      return;
-    }
-
-    if (
-      items.some(
-        (item) => item.frontmatter.slug === nextSlug && item.relativePath !== draft.sourceRelativePath,
-      )
-    ) {
-      setStatus(`\u6587\u7ae0\u8def\u7531\u300c${nextSlug}\u300d\u5df2\u5b58\u5728\u3002`);
       return;
     }
 
@@ -2830,10 +3388,10 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
       return;
     }
 
-    const savedItem = await persistDraft(patchDraft(draft, { category: nextCategory.slug, date: nextDate, slug: nextSlug }), {
+    const savedItem = await persistDraft(patchDraft(draft, { category: nextCategory.slug, date: nextDate }), {
       successMessage: `\u5df2\u66f4\u65b0\u300a${draft.title}\u300b\u7684\u6587\u7ae0\u5143\u6570\u636e\u3002`,
       historyLabel: 'Edited metadata',
-      historyDetail: `${nextCategory.label} | ${nextDate} | ${nextSlug}`,
+      historyDetail: `${nextCategory.label} | ${nextDate}`,
     });
 
     if (savedItem) {
@@ -2869,6 +3427,7 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
       return;
     }
 
+    await flushDraftMetadataSave();
     setIsBusy(true);
 
     try {
@@ -2930,8 +3489,36 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
     }
   };
 
+  const updateAutoSavedDraftMetadata = (
+    patch: Pick<Partial<ContentDraft>, 'title' | 'tagsText'>,
+    delay: number,
+  ) => {
+    if (!draft) {
+      return;
+    }
+
+    const nextDraft = patchDraft(draft, patch);
+    setDraft(nextDraft);
+
+    if (!nextDraft.sourceRelativePath) {
+      return;
+    }
+
+    const metadata: DraftAutoSaveMetadata = {
+      sourceRelativePath: nextDraft.sourceRelativePath,
+    };
+    if (Object.prototype.hasOwnProperty.call(patch, 'title')) {
+      metadata.title = nextDraft.title.trim() ? nextDraft.title : undefined;
+    }
+    if (Object.prototype.hasOwnProperty.call(patch, 'tagsText')) {
+      metadata.tagsText = nextDraft.tagsText;
+    }
+
+    scheduleDraftMetadataSave(metadata, delay);
+  };
+
   const setDraftTags = (nextTags: string[]) => {
-    updateDraft({ tagsText: nextTags.join(', ') });
+    updateAutoSavedDraftMetadata({ tagsText: nextTags.join(', ') }, 0);
   };
 
   const getLocalBlogPreviewPath = (): string => {
@@ -2978,12 +3565,12 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
 
     const url = `${LOCAL_BLOG_PREVIEW_ORIGIN}${path}`;
 
-    void ensureBlogPreviewServer().catch((error) => {
-      const message = error instanceof Error ? error.message : String(error);
-      setStatus(`\u672c\u5730\u535a\u5ba2\u670d\u52a1\u542f\u52a8\u5931\u8d25\uff1a${message}`);
-    });
-
     try {
+      const server = await ensureBlogPreviewServer();
+      if (!server.ready) {
+        throw new Error(server.message || '\u672c\u5730\u535a\u5ba2\u670d\u52a1\u5c1a\u672a\u5c31\u7eea\u3002');
+      }
+
       await openExternalUrl(url);
       setStatus(`\u5df2\u6253\u5f00\u672c\u5730\u535a\u5ba2\u9884\u89c8\uff1a${url}`);
     } catch (error) {
@@ -3101,6 +3688,217 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
     );
   };
 
+  const insertPastedImageReferences = (
+    markdown: string,
+    selection: EditorSelectionState,
+    expectedSlug: string,
+  ) => {
+    let nextSelection: EditorSelectionState | null = null;
+
+    setDraft((current) => {
+      if (!current || current.slug !== expectedSlug) {
+        return current;
+      }
+
+      const safeSelection = clampEditorSelection(selection, current.body.length);
+      const before = current.body.slice(0, safeSelection.start);
+      const after = current.body.slice(safeSelection.end);
+      const prefix = before && !before.endsWith('\n') ? '\n\n' : before.endsWith('\n\n') || !before ? '' : '\n';
+      const suffix = after && !after.startsWith('\n') ? '\n\n' : after.startsWith('\n\n') || !after ? '' : '\n';
+      const snippet = `${prefix}${markdown}${suffix}`;
+      const result = insertSnippet(current.body, safeSelection.start, safeSelection.end, snippet, snippet.length);
+
+      pushDraftUndoEntry({ draft: current, selection: safeSelection });
+      nextSelection = {
+        start: result.nextSelectionStart,
+        end: result.nextSelectionEnd,
+        direction: 'none',
+      };
+      return patchDraft(current, { body: result.nextValue });
+    });
+
+    requestAnimationFrame(() => restoreEditorSelection(nextSelection));
+  };
+
+  const handleEditorPaste = (event: ReactClipboardEvent<HTMLTextAreaElement>) => {
+    const itemImageFiles = Array.from(event.clipboardData.items)
+      .filter((item) => item.kind === 'file' && item.type.startsWith('image/'))
+      .map((item) => item.getAsFile())
+      .filter((file): file is File => Boolean(file));
+    const imageFiles =
+      itemImageFiles.length > 0
+        ? itemImageFiles
+        : Array.from(event.clipboardData.files).filter((file) => file.type.startsWith('image/'));
+
+    if (imageFiles.length === 0) {
+      captureEditorSelection();
+      return;
+    }
+
+    event.preventDefault();
+    const selection: EditorSelectionState = {
+      start: event.currentTarget.selectionStart,
+      end: event.currentTarget.selectionEnd,
+      direction: event.currentTarget.selectionDirection,
+    };
+    editorSelectionRef.current = selection;
+
+    if (!draft || !libraryRoot || !isTauri()) {
+      setStatus('粘贴图片需要在已加载内容仓的桌面应用中使用。');
+      return;
+    }
+
+    const noteType = draft.type;
+    const noteSlug = draft.slug;
+    const timestamp = new Date();
+
+    void (async () => {
+      const references: string[] = [];
+      const failures: string[] = [];
+      setStatus(`正在保存 ${imageFiles.length} 张图片...`);
+
+      for (const [index, file] of imageFiles.entries()) {
+        const extension = PASTED_IMAGE_EXTENSIONS[file.type.toLocaleLowerCase()];
+        if (!extension) {
+          failures.push(`${file.name || `图片 ${index + 1}`}：不支持的图片格式`);
+          continue;
+        }
+        if (file.size > PASTED_IMAGE_MAX_BYTES) {
+          failures.push(`${file.name || `图片 ${index + 1}`}：超过 25 MB`);
+          continue;
+        }
+
+        try {
+          const fileName = createPastedImageFileName(timestamp, index, imageFiles.length, extension);
+          const target = getPastedImageTargetPath(libraryRoot, noteType, noteSlug, fileName);
+          await writeBinaryFile(target.filePath, new Uint8Array(await file.arrayBuffer()));
+          references.push(`<img src="${target.publicPath}" alt="图片">`);
+        } catch (error) {
+          failures.push(error instanceof Error ? error.message : `图片 ${index + 1} 保存失败`);
+        }
+      }
+
+      if (references.length > 0) {
+        insertPastedImageReferences(references.join('\n\n'), selection, noteSlug);
+        appendHistoryEntry('Pasted image', `${references.length} image${references.length > 1 ? 's' : ''}`);
+      }
+
+      if (failures.length > 0) {
+        setStatus(
+          references.length > 0
+            ? `已插入 ${references.length} 张图片，${failures.length} 张保存失败。`
+            : `图片保存失败：${failures[0]}`,
+        );
+        return;
+      }
+
+      setStatus(`已保存并插入 ${references.length} 张图片。`);
+    })();
+  };
+
+  const managedImages = useMemo(() => collectManagedImages(items, draft), [draft, items]);
+  const externalManagedImages = useMemo(
+    () => managedImages.filter((asset) => asset.kind === 'external'),
+    [managedImages],
+  );
+  const internalManagedImages = useMemo(
+    () => managedImages.filter((asset) => asset.kind === 'internal'),
+    [managedImages],
+  );
+
+  const localizeExternalImages = async () => {
+    if (!isTauri()) {
+      setStatus('外部图片本地化需要在 Tauri 桌面应用中执行。');
+      return;
+    }
+    if (dirty) {
+      setStatus('请先保存当前文章，再批量本地化外部图片。');
+      return;
+    }
+    if (externalManagedImages.length === 0) {
+      setStatus('当前内容仓没有需要本地化的外部图片。');
+      return;
+    }
+
+    setIsLocalizingImages(true);
+    setIsBusy(true);
+    setImageLocalizationStatus(
+      Object.fromEntries(
+        externalManagedImages.map((asset) => [asset.source, 'processing' as ImageLocalizationStatus]),
+      ),
+    );
+    setStatus(`正在下载 ${externalManagedImages.length} 张外部图片...`);
+    const replacements = new Map<string, string>();
+    const failures: string[] = [];
+
+    try {
+      for (const asset of externalManagedImages) {
+        try {
+          const cached = await cacheExternalImage(asset.source);
+          replacements.set(asset.source, cached.publicPath);
+          setImageLocalizationStatus((current) => ({ ...current, [asset.source]: 'success' }));
+        } catch (error) {
+          setImageLocalizationStatus((current) => ({ ...current, [asset.source]: 'error' }));
+          failures.push(
+            error instanceof Error ? error.message : typeof error === 'string' ? error : asset.source,
+          );
+        }
+      }
+
+      let changedNotes = 0;
+      for (const item of items) {
+        const itemDraft = createDraftFromItem(item);
+        const nextBody = replaceImageReferenceSources(itemDraft.body, replacements);
+        const nextCover = replacements.get(itemDraft.cover.trim()) ?? itemDraft.cover;
+        const nextPreviewImage = replacements.get(itemDraft.previewImage.trim()) ?? itemDraft.previewImage;
+        if (
+          nextBody === itemDraft.body &&
+          nextCover === itemDraft.cover &&
+          nextPreviewImage === itemDraft.previewImage
+        ) {
+          continue;
+        }
+
+        const nextDraft = patchDraft(itemDraft, {
+          body: nextBody,
+          cover: nextCover,
+          previewImage: nextPreviewImage,
+          updatedAt: getTimestampValue(),
+        });
+        await writeContentFile(item.relativePath, serializeContentDraft(nextDraft));
+        draftCacheRef.current.delete(item.relativePath);
+        changedNotes += 1;
+      }
+
+      if (changedNotes > 0) {
+        await loadLibrary(draft?.sourceRelativePath ?? undefined);
+      }
+
+      if (replacements.size === 0 && failures.length > 0) {
+        setStatus(`图片本地化失败：${failures[0]}`);
+      } else {
+        setStatus(
+          failures.length > 0
+            ? `已本地化 ${replacements.size} 张图片并更新 ${changedNotes} 篇笔记，${failures.length} 张下载失败。`
+            : `已本地化 ${replacements.size} 张图片并更新 ${changedNotes} 篇笔记。`,
+        );
+      }
+    } catch (error) {
+      setImageLocalizationStatus((current) =>
+        Object.fromEntries(
+          Object.entries(current).map(([source, status]) => [
+            source,
+            status === 'processing' ? 'error' : status,
+          ]),
+        ),
+      );
+      setStatus(error instanceof Error ? error.message : '外部图片本地化失败。');
+    } finally {
+      setIsLocalizingImages(false);
+      setIsBusy(false);
+    }
+  };
+
   const categoryCounts = useMemo(
     () =>
       categories.map((category) => ({
@@ -3156,6 +3954,7 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
 
   return (
     <div className="notes-app-shell">
+        <style>{TABLER_ICON_OVERRIDES}</style>
         <header className="notes-topbar">
           <div className="notes-topbar-left">
             <div className="notes-brand">
@@ -3272,14 +4071,7 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
           <div className="notes-sidebar-header">
             <div className="notes-sidebar-title">
               <span className="notes-sidebar-title-icon" aria-hidden="true">
-                <ToolbarSvg>
-                  <path d="M3.2 2.7h8.4a1.2 1.2 0 0 1 1.2 1.2v8.1H4.4a1.2 1.2 0 0 0-1.2 1.2V2.7Z" fill="#ffffff" stroke="none" />
-                  <path d="M3.2 2.7h1.45v10.5H4.4a1.2 1.2 0 0 1-1.2-1.2V2.7Z" fill="#f2a94a" stroke="none" />
-                  <path d="M4.4 12h8.4v1.2H4.4A1.2 1.2 0 0 1 3.2 12" stroke="#ffffff" />
-                  <path d="M3.2 2.7h8.4a1.2 1.2 0 0 1 1.2 1.2v8.1H4.4a1.2 1.2 0 0 0-1.2 1.2V2.7Z" stroke="#ffffff" />
-                  <path d="M5.55 5.2h5.15" stroke="#5b7795" />
-                  <path d="M5.55 7.15h4.7" stroke="#5b7795" />
-                </ToolbarSvg>
+                <IconBook2 />
               </span>
               <strong>{'\u7b14\u8bb0\u672c'}</strong>
             </div>
@@ -3308,9 +4100,7 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
           <div className="notes-sidebar-footer">
             <button type="button" className="notes-sidebar-foot-item" onClick={onSwitchToNotebook}>
               <span className="notes-sidebar-foot-icon" aria-hidden="true">
-                <ToolbarSvg>
-                  <path d="M4 2.8h8v10.4l-4-2.2-4 2.2Z" />
-                </ToolbarSvg>
+                <IconWriting />
               </span>
               <span className="notes-sidebar-foot-label">{'\u624b\u5199\u672c'}</span>
             </button>
@@ -3384,17 +4174,7 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
                       title={'\u62d6\u52a8\u6392\u5e8f'}
                       aria-label={`\u62d6\u52a8\u6392\u5e8f ${item.frontmatter.title}`}
                     >
-                      <ToolbarSvg>
-                        <path d="M5 4.2h.1" />
-                        <path d="M8 4.2h.1" />
-                        <path d="M11 4.2h.1" />
-                        <path d="M5 8h.1" />
-                        <path d="M8 8h.1" />
-                        <path d="M11 8h.1" />
-                        <path d="M5 11.8h.1" />
-                        <path d="M8 11.8h.1" />
-                        <path d="M11 11.8h.1" />
-                      </ToolbarSvg>
+                      <IconGripVertical aria-hidden="true" />
                     </span>
 
                     <button
@@ -3499,7 +4279,7 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
                                 <span className={`notes-tag-picker-swatch tone-${getTagTone(tag)}`} aria-hidden="true" />
                                 <span className="notes-tag-picker-option-label">{tag}</span>
                                 <span className="notes-tag-picker-option-state" aria-hidden="true">
-                                  {selected ? '✓' : ''}
+                                  {selected ? <IconCheck /> : null}
                                 </span>
                               </button>
                             );
@@ -3591,7 +4371,10 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
                 <input
                   className="notes-title-input"
                   value={draft.title}
-                  onChange={(event) => updateDraft({ title: event.target.value })}
+                  onChange={(event) =>
+                    updateAutoSavedDraftMetadata({ title: event.target.value }, DRAFT_TITLE_AUTOSAVE_DELAY)
+                  }
+                  onBlur={() => void flushDraftMetadataSave()}
                   placeholder="Enter title"
                 />
               </div>
@@ -3627,7 +4410,7 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
                       title="Bold"
                       aria-label="Bold"
                     >
-                      <span className="notes-toolbar-glyph notes-toolbar-glyph-bold">B</span>
+                      <IconBold aria-hidden="true" />
                     </button>
                     <button
                       type="button"
@@ -3636,7 +4419,7 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
                       title="Italic"
                       aria-label="Italic"
                     >
-                      <span className="notes-toolbar-glyph notes-toolbar-glyph-italic">I</span>
+                      <IconItalic aria-hidden="true" />
                     </button>
                     <button
                       type="button"
@@ -3645,11 +4428,7 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
                       title="Link"
                       aria-label="Insert link"
                     >
-                      <ToolbarSvg>
-                        <path d="M6.2 9.8 4.5 11.5a2.2 2.2 0 1 1-3.1-3.1l2.1-2.1a2.2 2.2 0 0 1 3.1 0" />
-                        <path d="M9.8 6.2 11.5 4.5a2.2 2.2 0 1 1 3.1 3.1l-2.1 2.1a2.2 2.2 0 0 1-3.1 0" />
-                        <path d="M5.8 10.2 10.2 5.8" />
-                      </ToolbarSvg>
+                      <IconLink aria-hidden="true" />
                     </button>
                     <button
                       type="button"
@@ -3658,13 +4437,16 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
                       title="Blockquote"
                       aria-label="Blockquote"
                     >
-                      <ToolbarSvg>
-                        <path
-                          d="M2.4 4.3c1.3 0 2 0.9 2 2.2v1.6H2.7V12H1V8.2c0-2.2.8-3.9 2.8-3.9h.6Zm6 0c1.3 0 2 0.9 2 2.2v1.6h-1.7V12H7V8.2c0-2.2.8-3.9 2.8-3.9h.6Z"
-                          fill="currentColor"
-                          stroke="none"
-                        />
-                      </ToolbarSvg>
+                      <IconBlockquote aria-hidden="true" />
+                    </button>
+                    <button
+                      type="button"
+                      className="notes-toolbar-button"
+                      onClick={() => applyInlineWrap('<center>', '</center>', '居中文本')}
+                      title="居中"
+                      aria-label="居中"
+                    >
+                      <IconAlignCenter aria-hidden="true" />
                     </button>
                     <button
                       type="button"
@@ -3689,24 +4471,18 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
                       title="Code"
                       aria-label="Code"
                     >
-                      <ToolbarSvg>
-                        <path d="M5.5 4 2.5 8l3 4" />
-                        <path d="M10.5 4 13.5 8l-3 4" />
-                        <path d="M8.8 3 7.2 13" />
-                      </ToolbarSvg>
+                      <IconCode aria-hidden="true" />
                     </button>
                     <button
                       type="button"
                       className="notes-toolbar-button"
-                      onClick={() => insertMarkdownSnippet('![image alt](https://example.com/image.png)', 2, 20)}
+                      onClick={() =>
+                        insertMarkdownSnippet('<img src="https://example.com/image.png" alt="图片">', 10, 11)
+                      }
                       title="Image"
                       aria-label="Image"
                     >
-                      <ToolbarSvg>
-                        <rect x="2" y="3" width="12" height="10" rx="1.5" />
-                        <circle cx="5.2" cy="6.1" r="1.2" fill="currentColor" stroke="none" />
-                        <path d="M3.6 11 7.1 7.7l2.1 2 1.7-1.5L14 11" />
-                      </ToolbarSvg>
+                      <IconPhoto aria-hidden="true" />
                     </button>
                     <button
                       type="button"
@@ -3715,18 +4491,7 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
                       title="Ordered list"
                       aria-label="Ordered list"
                     >
-                      <ToolbarSvg viewBox="0 0 18 16">
-                        <text x="0.9" y="5.3" fontSize="4.5" fontWeight="700" fill="currentColor" stroke="none">
-                          1
-                        </text>
-                        <text x="0.9" y="10.1" fontSize="4.5" fontWeight="700" fill="currentColor" stroke="none">
-                          2
-                        </text>
-                        <text x="0.9" y="14.7" fontSize="4.5" fontWeight="700" fill="currentColor" stroke="none">
-                          3
-                        </text>
-                        <path d="M7 4h10M7 8h10M7 12h10" />
-                      </ToolbarSvg>
+                      <IconListNumbers aria-hidden="true" />
                     </button>
                     <button
                       type="button"
@@ -3735,12 +4500,7 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
                       title="Bullet list"
                       aria-label="Bullet list"
                     >
-                      <ToolbarSvg viewBox="0 0 18 16">
-                        <circle cx="2.5" cy="4" r="1.2" fill="currentColor" stroke="none" />
-                        <circle cx="2.5" cy="8" r="1.2" fill="currentColor" stroke="none" />
-                        <circle cx="2.5" cy="12" r="1.2" fill="currentColor" stroke="none" />
-                        <path d="M6 4h10M6 8h10M6 12h10" />
-                      </ToolbarSvg>
+                      <IconList aria-hidden="true" />
                     </button>
                     <button
                       type="button"
@@ -3749,7 +4509,7 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
                       title="Heading"
                       aria-label="Heading"
                     >
-                      <span className="notes-toolbar-glyph notes-toolbar-glyph-heading">H</span>
+                      <IconHeading aria-hidden="true" />
                     </button>
                     <button
                       type="button"
@@ -3758,11 +4518,7 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
                       title="Insert divider"
                       aria-label="Insert divider"
                     >
-                      <ToolbarSvg>
-                        <circle cx="4" cy="8" r="1.2" fill="currentColor" stroke="none" />
-                        <circle cx="8" cy="8" r="1.2" fill="currentColor" stroke="none" />
-                        <circle cx="12" cy="8" r="1.2" fill="currentColor" stroke="none" />
-                      </ToolbarSvg>
+                      <IconDots aria-hidden="true" />
                     </button>
                     <button
                       type="button"
@@ -3772,10 +4528,7 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
                       title="Undo"
                       aria-label="Undo"
                     >
-                      <ToolbarSvg>
-                        <path d="M6.2 4.5 2.8 8l3.4 3.5" />
-                        <path d="M4 8h5.1a3.4 3.4 0 1 1 0 6.8h-1.2" />
-                      </ToolbarSvg>
+                      <IconArrowBackUp aria-hidden="true" />
                     </button>
                     <button
                       type="button"
@@ -3785,10 +4538,7 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
                       title="Redo"
                       aria-label="Redo"
                     >
-                      <ToolbarSvg>
-                        <path d="M9.8 4.5 13.2 8 9.8 11.5" />
-                        <path d="M12 8H6.9a3.4 3.4 0 1 0 0 6.8h1.2" />
-                      </ToolbarSvg>
+                      <IconArrowForwardUp aria-hidden="true" />
                     </button>
                   </div>
 
@@ -3799,7 +4549,7 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
                         className="notes-markdown-editor"
                         value={draft.body}
                         onBeforeInput={captureEditorSelection}
-                        onPaste={captureEditorSelection}
+                        onPaste={handleEditorPaste}
                         onCut={captureEditorSelection}
                         onKeyDown={captureEditorSelection}
                         onKeyUp={captureEditorSelection}
@@ -3881,21 +4631,12 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
                 className="notes-metadata-dialog-close"
                 onClick={() => setIsMetadataDialogOpen(false)}
                 aria-label={'\u5173\u95ed\u5143\u6570\u636e\u7f16\u8f91'}
-              />
+              >
+                <IconX aria-hidden="true" />
+              </button>
             </header>
 
             <div className="notes-metadata-dialog-body">
-              <label className="notes-metadata-dialog-field">
-                <span>{'\u6587\u7ae0\u8def\u7531'}</span>
-                <input
-                  type="text"
-                  value={metadataSlugValue}
-                  onChange={(event) => setMetadataSlugValue(event.target.value)}
-                  placeholder="maximum-entropy-irl"
-                  aria-label={'\u6587\u7ae0\u8def\u7531'}
-                />
-              </label>
-
               <label className="notes-metadata-dialog-field">
                 <span>{'\u6240\u5c5e\u7c7b\u76ee'}</span>
                 <select
@@ -3939,7 +4680,7 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
                 type="button"
                 className="notes-metadata-dialog-submit"
                 onClick={() => void saveMetadata()}
-                disabled={isBusy || !metadataCategoryValue || !metadataDateValue.trim() || !metadataSlugValue.trim()}
+                disabled={isBusy || !metadataCategoryValue || !metadataDateValue.trim()}
               >
                 {isBusy ? '\u4fdd\u5b58\u4e2d...' : '\u4fdd\u5b58'}
               </button>
@@ -4037,7 +4778,9 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
                 className="notes-settings-close"
                 onClick={() => setIsSettingsOpen(false)}
                 aria-label={'\u5173\u95ed\u8bbe\u7f6e'}
-              />
+              >
+                <IconX aria-hidden="true" />
+              </button>
             </header>
 
             <div className="notes-settings-layout">
@@ -4055,6 +4798,13 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
                   onClick={() => setSettingsSection('blog')}
                 >
                   <strong>{'\u535a\u5ba2\u7ba1\u7406'}</strong>
+                </button>
+                <button
+                  type="button"
+                  className={settingsSection === 'images' ? 'active' : ''}
+                  onClick={() => setSettingsSection('images')}
+                >
+                  <strong>{'\u56fe\u7247\u7ba1\u7406'}</strong>
                 </button>
                 <button
                   type="button"
@@ -4109,17 +4859,7 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
                               title={'\u62d6\u52a8\u6392\u5e8f'}
                               aria-label={`\u62d6\u52a8\u6392\u5e8f ${category.label}`}
                             >
-                              <ToolbarSvg>
-                                <path d="M5 4.2h.1" />
-                                <path d="M8 4.2h.1" />
-                                <path d="M11 4.2h.1" />
-                                <path d="M5 8h.1" />
-                                <path d="M8 8h.1" />
-                                <path d="M11 8h.1" />
-                                <path d="M5 11.8h.1" />
-                                <path d="M8 11.8h.1" />
-                                <path d="M11 11.8h.1" />
-                              </ToolbarSvg>
+                              <IconGripVertical aria-hidden="true" />
                             </span>
                             <div className="notes-settings-category-main">
                               <strong>{category.label}</strong>
@@ -4137,10 +4877,7 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
                                 title={'\u7f16\u8f91\u7c7b\u76ee'}
                                 aria-label={`\u7f16\u8f91 ${category.label}`}
                               >
-                                <ToolbarSvg>
-                                  <path d="M3 11.8 2.4 14l2.2-.6L12.9 5.1 10.9 3 3 11.8Z" />
-                                  <path d="m9.9 4 2.1 2.1" />
-                                </ToolbarSvg>
+                                <IconPencil aria-hidden="true" />
                               </button>
                               <button
                                 type="button"
@@ -4150,13 +4887,7 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
                                 title={'\u5220\u9664\u7c7b\u76ee'}
                                 aria-label={`\u5220\u9664 ${category.label}`}
                               >
-                                <ToolbarSvg>
-                                  <path d="M5.1 3.2h5.8" />
-                                  <path d="M6.2 3.2v-1h3.6v1" />
-                                  <path d="M4.2 5h7.6l-.5 8H4.7l-.5-8Z" />
-                                  <path d="M6.6 6.6v4.6" />
-                                  <path d="M9.4 6.6v4.6" />
-                                </ToolbarSvg>
+                                <IconTrash aria-hidden="true" />
                               </button>
                             </div>
                           </div>
@@ -4171,7 +4902,9 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
                         aria-label={'\u65b0\u5efa\u7c7b\u76ee'}
                         title={'\u65b0\u5efa\u7c7b\u76ee'}
                       >
-                        <span className="notes-settings-category-create-plus">+</span>
+                        <span className="notes-settings-category-create-plus" aria-hidden="true">
+                          <IconPlus />
+                        </span>
                       </button>
                     </div>
                   </section>
@@ -4217,16 +4950,183 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
                         />
                       </label>
 
-                      <label className="notes-settings-field wide">
-                        <span>{'\u53cb\u94fe\u8bbe\u7f6e'}</span>
-                        <textarea
-                          value={friendLinksText}
-                          onChange={(event) => setFriendLinksText(event.target.value)}
-                          rows={5}
-                          placeholder={'\u540d\u79f0 | \u5730\u5740 | \u5907\u6ce8'}
-                        />
-                      </label>
+                      <div className="notes-settings-friend-section">
+                        <div className="notes-settings-friend-head">
+                          <span>{'\u53cb\u60c5\u94fe\u63a5'}</span>
+                          <button type="button" onClick={addFriendLinkDraft}>
+                            <IconPlus aria-hidden="true" />
+                            {'\u65b0\u589e'}
+                          </button>
+                        </div>
+
+                        <div className="notes-settings-friend-list">
+                          {(siteConfigDraft.friendLinks ?? []).length > 0 ? (
+                            (siteConfigDraft.friendLinks ?? []).map((link, index, links) => (
+                              <div className="notes-settings-friend-row" key={index}>
+                                <FriendLinkAvatar
+                                  label={link.label}
+                                  icon={link.icon}
+                                  fetchedAt={link.iconFetchedAt}
+                                />
+
+                                <div className="notes-settings-friend-fields">
+                                  <input
+                                    value={link.label}
+                                    disabled={friendIconLoadingIndex === index}
+                                    onChange={(event) => updateFriendLinkDraft(index, { label: event.target.value })}
+                                    placeholder={'\u7ad9\u70b9\u540d\u79f0'}
+                                    aria-label={`\u7b2c ${index + 1} \u4e2a\u53cb\u94fe\u7684\u7ad9\u70b9\u540d\u79f0`}
+                                  />
+                                  <input
+                                    type="url"
+                                    value={link.href}
+                                    disabled={friendIconLoadingIndex === index}
+                                    onChange={(event) =>
+                                      updateFriendLinkDraft(index, {
+                                        href: event.target.value,
+                                        icon: '',
+                                        iconSource: '',
+                                        iconTarget: '',
+                                        iconFetchedAt: '',
+                                      })
+                                    }
+                                    onBlur={() => refreshFriendLinkIconIfNeeded(index)}
+                                    placeholder="https://example.com"
+                                    aria-label={`\u7b2c ${index + 1} \u4e2a\u53cb\u94fe\u7684\u7f51\u5740`}
+                                  />
+                                  <input
+                                    className="wide"
+                                    value={link.note}
+                                    disabled={friendIconLoadingIndex === index}
+                                    onChange={(event) => updateFriendLinkDraft(index, { note: event.target.value })}
+                                    placeholder={'\u4e00\u53e5\u8bdd\u7b80\u4ecb'}
+                                    aria-label={`\u7b2c ${index + 1} \u4e2a\u53cb\u94fe\u7684\u7b80\u4ecb`}
+                                  />
+                                </div>
+
+                                <div className="notes-settings-friend-actions">
+                                  <button
+                                    type="button"
+                                    className={friendIconLoadingIndex === index ? 'loading' : ''}
+                                    onClick={() => void refreshFriendLinkIcon(index)}
+                                    disabled={friendIconLoadingIndex !== null || !link.href.trim() || link.href.trim() === '#'}
+                                    title={'\u5237\u65b0\u7ad9\u70b9\u56fe\u6807'}
+                                    aria-label={`\u5237\u65b0 ${link.label || `\u7b2c ${index + 1} \u4e2a\u53cb\u94fe`} \u7684\u7ad9\u70b9\u56fe\u6807`}
+                                  >
+                                    {friendIconLoadingIndex === index ? (
+                                      <IconLoader2 aria-hidden="true" />
+                                    ) : (
+                                      <IconRefresh aria-hidden="true" />
+                                    )}
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => moveFriendLinkDraft(index, -1)}
+                                    disabled={friendIconLoadingIndex !== null || index === 0}
+                                    title={'\u4e0a\u79fb'}
+                                    aria-label={`\u4e0a\u79fb ${link.label || `\u7b2c ${index + 1} \u4e2a\u53cb\u94fe`}`}
+                                  >
+                                    <IconArrowUp aria-hidden="true" />
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => moveFriendLinkDraft(index, 1)}
+                                    disabled={friendIconLoadingIndex !== null || index === links.length - 1}
+                                    title={'\u4e0b\u79fb'}
+                                    aria-label={`\u4e0b\u79fb ${link.label || `\u7b2c ${index + 1} \u4e2a\u53cb\u94fe`}`}
+                                  >
+                                    <IconArrowDown aria-hidden="true" />
+                                  </button>
+                                  <button
+                                    type="button"
+                                    className="danger"
+                                    onClick={() => removeFriendLinkDraft(index)}
+                                    disabled={friendIconLoadingIndex !== null}
+                                    title={'\u5220\u9664'}
+                                    aria-label={`\u5220\u9664 ${link.label || `\u7b2c ${index + 1} \u4e2a\u53cb\u94fe`}`}
+                                  >
+                                    <IconTrash aria-hidden="true" />
+                                  </button>
+                                </div>
+                              </div>
+                            ))
+                          ) : (
+                            <button type="button" className="notes-settings-friend-empty" onClick={addFriendLinkDraft}>
+                              <IconPlus aria-hidden="true" />
+                              <span>{'\u6dfb\u52a0\u7b2c\u4e00\u4e2a\u53cb\u60c5\u94fe\u63a5'}</span>
+                            </button>
+                          )}
+                        </div>
+                      </div>
                     </div>
+                  </section>
+                ) : null}
+
+                {settingsSection === 'images' ? (
+                  <section className="notes-settings-section notes-settings-images-section">
+                    <div className="notes-settings-image-toolbar">
+                      <div className="notes-settings-image-summary">
+                        <strong>{managedImages.length} 张图片</strong>
+                        <span>
+                          {managedImages.length - externalManagedImages.length} 张内部 · {externalManagedImages.length} 张外部
+                        </span>
+                      </div>
+                    </div>
+
+                    {managedImages.length > 0 ? (
+                      <div className="notes-settings-image-groups">
+                        <section className="notes-settings-image-group">
+                          <div className="notes-settings-image-group-head">
+                            <strong>外部图片</strong>
+                            <span>{externalManagedImages.length}</span>
+                            <button
+                              type="button"
+                              className="notes-settings-primary notes-settings-image-localize"
+                              onClick={() => void localizeExternalImages()}
+                              disabled={isLocalizingImages || isBusy || dirty || externalManagedImages.length === 0}
+                            >
+                              {isLocalizingImages ? (
+                                <IconLoader2 className="spinning" aria-hidden="true" />
+                              ) : (
+                                <IconDownload aria-hidden="true" />
+                              )}
+                              <span>下载</span>
+                            </button>
+                          </div>
+                          {externalManagedImages.length > 0 ? (
+                            <div className="notes-settings-image-grid">
+                              {externalManagedImages.map((asset) => (
+                                <ManagedImageCard
+                                  key={asset.source}
+                                  asset={asset}
+                                  localizationStatus={imageLocalizationStatus[asset.source]}
+                                />
+                              ))}
+                            </div>
+                          ) : (
+                            <div className="notes-settings-image-group-empty">没有外部图片</div>
+                          )}
+                        </section>
+
+                        <section className="notes-settings-image-group">
+                          <div className="notes-settings-image-group-head">
+                            <strong>内部图片</strong>
+                            <span>{internalManagedImages.length}</span>
+                          </div>
+                          {internalManagedImages.length > 0 ? (
+                            <div className="notes-settings-image-grid">
+                              {internalManagedImages.map((asset) => (
+                                <ManagedImageCard key={asset.source} asset={asset} />
+                              ))}
+                            </div>
+                          ) : (
+                            <div className="notes-settings-image-group-empty">没有内部图片</div>
+                          )}
+                        </section>
+                      </div>
+                    ) : (
+                      <div className="notes-settings-empty">当前笔记中还没有图片引用。</div>
+                    )}
                   </section>
                 ) : null}
 
@@ -4417,7 +5317,9 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
                 onClick={closeCategoryDialog}
                 disabled={isBusy}
                 aria-label={'\u5173\u95ed\u7c7b\u76ee\u7f16\u8f91'}
-              />
+              >
+                <IconX aria-hidden="true" />
+              </button>
             </header>
 
             <div className="notes-category-dialog-body">
@@ -4561,7 +5463,9 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
                 className="notes-create-dialog-close"
                 onClick={() => setIsCreateDialogOpen(false)}
                 aria-label={'\u5173\u95ed\u65b0\u5efa\u7b14\u8bb0\u7a97\u53e3'}
-              />
+              >
+                <IconX aria-hidden="true" />
+              </button>
             </div>
 
             <div className="notes-create-dialog-body">
@@ -4578,21 +5482,6 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
                     }
                   }}
                   placeholder={'\u8f93\u5165\u7b14\u8bb0\u6807\u9898'}
-                />
-              </label>
-
-              <label className="notes-create-dialog-field">
-                <span>{'\u8def\u7531'}</span>
-                <input
-                  value={createSlugValue}
-                  onChange={(event) => setCreateSlugValue(event.target.value)}
-                  onKeyDown={(event) => {
-                    if (event.key === 'Enter' && createTitleValue.trim() && createCategoryIsValid) {
-                      event.preventDefault();
-                      void confirmCreateNote();
-                    }
-                  }}
-                  placeholder={'\u7559\u7a7a\u5219\u6309\u6807\u9898\u81ea\u52a8\u751f\u6210'}
                 />
               </label>
 

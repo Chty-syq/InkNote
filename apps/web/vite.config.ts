@@ -1,12 +1,50 @@
-import { defineConfig } from 'vite';
+import { defineConfig, type Plugin, type ViteDevServer } from 'vite';
 import react from '@vitejs/plugin-react';
 import { fileURLToPath, URL } from 'node:url';
 
 const pagesBase = process.env.VITE_PAGES_BASE?.trim() || '/';
+const contentRoot = fileURLToPath(new URL('../../content', import.meta.url));
+const contentEntryPattern = /[\\/]content[\\/](?:markdown|inknotes)[\\/][^\\/]+[\\/]index\.md$/i;
+
+function contentCollectionReloadPlugin(): Plugin {
+  return {
+    name: 'inknote-content-collection-reload',
+    configureServer(server: ViteDevServer) {
+      let reloadTimer: ReturnType<typeof setTimeout> | null = null;
+
+      const reloadContentIndex = (path: string) => {
+        if (!contentEntryPattern.test(path)) {
+          return;
+        }
+
+        if (reloadTimer !== null) {
+          clearTimeout(reloadTimer);
+        }
+
+        reloadTimer = setTimeout(() => {
+          server.moduleGraph.invalidateAll();
+          server.ws.send({ type: 'full-reload', path: '*' });
+          reloadTimer = null;
+        }, 80);
+      };
+
+      server.watcher.add(contentRoot);
+      server.watcher.on('add', reloadContentIndex);
+      server.watcher.on('unlink', reloadContentIndex);
+      server.httpServer?.once('close', () => {
+        if (reloadTimer !== null) {
+          clearTimeout(reloadTimer);
+        }
+        server.watcher.off('add', reloadContentIndex);
+        server.watcher.off('unlink', reloadContentIndex);
+      });
+    },
+  };
+}
 
 export default defineConfig({
   base: pagesBase,
-  plugins: [react()],
+  plugins: [contentCollectionReloadPlugin(), react()],
   server: {
     port: 4321,
     strictPort: true,
