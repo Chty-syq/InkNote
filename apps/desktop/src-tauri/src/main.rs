@@ -2,17 +2,21 @@
 
 mod favicon;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::{
+    collections::BTreeMap,
     fs,
     net::{SocketAddr, TcpStream},
     path::{Component, Path, PathBuf},
     process::{Child, Command, Stdio},
-    sync::Mutex,
+    sync::{
+        atomic::{AtomicU8, Ordering},
+        Mutex, OnceLock,
+    },
     thread,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
@@ -21,6 +25,10 @@ const BLOG_PREVIEW_PORT: u16 = 4321;
 const BLOG_PREVIEW_ORIGIN: &str = "http://localhost:4321";
 const BLOG_PREVIEW_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
 const BLOG_PREVIEW_WAIT_STEP: Duration = Duration::from_millis(100);
+
+static WORKSPACE_ROOT: OnceLock<PathBuf> = OnceLock::new();
+static CONTENT_ROOT: OnceLock<PathBuf> = OnceLock::new();
+static WEB_SHELL_ROOT: OnceLock<PathBuf> = OnceLock::new();
 
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
@@ -44,12 +52,91 @@ struct GitCommandResult {
     stderr: String,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PublishSiteRequest {
+    task_id: String,
+    remote: String,
+    branch: String,
+    base_path: String,
+    ssh_key_path: String,
+    message: String,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PublishProgressEvent {
+    task_id: String,
+    progress: u8,
+    stage: String,
+    message: String,
+    detail: String,
+    level: String,
+}
+
+struct PublishProgressReporter {
+    app: Option<tauri::AppHandle>,
+    task_id: String,
+    progress: AtomicU8,
+}
+
+impl PublishProgressReporter {
+    fn emit(
+        &self,
+        progress: u8,
+        stage: &str,
+        message: &str,
+        detail: impl Into<String>,
+        level: &str,
+    ) {
+        self.progress.store(progress, Ordering::Relaxed);
+        if let Some(app) = &self.app {
+            let _ = app.emit(
+                "publish-progress",
+                PublishProgressEvent {
+                    task_id: self.task_id.clone(),
+                    progress,
+                    stage: stage.to_string(),
+                    message: message.to_string(),
+                    detail: detail.into(),
+                    level: level.to_string(),
+                },
+            );
+        }
+    }
+
+    fn current_progress(&self) -> u8 {
+        self.progress.load(Ordering::Relaxed)
+    }
+
+    #[cfg(test)]
+    fn silent() -> Self {
+        Self {
+            app: None,
+            task_id: "test-publish".to_string(),
+            progress: AtomicU8::new(0),
+        }
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RuntimeContentPayload {
+    navigation: serde_json::Value,
+    site_config: serde_json::Value,
+    categories: serde_json::Value,
+    markdown: BTreeMap<String, String>,
+    inknotes: BTreeMap<String, String>,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct PublishStatus {
+    remote: String,
     branch: String,
+    branch_exists: bool,
+    remote_commit: String,
     short_status: String,
-    clean: bool,
 }
 
 #[derive(Serialize)]
@@ -186,68 +273,386 @@ async fn fetch_friend_link_icon(page_url: String) -> Result<favicon::FriendLinkI
 }
 
 #[tauri::command]
-fn get_publish_status() -> Result<PublishStatus, String> {
-    ensure_git_repository()?;
+fn get_publish_status(
+    remote: String,
+    branch: String,
+    ssh_key_path: Option<String>,
+) -> Result<PublishStatus, String> {
+    get_publish_status_with_ssh(remote, branch, ssh_key_path.as_deref())
+}
 
-    let branch_result = ensure_git_success(run_git(&["branch", "--show-current"])?, "git branch")?;
-    let status_result = ensure_git_success(
-        run_git(&[
-            "status",
-            "--short",
-            "--branch",
-            "--",
-            "content",
-            "apps/web/public",
-        ])?,
-        "git status",
+fn get_publish_status_with_ssh(
+    remote: String,
+    branch: String,
+    ssh_key_path: Option<&str>,
+) -> Result<PublishStatus, String> {
+    let (remote, branch) = validate_publish_target(&remote, &branch)?;
+    let ssh_command = create_git_ssh_command(ssh_key_path)?;
+    let remote_ref = format!("refs/heads/{branch}");
+    let command_directory = std::env::temp_dir();
+    let result = ensure_git_success(
+        run_git_in_with_ssh(
+            &command_directory,
+            &["ls-remote", "--heads", &remote, &remote_ref],
+            ssh_command.as_deref(),
+        )?,
+        "read remote deployment branch",
     )?;
-
-    let clean = status_result
+    let remote_commit = result
         .stdout
-        .lines()
-        .filter(|line| !line.starts_with("##"))
-        .all(|line| line.trim().is_empty());
+        .split_whitespace()
+        .next()
+        .unwrap_or_default()
+        .to_string();
+    let branch_exists = !remote_commit.is_empty();
+    let short_status = if branch_exists {
+        format!(
+            "远程分支 {branch} 已连接，当前版本 {}。",
+            short_commit(&remote_commit)
+        )
+    } else {
+        format!("远程仓库已连接，首次发布时将创建分支 {branch}。")
+    };
 
     Ok(PublishStatus {
-        branch: branch_result.stdout,
-        short_status: status_result.stdout,
-        clean,
+        remote,
+        branch,
+        branch_exists,
+        remote_commit,
+        short_status,
     })
 }
 
 #[tauri::command]
-fn publish_content_changes(message: String) -> Result<GitCommandResult, String> {
-    ensure_git_repository()?;
+async fn publish_content_changes(
+    app: tauri::AppHandle,
+    request: PublishSiteRequest,
+) -> Result<GitCommandResult, String> {
+    tauri::async_runtime::spawn_blocking(move || publish_content_changes_blocking(app, request))
+        .await
+        .map_err(|error| format!("发布任务线程异常结束：{error}"))?
+}
 
-    let commit_message = message.trim();
+fn publish_content_changes_blocking(
+    app: tauri::AppHandle,
+    request: PublishSiteRequest,
+) -> Result<GitCommandResult, String> {
+    let reporter = PublishProgressReporter {
+        app: Some(app),
+        task_id: request.task_id.clone(),
+        progress: AtomicU8::new(0),
+    };
+    reporter.emit(
+        12,
+        "validate",
+        "正在校验发布配置",
+        "检查仓库地址、分支和基础路径。",
+        "info",
+    );
+
+    let result = publish_content_changes_inner(&request, &reporter);
+    match &result {
+        Ok(output) => reporter.emit(
+            100,
+            "complete",
+            "站点发布完成",
+            format_git_result(output),
+            "success",
+        ),
+        Err(error) => reporter.emit(
+            reporter.current_progress(),
+            "failed",
+            "站点发布失败",
+            error.as_str(),
+            "error",
+        ),
+    }
+    result
+}
+
+fn publish_content_changes_inner(
+    request: &PublishSiteRequest,
+    reporter: &PublishProgressReporter,
+) -> Result<GitCommandResult, String> {
+    let (remote, branch) = validate_publish_target(&request.remote, &request.branch)?;
+    let ssh_key_path = request.ssh_key_path.trim();
+    create_git_ssh_command(Some(ssh_key_path))?;
+    let commit_message = request.message.trim();
     if commit_message.is_empty() {
-        return Err("A commit message is required before publishing.".to_string());
+        return Err("请输入发布说明。".to_string());
     }
 
-    ensure_git_success(run_git(&["add", "content", "apps/web/public"])?, "git add")?;
+    let base_path = normalize_pages_base(&request.base_path)?;
+    reporter.emit(
+        18,
+        "build",
+        "正在生成静态站点",
+        format!("基础路径：{base_path}"),
+        "info",
+    );
+    let artifact = create_runtime_web_artifact(&base_path)?;
+    reporter.emit(
+        30,
+        "build",
+        "静态站点生成完成",
+        format!("临时产物：{}", artifact.path().display()),
+        "success",
+    );
+    publish_built_site(
+        artifact.path(),
+        &remote,
+        &branch,
+        (!ssh_key_path.is_empty()).then_some(ssh_key_path),
+        commit_message,
+        reporter,
+    )
+}
 
-    let staged_result = ensure_git_success(
-        run_git(&[
-            "diff",
-            "--cached",
-            "--name-only",
-            "--",
-            "content",
-            "apps/web/public",
-        ])?,
-        "git diff",
+fn publish_built_site(
+    dist: &Path,
+    remote: &str,
+    branch: &str,
+    ssh_key_path: Option<&str>,
+    commit_message: &str,
+    reporter: &PublishProgressReporter,
+) -> Result<GitCommandResult, String> {
+    let ssh_command = create_git_ssh_command(ssh_key_path)?;
+    reporter.emit(
+        34,
+        "prepare",
+        "正在创建发布工作区",
+        "初始化临时 Git 仓库。",
+        "info",
+    );
+    let publish_directory = TemporaryPublishDirectory::create()?;
+    let publish_root = publish_directory.path();
+    let initialized = ensure_git_success(
+        run_git_in(publish_root, &["init"])?,
+        "initialize deployment repository",
     )?;
+    reporter.emit(
+        38,
+        "prepare",
+        "发布工作区已就绪",
+        format_git_result(&initialized),
+        "success",
+    );
 
-    if staged_result.stdout.trim().is_empty() {
+    let configured_remote = ensure_git_success(
+        run_git_in(publish_root, &["remote", "add", "origin", &remote])?,
+        "configure deployment remote",
+    )?;
+    reporter.emit(
+        42,
+        "remote",
+        "远程仓库已配置",
+        format_git_result(&configured_remote),
+        "success",
+    );
+
+    let remote_ref = format!("refs/heads/{branch}");
+    reporter.emit(
+        45,
+        "remote",
+        "正在连接远程仓库",
+        format!("检查分支：{branch}"),
+        "info",
+    );
+    let status = get_publish_status_with_ssh(
+        remote.to_string(),
+        branch.to_string(),
+        ssh_key_path,
+    )?;
+    reporter.emit(
+        50,
+        "remote",
+        "远程仓库连接成功",
+        status.short_status.clone(),
+        "success",
+    );
+    if status.branch_exists {
+        reporter.emit(
+            53,
+            "sync",
+            "正在拉取远程发布分支",
+            format!("分支：{branch}"),
+            "info",
+        );
+        let fetched = ensure_git_success(
+            run_git_in_with_ssh(
+                publish_root,
+                &["fetch", "--depth=1", "origin", &remote_ref],
+                ssh_command.as_deref(),
+            )?,
+            "fetch deployment branch",
+        )?;
+        reporter.emit(
+            57,
+            "sync",
+            "远程分支拉取完成",
+            format_git_result(&fetched),
+            "success",
+        );
+        let checked_out = ensure_git_success(
+            run_git_in(publish_root, &["checkout", "-B", &branch, "FETCH_HEAD"])?,
+            "checkout deployment branch",
+        )?;
+        reporter.emit(
+            60,
+            "sync",
+            "已切换到发布分支",
+            format_git_result(&checked_out),
+            "success",
+        );
+    } else {
+        reporter.emit(
+            53,
+            "sync",
+            "正在创建首次发布分支",
+            format!("分支：{branch}"),
+            "info",
+        );
+        let created_branch = ensure_git_success(
+            run_git_in(publish_root, &["checkout", "--orphan", &branch])?,
+            "create deployment branch",
+        )?;
+        reporter.emit(
+            60,
+            "sync",
+            "首次发布分支已创建",
+            format_git_result(&created_branch),
+            "success",
+        );
+    }
+
+    reporter.emit(
+        64,
+        "files",
+        "正在整理站点文件",
+        "镜像静态产物并保留已有 CNAME。",
+        "info",
+    );
+    mirror_deployment_artifact(&dist, publish_root)?;
+    reporter.emit(
+        70,
+        "files",
+        "站点文件整理完成",
+        "静态资源和内容清单已写入。",
+        "success",
+    );
+    ensure_git_success(
+        run_git_in(publish_root, &["config", "user.name", "InkNote Publisher"])?,
+        "configure Git author",
+    )?;
+    ensure_git_success(
+        run_git_in(
+            publish_root,
+            &["config", "user.email", "inknote-publisher@localhost"],
+        )?,
+        "configure Git author email",
+    )?;
+    reporter.emit(
+        73,
+        "commit",
+        "正在暂存发布文件",
+        "执行 git add --all。",
+        "info",
+    );
+    let staged_files = ensure_git_success(
+        run_git_in(publish_root, &["add", "--all"])?,
+        "stage deployment artifact",
+    )?;
+    reporter.emit(
+        77,
+        "commit",
+        "发布文件已暂存",
+        format_git_result(&staged_files),
+        "success",
+    );
+
+    let staged = run_git_in(publish_root, &["diff", "--cached", "--quiet"])?;
+    if staged.success {
+        reporter.emit(
+            96,
+            "complete",
+            "远程站点已是最新版本",
+            "没有检测到需要提交的文件变更。",
+            "success",
+        );
         return Ok(GitCommandResult {
             success: true,
-            stdout: "No content or public asset changes to publish.".to_string(),
+            stdout: format!("部署分支 {branch} 已是最新版本，无需推送。"),
             stderr: String::new(),
         });
     }
 
-    ensure_git_success(run_git(&["commit", "-m", commit_message])?, "git commit")?;
-    ensure_git_success(run_git(&["push"])?, "git push")
+    reporter.emit(80, "commit", "正在创建发布提交", commit_message, "info");
+    let committed = ensure_git_success(
+        run_git_in(publish_root, &["commit", "-m", commit_message])?,
+        "commit deployment artifact",
+    )?;
+    reporter.emit(
+        85,
+        "commit",
+        "发布提交已创建",
+        format_git_result(&committed),
+        "success",
+    );
+
+    let refspec = format!("HEAD:{remote_ref}");
+    reporter.emit(
+        88,
+        "push",
+        "正在推送到远程仓库",
+        format!("目标分支：{branch}"),
+        "info",
+    );
+    let push_result = if status.branch_exists {
+        let lease = format!("--force-with-lease={remote_ref}:{}", status.remote_commit);
+        ensure_git_success(
+            run_git_in_with_ssh(
+                publish_root,
+                &["push", "origin", &refspec, &lease],
+                ssh_command.as_deref(),
+            )?,
+            "push deployment branch",
+        )?
+    } else {
+        ensure_git_success(
+            run_git_in_with_ssh(
+                publish_root,
+                &["push", "--set-upstream", "origin", &refspec],
+                ssh_command.as_deref(),
+            )?,
+            "create remote deployment branch",
+        )?
+    };
+    reporter.emit(
+        96,
+        "push",
+        "远程推送完成",
+        format_git_result(&push_result),
+        "success",
+    );
+
+    let commit = ensure_git_success(
+        run_git_in(publish_root, &["rev-parse", "HEAD"])?,
+        "read deployment commit",
+    )?;
+    Ok(GitCommandResult {
+        success: push_result.success,
+        stdout: format!("已发布到 {branch}，版本 {}。", short_commit(&commit.stdout)),
+        stderr: push_result.stderr,
+    })
+}
+
+fn format_git_result(result: &GitCommandResult) -> String {
+    match (result.stdout.is_empty(), result.stderr.is_empty()) {
+        (true, true) => "命令执行成功，未返回额外信息。".to_string(),
+        (false, true) => result.stdout.clone(),
+        (true, false) => result.stderr.clone(),
+        (false, false) => format!("{}\n{}", result.stdout, result.stderr),
+    }
 }
 
 #[tauri::command]
@@ -325,10 +730,71 @@ fn remove_empty_parent_directories(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
+fn initialize_runtime_paths(app: &tauri::AppHandle) -> Result<(), String> {
+    let source_workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../..")
+        .canonicalize()
+        .ok();
+    let resource_directory = app
+        .path()
+        .resource_dir()
+        .map_err(|error| format!("failed to locate application resources: {error}"))?;
+    let bundled_content = resource_directory.join("default-content");
+    let bundled_web_shell = resource_directory.join("web-dist");
+
+    let (workspace_root, content_root) = if cfg!(debug_assertions)
+        && source_workspace
+            .as_ref()
+            .is_some_and(|root| root.join("content/site/site.config.json").is_file())
+    {
+        let workspace = source_workspace.clone().expect("checked source workspace");
+        let content = workspace.join("content");
+        (workspace, content)
+    } else {
+        let workspace = app
+            .path()
+            .app_data_dir()
+            .map_err(|error| format!("failed to locate application data directory: {error}"))?
+            .join("workspace");
+        let content = workspace.join("content");
+        if !content.join("site/site.config.json").is_file() {
+            if !bundled_content.is_dir() {
+                return Err(
+                    "the installer does not contain the default content workspace".to_string(),
+                );
+            }
+            copy_directory_contents(&bundled_content, &content)?;
+        }
+        fs::create_dir_all(workspace.join("apps/web/public"))
+            .map_err(|error| format!("failed to create local public asset directory: {error}"))?;
+        (workspace, content)
+    };
+
+    let web_shell = if bundled_web_shell.join("index.html").is_file() {
+        bundled_web_shell
+    } else if let Some(source) = source_workspace {
+        source.join("apps/web/dist")
+    } else {
+        bundled_web_shell
+    };
+
+    WORKSPACE_ROOT
+        .set(workspace_root)
+        .map_err(|_| "workspace root is already initialized".to_string())?;
+    CONTENT_ROOT
+        .set(content_root)
+        .map_err(|_| "content root is already initialized".to_string())?;
+    WEB_SHELL_ROOT
+        .set(web_shell)
+        .map_err(|_| "web shell root is already initialized".to_string())?;
+    Ok(())
+}
+
 fn get_content_root() -> Result<PathBuf, String> {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../content");
-    root.canonicalize()
-        .map_err(|error| format!("failed to locate content root: {error}"))
+    CONTENT_ROOT
+        .get()
+        .cloned()
+        .ok_or_else(|| "content workspace is not initialized".to_string())
 }
 
 fn resolve_content_path(relative_path: &str) -> Result<PathBuf, String> {
@@ -346,14 +812,9 @@ fn resolve_content_path(relative_path: &str) -> Result<PathBuf, String> {
 }
 
 fn is_allowed_local_preview_url(url: &str) -> bool {
-    [
-        "http://localhost:",
-        "http://127.0.0.1:",
-        "https://localhost:",
-        "https://127.0.0.1:",
-    ]
-    .iter()
-    .any(|prefix| url.starts_with(prefix))
+    url::Url::parse(url).ok().is_some_and(|parsed| {
+        matches!(parsed.scheme(), "http" | "https") && parsed.host().is_some()
+    })
 }
 
 fn ensure_blog_preview_server_state(
@@ -479,17 +940,315 @@ fn is_blog_preview_server_ready() -> bool {
         .any(|address| TcpStream::connect_timeout(address, Duration::from_millis(120)).is_ok())
 }
 
-fn get_workspace_root() -> Result<PathBuf, String> {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../..")
-        .canonicalize()
-        .map_err(|error| format!("failed to locate workspace root: {error}"))
+struct TemporaryPublishDirectory {
+    path: PathBuf,
 }
 
-fn run_git(args: &[&str]) -> Result<GitCommandResult, String> {
-    let output = Command::new("git")
+impl TemporaryPublishDirectory {
+    fn create() -> Result<Self, String> {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|error| format!("failed to create deployment timestamp: {error}"))?
+            .as_nanos();
+        let path =
+            std::env::temp_dir().join(format!("inknote-publish-{}-{nonce}", std::process::id()));
+        fs::create_dir_all(&path)
+            .map_err(|error| format!("failed to create temporary deployment directory: {error}"))?;
+        Ok(Self { path })
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for TemporaryPublishDirectory {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.path);
+    }
+}
+
+fn validate_publish_target(remote: &str, branch: &str) -> Result<(String, String), String> {
+    let remote = remote.trim();
+    let branch = branch.trim();
+    if remote.is_empty() {
+        return Err("请填写远程仓库地址。".to_string());
+    }
+    if remote.starts_with('-') || remote.chars().any(char::is_control) {
+        return Err("远程仓库地址格式无效。".to_string());
+    }
+    if let Ok(parsed) = url::Url::parse(remote) {
+        if matches!(parsed.scheme(), "http" | "https")
+            && (!parsed.username().is_empty() || parsed.password().is_some())
+        {
+            return Err(
+                "请勿在仓库地址中保存账号或令牌，请使用 Git Credential Manager 或 SSH。"
+                    .to_string(),
+            );
+        }
+    }
+    if branch.is_empty() {
+        return Err("请填写发布分支。".to_string());
+    }
+    if branch.eq_ignore_ascii_case("main") || branch.eq_ignore_ascii_case("master") {
+        return Err("发布器会镜像整个分支，请使用 gh-pages 等专用部署分支。".to_string());
+    }
+
+    let command_directory = std::env::temp_dir();
+    ensure_git_success(
+        run_git_in(
+            &command_directory,
+            &["check-ref-format", "--branch", branch],
+        )?,
+        "validate deployment branch",
+    )?;
+    Ok((remote.to_string(), branch.to_string()))
+}
+
+fn create_git_ssh_command(ssh_key_path: Option<&str>) -> Result<Option<String>, String> {
+    let key_path = ssh_key_path.unwrap_or_default().trim();
+    if key_path.is_empty() {
+        return Ok(None);
+    }
+    if key_path.chars().any(char::is_control) || key_path.contains('"') {
+        return Err("SSH 私钥路径包含无效字符。".to_string());
+    }
+    if !Path::new(key_path).is_file() {
+        return Err(format!("SSH 私钥不存在：{key_path}"));
+    }
+
+    let normalized_path = key_path.replace('\\', "/");
+    Ok(Some(format!(
+        "ssh -i \"{normalized_path}\" -o IdentitiesOnly=yes -o BatchMode=yes"
+    )))
+}
+
+fn normalize_pages_base(value: &str) -> Result<String, String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || trimmed == "/" {
+        return Ok("/".to_string());
+    }
+    if !trimmed.chars().all(|character| {
+        character.is_ascii_alphanumeric() || matches!(character, '/' | '-' | '_' | '.')
+    }) || trimmed.split('/').any(|segment| segment == "..")
+    {
+        return Err("基础路径只能填写类似 /repository/ 的 URL 路径。".to_string());
+    }
+
+    Ok(format!("/{}/", trimmed.trim_matches('/')))
+}
+
+fn create_runtime_web_artifact(base_path: &str) -> Result<TemporaryPublishDirectory, String> {
+    let artifact = TemporaryPublishDirectory::create()?;
+    copy_directory_contents(&get_web_shell_root()?, artifact.path())?;
+
+    let public_assets = get_workspace_root()?.join("apps/web/public");
+    if public_assets.is_dir() {
+        copy_directory_contents(&public_assets, artifact.path())?;
+    }
+
+    let payload = create_runtime_content_payload()?;
+    let serialized = serde_json::to_string(&payload)
+        .map_err(|error| format!("failed to serialize runtime content: {error}"))?;
+    fs::write(artifact.path().join("inknote-content.json"), serialized)
+        .map_err(|error| format!("failed to write runtime content manifest: {error}"))?;
+    prepare_spa_artifact(artifact.path(), base_path)?;
+    Ok(artifact)
+}
+
+fn create_runtime_content_payload() -> Result<RuntimeContentPayload, String> {
+    let content = get_content_root()?;
+    Ok(RuntimeContentPayload {
+        navigation: read_json_value(&content.join("site/navigation.json"))?,
+        site_config: read_json_value(&content.join("site/site.config.json"))?,
+        categories: read_json_value(&content.join("site/categories.json"))?,
+        markdown: read_markdown_collection(&content, "markdown")?,
+        inknotes: read_markdown_collection(&content, "inknotes")?,
+    })
+}
+
+fn read_json_value(path: &Path) -> Result<serde_json::Value, String> {
+    let raw = fs::read_to_string(path)
+        .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
+    let raw = raw.trim_start_matches('\u{feff}');
+    serde_json::from_str(raw)
+        .map_err(|error| format!("failed to parse {}: {error}", path.display()))
+}
+
+fn read_markdown_collection(
+    content_root: &Path,
+    collection: &str,
+) -> Result<BTreeMap<String, String>, String> {
+    let directory = content_root.join(collection);
+    let mut documents = BTreeMap::new();
+    if !directory.is_dir() {
+        return Ok(documents);
+    }
+
+    for entry in fs::read_dir(&directory)
+        .map_err(|error| format!("failed to read {}: {error}", directory.display()))?
+    {
+        let entry = entry.map_err(|error| format!("failed to inspect content entry: {error}"))?;
+        if !entry
+            .file_type()
+            .map_err(|error| format!("failed to inspect content entry type: {error}"))?
+            .is_dir()
+        {
+            continue;
+        }
+
+        let markdown_path = entry.path().join("index.md");
+        if !markdown_path.is_file() {
+            continue;
+        }
+        let folder = entry.file_name().to_string_lossy().to_string();
+        let id = format!("content/{collection}/{folder}/index.md");
+        let raw = fs::read_to_string(&markdown_path)
+            .map_err(|error| format!("failed to read {}: {error}", markdown_path.display()))?;
+        documents.insert(id, raw);
+    }
+    Ok(documents)
+}
+
+fn prepare_spa_artifact(dist: &Path, base_path: &str) -> Result<(), String> {
+    let index_path = dist.join("index.html");
+    let index = fs::read_to_string(&index_path)
+        .map_err(|error| format!("failed to read static site entry: {error}"))?;
+    let base_tag = format!("<base href=\"{base_path}\" />");
+    let index = if let Some(base_start) = index.find("<base ") {
+        let base_end = index[base_start..]
+            .find('>')
+            .map(|offset| base_start + offset + 1)
+            .ok_or_else(|| "invalid base tag in static site entry".to_string())?;
+        format!("{}{}{}", &index[..base_start], base_tag, &index[base_end..])
+    } else {
+        index.replacen("<head>", &format!("<head>{base_tag}"), 1)
+    };
+    fs::write(&index_path, &index)
+        .map_err(|error| format!("failed to configure static site base path: {error}"))?;
+    fs::write(dist.join("404.html"), index)
+        .map_err(|error| format!("failed to create SPA fallback: {error}"))?;
+    fs::write(dist.join(".nojekyll"), b"")
+        .map_err(|error| format!("failed to create .nojekyll: {error}"))
+}
+
+fn mirror_deployment_artifact(source: &Path, target: &Path) -> Result<(), String> {
+    let preserved_cname = fs::read(target.join("CNAME")).ok();
+
+    for entry in fs::read_dir(target)
+        .map_err(|error| format!("failed to inspect deployment directory: {error}"))?
+    {
+        let entry =
+            entry.map_err(|error| format!("failed to inspect deployment entry: {error}"))?;
+        if entry.file_name() == ".git" {
+            continue;
+        }
+
+        let path = entry.path();
+        if path.is_dir() {
+            fs::remove_dir_all(&path).map_err(|error| {
+                format!(
+                    "failed to clear deployment directory {}: {error}",
+                    path.display()
+                )
+            })?;
+        } else {
+            fs::remove_file(&path).map_err(|error| {
+                format!(
+                    "failed to clear deployment file {}: {error}",
+                    path.display()
+                )
+            })?;
+        }
+    }
+
+    copy_directory_contents(source, target)?;
+    if !target.join("CNAME").exists() {
+        if let Some(cname) = preserved_cname {
+            fs::write(target.join("CNAME"), cname)
+                .map_err(|error| format!("failed to preserve CNAME: {error}"))?;
+        }
+    }
+    Ok(())
+}
+
+fn copy_directory_contents(source: &Path, target: &Path) -> Result<(), String> {
+    fs::create_dir_all(target).map_err(|error| {
+        format!(
+            "failed to create deployment directory {}: {error}",
+            target.display()
+        )
+    })?;
+
+    for entry in fs::read_dir(source).map_err(|error| {
+        format!(
+            "failed to read build directory {}: {error}",
+            source.display()
+        )
+    })? {
+        let entry = entry.map_err(|error| format!("failed to inspect build artifact: {error}"))?;
+        let source_path = entry.path();
+        let target_path = target.join(entry.file_name());
+        let file_type = entry
+            .file_type()
+            .map_err(|error| format!("failed to inspect {}: {error}", source_path.display()))?;
+
+        if file_type.is_dir() {
+            copy_directory_contents(&source_path, &target_path)?;
+        } else if file_type.is_file() {
+            fs::copy(&source_path, &target_path).map_err(|error| {
+                format!(
+                    "failed to copy deployment file {} to {}: {error}",
+                    source_path.display(),
+                    target_path.display()
+                )
+            })?;
+        }
+    }
+    Ok(())
+}
+
+fn short_commit(value: &str) -> &str {
+    value.get(..7).unwrap_or(value)
+}
+
+fn get_workspace_root() -> Result<PathBuf, String> {
+    WORKSPACE_ROOT
+        .get()
+        .cloned()
+        .ok_or_else(|| "workspace root is not initialized".to_string())
+}
+
+fn get_web_shell_root() -> Result<PathBuf, String> {
+    let root = WEB_SHELL_ROOT
+        .get()
+        .cloned()
+        .ok_or_else(|| "web shell root is not initialized".to_string())?;
+    if !root.join("index.html").is_file() {
+        return Err("预编译 Web 外壳不存在，请先执行桌面打包构建。".to_string());
+    }
+    Ok(root)
+}
+
+fn run_git_in(directory: &Path, args: &[&str]) -> Result<GitCommandResult, String> {
+    run_git_in_with_ssh(directory, args, None)
+}
+
+fn run_git_in_with_ssh(
+    directory: &Path,
+    args: &[&str],
+    ssh_command: Option<&str>,
+) -> Result<GitCommandResult, String> {
+    let mut command = Command::new("git");
+    command
         .args(args)
-        .current_dir(get_workspace_root()?)
+        .current_dir(directory)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GCM_INTERACTIVE", "Never");
+    if let Some(ssh_command) = ssh_command {
+        command.env("GIT_SSH_COMMAND", ssh_command);
+    }
+    let output = command
         .output()
         .map_err(|error| format!("failed to run git {:?}: {error}", args))?;
 
@@ -498,18 +1257,6 @@ fn run_git(args: &[&str]) -> Result<GitCommandResult, String> {
         stdout: String::from_utf8_lossy(&output.stdout).trim().to_string(),
         stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
     })
-}
-
-fn ensure_git_repository() -> Result<(), String> {
-    let result = run_git(&["rev-parse", "--is-inside-work-tree"])?;
-    if result.success && result.stdout == "true" {
-        return Ok(());
-    }
-
-    Err(
-    "This workspace is not a Git repository yet. Initialize Git, add a GitHub remote, and try publishing again."
-      .to_string(),
-  )
 }
 
 fn ensure_git_success(result: GitCommandResult, action: &str) -> Result<GitCommandResult, String> {
@@ -526,10 +1273,100 @@ fn ensure_git_success(result: GitCommandResult, action: &str) -> Result<GitComma
     Err(format!("{action} failed: {detail}"))
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalizes_pages_base_paths() {
+        assert_eq!(normalize_pages_base("").unwrap(), "/");
+        assert_eq!(normalize_pages_base("InkNote").unwrap(), "/InkNote/");
+        assert_eq!(normalize_pages_base("/InkNote/").unwrap(), "/InkNote/");
+        assert!(normalize_pages_base("/../private/").is_err());
+    }
+
+    #[test]
+    fn injects_the_pages_base_into_the_spa_entry() {
+        let directory = TemporaryPublishDirectory::create().unwrap();
+        fs::write(
+            directory.path().join("index.html"),
+            "<html><head><base href=\"./\" /></head><body></body></html>",
+        )
+        .unwrap();
+
+        prepare_spa_artifact(directory.path(), "/InkNote/").unwrap();
+        let index = fs::read_to_string(directory.path().join("index.html")).unwrap();
+        let fallback = fs::read_to_string(directory.path().join("404.html")).unwrap();
+        assert!(index.contains("<base href=\"/InkNote/\" />"));
+        assert_eq!(index, fallback);
+        assert!(directory.path().join(".nojekyll").is_file());
+    }
+
+    #[test]
+    fn reads_json_files_with_a_utf8_bom() {
+        let directory = TemporaryPublishDirectory::create().unwrap();
+        let path = directory.path().join("navigation.json");
+        fs::write(&path, "\u{feff}[{\"label\":\"Home\",\"href\":\"/\"}]").unwrap();
+
+        let parsed = read_json_value(&path).unwrap();
+        assert_eq!(parsed[0]["label"], "Home");
+    }
+
+    #[test]
+    fn publishes_and_updates_a_local_deployment_branch() {
+        let test_directory = TemporaryPublishDirectory::create().unwrap();
+        let root = test_directory.path();
+        let remote = root.join("remote.git");
+        let dist = root.join("dist");
+        fs::create_dir_all(&dist).unwrap();
+        fs::write(dist.join("index.html"), "first version").unwrap();
+        fs::write(dist.join("404.html"), "first version").unwrap();
+        fs::write(dist.join(".nojekyll"), "").unwrap();
+
+        let remote_value = remote.to_string_lossy().to_string();
+        ensure_git_success(
+            run_git_in(root, &["init", "--bare", &remote_value]).unwrap(),
+            "initialize test remote",
+        )
+        .unwrap();
+
+        let reporter = PublishProgressReporter::silent();
+        publish_built_site(
+            &dist,
+            &remote_value,
+            "gh-pages",
+            None,
+            "First publish",
+            &reporter,
+        )
+        .unwrap();
+        let first_status =
+            get_publish_status(remote_value.clone(), "gh-pages".to_string(), None).unwrap();
+        assert!(first_status.branch_exists);
+
+        fs::write(dist.join("index.html"), "second version").unwrap();
+        publish_built_site(
+            &dist,
+            &remote_value,
+            "gh-pages",
+            None,
+            "Second publish",
+            &reporter,
+        )
+        .unwrap();
+        let second_status =
+            get_publish_status(remote_value, "gh-pages".to_string(), None).unwrap();
+        assert!(second_status.branch_exists);
+        assert_ne!(first_status.remote_commit, second_status.remote_commit);
+    }
+}
+
 fn main() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
+            initialize_runtime_paths(app.handle())
+                .map_err(|error| std::io::Error::new(std::io::ErrorKind::Other, error))?;
             app.manage(BlogPreviewServer::default());
 
             let app_handle = app.handle().clone();

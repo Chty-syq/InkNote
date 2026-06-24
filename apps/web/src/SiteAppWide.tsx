@@ -246,7 +246,7 @@ function normalizeBasePath(base: string): string {
   return `/${trimmed.replace(/^\/+|\/+$/g, '')}`;
 }
 
-const BASE_PATH = normalizeBasePath(import.meta.env.BASE_URL ?? '/');
+const BASE_PATH = normalizeBasePath(new URL(document.baseURI).pathname);
 
 function stripBasePath(pathname: string): string {
   const normalized = normalizePathname(pathname);

@@ -5,7 +5,7 @@
   "identifier": "com.codex.inknote",
   "build": {
     "beforeDevCommand": "npm run dev",
-    "beforeBuildCommand": "npm run build",
+    "beforeBuildCommand": "npm run build:bundle",
     "devUrl": "http://localhost:1420",
     "frontendDist": "../dist"
   },
@@ -27,6 +27,12 @@
     }
   },
   "bundle": {
-    "active": false
+    "active": true,
+    "targets": ["nsis"],
+    "icon": ["icons/icon.png", "icons/icon.ico"],
+    "resources": {
+      "../../web/dist/": "web-dist/",
+      "../../../content/": "default-content/"
+    }
   }
 }

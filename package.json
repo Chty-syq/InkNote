@@ -12,6 +12,7 @@
     "desktop:build": "npm run build --workspace @inknote/desktop",
     "desktop:tauri": "npm run tauri --workspace @inknote/desktop",
     "desktop:tauri:dev": "npm run tauri --workspace @inknote/desktop -- dev",
+    "desktop:version": "node scripts/update-desktop-version.mjs",
     "web:dev": "npm run dev --workspace @inknote/web",
     "web:build": "npm run build --workspace @inknote/web"
   }

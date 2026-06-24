@@ -27,6 +27,7 @@ import {
   IconGripVertical,
   IconHeading,
   IconItalic,
+  IconKey,
   IconLink,
   IconList,
   IconListNumbers,
@@ -85,6 +86,7 @@ import {
 import { MarkdownPreview } from './lib/markdown-preview';
 import {
   chooseFileToSave,
+  chooseSshPrivateKey,
   cacheExternalImage,
   deleteContentFile,
   ensureBlogPreviewServer,
@@ -93,13 +95,14 @@ import {
   getContentIndex,
   getPublishStatus,
   isTauri,
+  listenToPublishProgress,
   openExternalUrl,
   publishContentChanges,
   readContentFile,
   writeBinaryFile,
   writeContentFile,
   writeTextFile,
-  type PublishStatusResponse,
+  type PublishProgressEvent,
 } from './lib/platform';
 
 interface NotesWorkbenchProps {
@@ -120,6 +123,13 @@ interface NoteHistoryEntry {
   label: string;
   detail: string;
   timestamp: string;
+}
+
+type PublishRunState = 'idle' | 'running' | 'success' | 'error';
+
+interface PublishLogEntry extends PublishProgressEvent {
+  id: number;
+  receivedAt: string;
 }
 
 interface EditorSelectionState {
@@ -143,6 +153,7 @@ const DRAFT_UNDO_LIMIT = 100;
 const DRAFT_TITLE_AUTOSAVE_DELAY = 350;
 const NOTE_HISTORY_LIMIT = 24;
 const BRAND_AVATAR_STORAGE_KEY = 'inknote.desktop.brandAvatar';
+const SSH_KEY_PATH_STORAGE_KEY = 'inknote.desktop.sshKeyPath';
 const SITE_CONFIG_PATH = 'site/site.config.json';
 const LOCAL_BLOG_PREVIEW_ORIGIN = 'http://localhost:4321';
 const PASTED_IMAGE_MAX_BYTES = 25 * 1024 * 1024;
@@ -166,7 +177,7 @@ const TABLER_ICON_OVERRIDES = `
   .notes-editor-toolbar { padding-left: calc(0.75rem - 0.44rem); }
 `;
 
-type SettingsSection = 'categories' | 'blog' | 'images' | 'publish';
+type SettingsSection = 'basic' | 'images' | 'site' | 'publish';
 
 type ImageReferenceLocation = 'body' | 'cover' | 'previewImage';
 
@@ -507,9 +518,9 @@ const DEFAULT_SITE_CONFIG: SiteConfig = {
   ],
   repository: {
     remote: '',
-    branch: 'main',
+    branch: 'gh-pages',
     pagesUrl: '',
-    workflow: 'deploy.yml',
+    basePath: '/',
   },
   giscus: {
     enabled: true,
@@ -705,15 +716,15 @@ function normalizeSiteConfig(value: unknown): SiteConfig {
     branch:
       typeof repositoryInput.branch === 'string'
         ? repositoryInput.branch
-        : fallback.repository?.branch ?? 'main',
+        : fallback.repository?.branch ?? 'gh-pages',
     pagesUrl:
       typeof repositoryInput.pagesUrl === 'string'
         ? repositoryInput.pagesUrl
         : fallback.repository?.pagesUrl ?? '',
-    workflow:
-      typeof repositoryInput.workflow === 'string'
-        ? repositoryInput.workflow
-        : fallback.repository?.workflow ?? 'deploy.yml',
+    basePath:
+      typeof repositoryInput.basePath === 'string'
+        ? repositoryInput.basePath
+        : fallback.repository?.basePath ?? '/',
   };
   const giscusInput =
     input.giscus && typeof input.giscus === 'object' ? (input.giscus as Partial<GiscusConfig>) : {};
@@ -1064,10 +1075,16 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
   const [previewRenderBody, setPreviewRenderBody] = useState('');
   const [isPreviewRenderPending, setIsPreviewRenderPending] = useState(false);
   const [historyEntries, setHistoryEntries] = useState<NoteHistoryEntry[]>([]);
-  const [publishStatus, setPublishStatus] = useState<PublishStatusResponse | null>(null);
+  const [publishConnectionMessage, setPublishConnectionMessage] = useState('尚未测试远程仓库连接。');
   const [publishMessage, setPublishMessage] = useState('Update blog content');
   const [isPublishingSite, setIsPublishingSite] = useState(false);
+  const [isTestingRemote, setIsTestingRemote] = useState(false);
+  const [isPublishDialogOpen, setIsPublishDialogOpen] = useState(false);
+  const [publishProgress, setPublishProgress] = useState(0);
+  const [publishRunState, setPublishRunState] = useState<PublishRunState>('idle');
+  const [publishLogs, setPublishLogs] = useState<PublishLogEntry[]>([]);
   const [brandAvatar, setBrandAvatar] = useState('');
+  const [sshKeyPath, setSshKeyPath] = useState('');
   const [siteConfigDraft, setSiteConfigDraft] = useState<SiteConfig>(() => cloneDefaultSiteConfig());
   const [siteChannelsText, setSiteChannelsText] = useState(() => formatSiteChannels(DEFAULT_SITE_CONFIG.channels));
   const [isSiteConfigSaving, setIsSiteConfigSaving] = useState(false);
@@ -1075,7 +1092,7 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
   const [isLocalizingImages, setIsLocalizingImages] = useState(false);
   const [imageLocalizationStatus, setImageLocalizationStatus] = useState<Record<string, ImageLocalizationStatus>>({});
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
-  const [settingsSection, setSettingsSection] = useState<SettingsSection>('categories');
+  const [settingsSection, setSettingsSection] = useState<SettingsSection>('basic');
   const [categoryDialog, setCategoryDialog] = useState<CategoryDialogState | null>(null);
   const [categoryLabelValue, setCategoryLabelValue] = useState('');
   const [categoryLabelEnValue, setCategoryLabelEnValue] = useState('');
@@ -1133,6 +1150,15 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
   const draftMetadataSaveTimerRef = useRef<number | null>(null);
   const pendingDraftMetadataRef = useRef<DraftAutoSaveMetadata | null>(null);
   const draftMetadataSaveQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const publishLogSequenceRef = useRef(0);
+  const publishLogViewRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    const view = publishLogViewRef.current;
+    if (view) {
+      view.scrollTop = view.scrollHeight;
+    }
+  }, [publishLogs.length]);
 
   useEffect(() => {
     linkedNotebookRef.current = linkedNotebook;
@@ -1195,6 +1221,7 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
       if (storedAvatar) {
         setBrandAvatar(storedAvatar);
       }
+      setSshKeyPath(window.localStorage.getItem(SSH_KEY_PATH_STORAGE_KEY) ?? '');
     } catch {
       // Ignore local storage access failures.
     }
@@ -1670,20 +1697,34 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
       return;
     }
 
-    setIsPublishingSite(true);
+    const repository = siteConfigDraft.repository;
+    const remote = repository?.remote.trim() ?? '';
+    const branch = repository?.branch.trim() ?? '';
+    const selectedSshKeyPath = sshKeyPath.trim();
+    if (!remote || !branch) {
+      setPublishConnectionMessage('请先填写远程仓库和发布分支。');
+      setStatus('\u8bf7先填写远程仓库和发布分支。');
+      return;
+    }
+
+    setIsTestingRemote(true);
+    setPublishConnectionMessage('正在连接远程仓库...');
 
     try {
-      const nextStatus = await getPublishStatus();
-      setPublishStatus(nextStatus);
-      setStatus(nextStatus.clean ? 'No content changes waiting to publish.' : 'Content changes are ready to publish.');
+      const nextStatus = await getPublishStatus(remote, branch, selectedSshKeyPath);
+      setPublishConnectionMessage(nextStatus.shortStatus);
+      setStatus(nextStatus.shortStatus);
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : 'Failed to read publish status.');
+      const detail = error instanceof Error ? error.message : typeof error === 'string' ? error : String(error);
+      setPublishConnectionMessage(`连接失败：${detail || '未知错误'}`);
+      setStatus(detail || 'Failed to read publish status.');
     } finally {
-      setIsPublishingSite(false);
+      setIsTestingRemote(false);
     }
   };
 
   const publishSiteChanges = async () => {
+    setIsPublishDialogOpen(true);
     if (!isTauri()) {
       setStatus('Publishing requires the Tauri desktop app.');
       return;
@@ -1695,17 +1736,194 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
       return;
     }
 
+    const taskId = globalThis.crypto?.randomUUID?.() ?? `publish-${Date.now()}`;
+    let currentProgress = 2;
+    const recordProgress = (event: PublishProgressEvent) => {
+      const normalizedProgress = Math.max(0, Math.min(100, event.progress));
+      currentProgress = normalizedProgress;
+      setPublishProgress(normalizedProgress);
+      setPublishRunState(
+        event.level === 'error'
+          ? 'error'
+          : normalizedProgress >= 100
+            ? 'success'
+            : 'running',
+      );
+      setPublishLogs((current) => [
+        ...current,
+        {
+          ...event,
+          progress: normalizedProgress,
+          id: ++publishLogSequenceRef.current,
+          receivedAt: new Date().toLocaleTimeString('zh-CN', { hour12: false }),
+        },
+      ].slice(-120));
+    };
+
+    setPublishLogs([]);
+    setPublishProgress(2);
+    setPublishRunState('running');
     setIsPublishingSite(true);
+    let stopListening: (() => void) | null = null;
 
     try {
-      const result = await publishContentChanges(message);
+      stopListening = await listenToPublishProgress((event) => {
+        if (event.taskId === taskId) {
+          recordProgress(event);
+        }
+      });
+      recordProgress({
+        taskId,
+        progress: 2,
+        stage: 'prepare',
+        message: '正在准备发布',
+        detail: '已创建发布任务，开始检查本地内容。',
+        level: 'info',
+      });
+      if (draft && dirty) {
+        recordProgress({
+          taskId,
+          progress: 5,
+          stage: 'save',
+          message: '正在保存当前文章',
+          detail: draft.title,
+          level: 'info',
+        });
+        const savedItem = await saveDraft();
+        if (!savedItem) {
+          recordProgress({
+            taskId,
+            progress: 5,
+            stage: 'save',
+            message: '当前文章保存失败',
+            detail: '发布已停止，请先修正文章保存错误。',
+            level: 'error',
+          });
+          return;
+        }
+        recordProgress({
+          taskId,
+          progress: 8,
+          stage: 'save',
+          message: '当前文章已保存',
+          detail: savedItem.relativePath,
+          level: 'success',
+        });
+      } else {
+        recordProgress({
+          taskId,
+          progress: 8,
+          stage: 'save',
+          message: '本地文章已就绪',
+          detail: '没有待保存的正文修改。',
+          level: 'success',
+        });
+      }
+
+      recordProgress({
+        taskId,
+        progress: 10,
+        stage: 'config',
+        message: '正在保存站点设置',
+        detail: '同步仓库、分支和博客配置。',
+        level: 'info',
+      });
+      const savedConfig = await saveSiteConfig();
+      if (!savedConfig) {
+        recordProgress({
+          taskId,
+          progress: 10,
+          stage: 'config',
+          message: '站点设置保存失败',
+          detail: '发布已停止，请检查站点配置。',
+          level: 'error',
+        });
+        return;
+      }
+
+      const repository = savedConfig.repository;
+      const remote = repository?.remote.trim() ?? '';
+      const branch = repository?.branch.trim() ?? '';
+      const basePath = repository?.basePath.trim() || '/';
+      const selectedSshKeyPath = sshKeyPath.trim();
+      if (!remote || !branch) {
+        recordProgress({
+          taskId,
+          progress: 10,
+          stage: 'config',
+          message: '发布配置不完整',
+          detail: '请填写远程仓库地址和发布分支。',
+          level: 'error',
+        });
+        setStatus('\u8bf7先填写远程仓库和发布分支。');
+        return;
+      }
+
+      const result = await publishContentChanges({
+        taskId,
+        remote,
+        branch,
+        basePath,
+        sshKeyPath: selectedSshKeyPath,
+        message,
+      });
       appendHistoryEntry('Published site', message);
-      setStatus(result.stdout || 'Pushed content changes to GitHub. GitHub Pages will deploy from the workflow.');
-      setPublishStatus(await getPublishStatus());
+      setStatus(result.stdout || '\u5df2将静态站点发布到远程分支。');
+      try {
+        const nextStatus = await getPublishStatus(remote, branch, selectedSshKeyPath);
+        setPublishConnectionMessage(nextStatus.shortStatus);
+      } catch (error) {
+        recordProgress({
+          taskId,
+          progress: 100,
+          stage: 'status',
+          message: '站点已发布，但状态刷新失败',
+          detail: error instanceof Error ? error.message : typeof error === 'string' ? error : String(error),
+          level: 'warning',
+        });
+      }
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : 'Failed to publish site changes.');
+      const detail = error instanceof Error ? error.message : typeof error === 'string' ? error : String(error);
+      setStatus(detail || 'Failed to publish site changes.');
+      recordProgress({
+        taskId,
+        progress: currentProgress,
+        stage: 'failed',
+        message: '发布任务已终止',
+        detail: detail || '没有收到可识别的错误信息。',
+        level: 'error',
+      });
     } finally {
+      stopListening?.();
       setIsPublishingSite(false);
+    }
+  };
+
+  const openSitePublishDialog = () => {
+    setIsPublishDialogOpen(true);
+    if (!isPublishingSite) {
+      void publishSiteChanges();
+    }
+  };
+
+  const updateSshKeyPath = (value: string) => {
+    setSshKeyPath(value);
+    setPublishConnectionMessage('SSH 配置已修改，请重新测试连接。');
+    try {
+      if (value.trim()) {
+        window.localStorage.setItem(SSH_KEY_PATH_STORAGE_KEY, value);
+      } else {
+        window.localStorage.removeItem(SSH_KEY_PATH_STORAGE_KEY);
+      }
+    } catch {
+      // Keep the value for the current session when local storage is unavailable.
+    }
+  };
+
+  const selectSshPrivateKey = async () => {
+    const keyPath = await chooseSshPrivateKey();
+    if (keyPath) {
+      updateSshKeyPath(keyPath);
     }
   };
 
@@ -1810,10 +2028,15 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
     }
   };
 
-  const saveSiteConfig = async () => {
+  const saveSiteConfig = async (): Promise<SiteConfig | null> => {
     if (!isTauri()) {
       setStatus('\u535a\u5ba2\u8bbe\u7f6e\u9700\u8981\u5728 Tauri \u684c\u9762\u7aef\u4e2d\u4fdd\u5b58\u3002');
-      return;
+      return null;
+    }
+
+    if (siteConfigSaveTimerRef.current !== null) {
+      window.clearTimeout(siteConfigSaveTimerRef.current);
+      siteConfigSaveTimerRef.current = null;
     }
 
     const nextConfig = normalizeSiteConfig({
@@ -1826,8 +2049,10 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
       await writeContentFile(SITE_CONFIG_PATH, `${JSON.stringify(nextConfig, null, 2)}\n`);
       siteConfigSnapshotRef.current = JSON.stringify(nextConfig);
       setStatus('\u8bbe\u7f6e\u5df2\u81ea\u52a8\u4fdd\u5b58\u3002');
+      return nextConfig;
     } catch (error) {
       setStatus(error instanceof Error ? error.message : '\u4fdd\u5b58\u535a\u5ba2\u8bbe\u7f6e\u5931\u8d25\u3002');
+      return null;
     } finally {
       setIsSiteConfigSaving(false);
     }
@@ -1930,6 +2155,7 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
   };
 
   const updateRepositoryConfigDraft = (patch: Partial<RepositoryConfig>) => {
+    setPublishConnectionMessage('仓库配置已修改，请重新测试连接。');
     setSiteConfigDraft((current) => ({
       ...current,
       repository: {
@@ -2189,7 +2415,7 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
   }, [siteChannelsText, siteConfigDraft]);
 
   useEffect(() => {
-    if (!isSettingsOpen || settingsSection !== 'blog' || !isTauri()) {
+    if (!isSettingsOpen || settingsSection !== 'site' || !isTauri()) {
       return;
     }
 
@@ -3575,6 +3801,17 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
       setStatus(`\u5df2\u6253\u5f00\u672c\u5730\u535a\u5ba2\u9884\u89c8\uff1a${url}`);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      const pagesUrl = siteConfigDraft.repository?.pagesUrl.trim() ?? '';
+      if (pagesUrl) {
+        try {
+          const remoteUrl = new URL(path.replace(/^\/+/, ''), pagesUrl.endsWith('/') ? pagesUrl : `${pagesUrl}/`);
+          await openExternalUrl(remoteUrl.toString());
+          setStatus(`\u672c\u5730\u9884\u89c8\u4e0d\u53ef\u7528\uff0c\u5df2\u6253\u5f00\u7ebf\u4e0a\u535a\u5ba2\uff1a${remoteUrl}`);
+          return;
+        } catch {
+          // Fall through to the original local preview error.
+        }
+      }
       setStatus(`\u65e0\u6cd5\u6253\u5f00\u672c\u5730\u535a\u5ba2\u9884\u89c8\uff1a${url}\uff08${message}\uff09`);
       return;
     }
@@ -4004,13 +4241,9 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
         <div className="notes-topbar-right">
           <button
             type="button"
-            className={isSettingsOpen && settingsSection === 'publish' ? 'notes-create-button active' : 'notes-create-button'}
-            onClick={() => {
-              setSettingsSection('publish');
-              setIsSettingsOpen(true);
-              void refreshPublishStatus();
-            }}
-            disabled={isBusy || isPublishingSite}
+            className={isPublishDialogOpen ? 'notes-create-button active' : 'notes-create-button'}
+            onClick={openSitePublishDialog}
+            disabled={isBusy}
           >
             {'\u53d1\u5e03\u7ad9\u70b9'}
           </button>
@@ -4018,7 +4251,7 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
             type="button"
             className={isSettingsOpen ? 'notes-create-button active' : 'notes-create-button'}
             onClick={() => {
-              setSettingsSection('categories');
+              setSettingsSection('basic');
               setIsSettingsOpen(true);
             }}
           >
@@ -4036,9 +4269,9 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
           </button>
           <button
             type="button"
-            className={isSettingsOpen && settingsSection !== 'publish' ? 'notes-topbar-button active' : 'notes-topbar-button'}
+            className={isSettingsOpen ? 'notes-topbar-button active' : 'notes-topbar-button'}
             onClick={() => {
-              setSettingsSection('categories');
+              setSettingsSection('basic');
               setIsSettingsOpen(true);
             }}
           >
@@ -4053,13 +4286,9 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
           </button>
           <button
             type="button"
-            className={isSettingsOpen && settingsSection === 'publish' ? 'notes-topbar-button active' : 'notes-topbar-button'}
-            onClick={() => {
-              setSettingsSection('publish');
-              setIsSettingsOpen(true);
-              void refreshPublishStatus();
-            }}
-            disabled={isBusy || isPublishingSite}
+            className={isPublishDialogOpen ? 'notes-topbar-button active' : 'notes-topbar-button'}
+            onClick={openSitePublishDialog}
+            disabled={isBusy}
           >
             {'\u53d1\u5e03'}
           </button>
@@ -4787,17 +5016,10 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
               <nav className="notes-settings-tabs" aria-label={'\u8bbe\u7f6e\u5206\u7ec4'}>
                 <button
                   type="button"
-                  className={settingsSection === 'categories' ? 'active' : ''}
-                  onClick={() => setSettingsSection('categories')}
+                  className={settingsSection === 'basic' ? 'active' : ''}
+                  onClick={() => setSettingsSection('basic')}
                 >
-                  <strong>{'\u7c7b\u76ee\u7ba1\u7406'}</strong>
-                </button>
-                <button
-                  type="button"
-                  className={settingsSection === 'blog' ? 'active' : ''}
-                  onClick={() => setSettingsSection('blog')}
-                >
-                  <strong>{'\u535a\u5ba2\u7ba1\u7406'}</strong>
+                  <strong>{'\u57fa\u672c\u8bbe\u7f6e'}</strong>
                 </button>
                 <button
                   type="button"
@@ -4808,19 +5030,25 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
                 </button>
                 <button
                   type="button"
+                  className={settingsSection === 'site' ? 'active' : ''}
+                  onClick={() => setSettingsSection('site')}
+                >
+                  <strong>{'\u7ad9\u70b9\u8bbe\u7f6e'}</strong>
+                </button>
+                <button
+                  type="button"
                   className={settingsSection === 'publish' ? 'active' : ''}
                   onClick={() => {
                     setSettingsSection('publish');
-                    void refreshPublishStatus();
                   }}
                 >
-                  <strong>{'\u53d1\u5e03\u7ba1\u7406'}</strong>
+                  <strong>{'\u53d1\u5e03\u8bbe\u7f6e'}</strong>
                 </button>
               </nav>
 
               <div className="notes-settings-content">
-                {settingsSection === 'categories' ? (
-                  <section className="notes-settings-section">
+                {settingsSection === 'basic' ? (
+                  <section className="notes-settings-section notes-settings-basic-categories">
                     <div className="notes-settings-category-list">
                       {categoryCounts.length > 0 ? (
                         categoryCounts.map((category, index) => (
@@ -4910,10 +5138,10 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
                   </section>
                 ) : null}
 
-                {settingsSection === 'blog' ? (
-                  <section className="notes-settings-section">
+                {settingsSection === 'basic' || settingsSection === 'site' ? (
+                  <section className={`notes-settings-section notes-settings-profile notes-settings-mode-${settingsSection}`}>
                     <div className="notes-settings-blog-grid">
-                      <div className="notes-settings-avatar-card">
+                      <div className="notes-settings-avatar-card notes-settings-basic-only">
                         <button
                           type="button"
                           className="notes-settings-avatar"
@@ -4923,10 +5151,18 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
                         </button>
                         <div>
                           <strong>{'\u5934\u50cf'}</strong>
+                          <p>用于桌面端标识与博客页头展示</p>
                         </div>
+                        <button
+                          type="button"
+                          className="notes-settings-avatar-change"
+                          onClick={() => brandAvatarInputRef.current?.click()}
+                        >
+                          更换头像
+                        </button>
                       </div>
 
-                      <label className="notes-settings-field">
+                      <label className="notes-settings-field notes-settings-basic-only">
                         <span>{'\u535a\u5ba2\u6807\u9898'}</span>
                         <input
                           value={siteConfigDraft.title}
@@ -4934,7 +5170,7 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
                         />
                       </label>
 
-                      <label className="notes-settings-field">
+                      <label className="notes-settings-field notes-settings-basic-only">
                         <span>{'\u4e2a\u6027\u7b7e\u540d'}</span>
                         <input
                           value={siteConfigDraft.tagline}
@@ -4942,7 +5178,7 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
                         />
                       </label>
 
-                      <label className="notes-settings-field wide">
+                      <label className="notes-settings-field wide notes-settings-site-only">
                         <span>{'\u7ad9\u70b9\u5730\u5740'}</span>
                         <input
                           value={siteConfigDraft.baseUrl}
@@ -4950,7 +5186,7 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
                         />
                       </label>
 
-                      <div className="notes-settings-friend-section">
+                      <div className="notes-settings-friend-section notes-settings-site-only">
                         <div className="notes-settings-friend-head">
                           <span>{'\u53cb\u60c5\u94fe\u63a5'}</span>
                           <button type="button" onClick={addFriendLinkDraft}>
@@ -5130,21 +5366,10 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
                   </section>
                 ) : null}
 
-                {settingsSection === 'publish' ? (
-                  <section className="notes-settings-section">
-                    <div className="notes-settings-section-head actions-only">
-                      <button
-                        type="button"
-                        className="notes-settings-secondary"
-                        onClick={() => void refreshPublishStatus()}
-                        disabled={isPublishingSite}
-                      >
-                        {'\u5237\u65b0\u72b6\u6001'}
-                      </button>
-                    </div>
-
+                {settingsSection === 'site' || settingsSection === 'publish' ? (
+                  <section className={`notes-settings-section notes-settings-services notes-settings-mode-${settingsSection}`}>
                     <div className="notes-settings-blog-grid">
-                      <label className="notes-settings-field wide">
+                      <label className="notes-settings-field wide notes-settings-publish-only">
                         <span>{'\u4ed3\u5e93\u5730\u5740'}</span>
                         <input
                           type="text"
@@ -5154,23 +5379,25 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
                         />
                       </label>
 
-                      <label className="notes-settings-field">
+                      <label className="notes-settings-field notes-settings-publish-only">
                         <span>{'\u53d1\u5e03\u5206\u652f'}</span>
                         <input
-                          value={siteConfigDraft.repository?.branch ?? 'main'}
+                          value={siteConfigDraft.repository?.branch ?? 'gh-pages'}
                           onChange={(event) => updateRepositoryConfigDraft({ branch: event.target.value })}
+                          placeholder="gh-pages"
                         />
                       </label>
 
-                      <label className="notes-settings-field">
-                        <span>{'Workflow'}</span>
+                      <label className="notes-settings-field notes-settings-publish-only">
+                        <span>{'\u57fa\u7840\u8def\u5f84'}</span>
                         <input
-                          value={siteConfigDraft.repository?.workflow ?? 'deploy.yml'}
-                          onChange={(event) => updateRepositoryConfigDraft({ workflow: event.target.value })}
+                          value={siteConfigDraft.repository?.basePath ?? '/'}
+                          onChange={(event) => updateRepositoryConfigDraft({ basePath: event.target.value })}
+                          placeholder="/repository/"
                         />
                       </label>
 
-                      <label className="notes-settings-field wide">
+                      <label className="notes-settings-field wide notes-settings-publish-only">
                         <span>{'Pages URL'}</span>
                         <input
                           value={siteConfigDraft.repository?.pagesUrl ?? ''}
@@ -5179,114 +5406,279 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
                         />
                       </label>
 
-                      <label className="notes-settings-field">
-                        <span>{'阅读统计'}</span>
-                        <select
-                          value={siteConfigDraft.goatcounter?.enabled ? 'enabled' : 'disabled'}
-                          onChange={(event) =>
-                            updateGoatCounterConfigDraft({ enabled: event.target.value === 'enabled' })
-                          }
+                      <div className="notes-settings-ssh notes-settings-publish-only">
+                        <div className="notes-settings-ssh-head">
+                          <IconKey aria-hidden="true" />
+                          <div>
+                            <strong>SSH 配置</strong>
+                            <span>留空时使用系统 SSH Agent 与 ~/.ssh/config。</span>
+                          </div>
+                        </div>
+                        <div className="notes-settings-ssh-row">
+                          <input
+                            value={sshKeyPath}
+                            onChange={(event) => updateSshKeyPath(event.target.value)}
+                            placeholder="可选：SSH 私钥文件路径"
+                            aria-label="SSH 私钥文件路径"
+                          />
+                          <button type="button" onClick={() => void selectSshPrivateKey()}>
+                            选择私钥
+                          </button>
+                          {sshKeyPath.trim() ? (
+                            <button
+                              type="button"
+                              className="clear"
+                              onClick={() => updateSshKeyPath('')}
+                            >
+                              清除
+                            </button>
+                          ) : null}
+                        </div>
+                      </div>
+
+                      <div className="notes-settings-site-only notes-settings-service-grid">
+                        <section className="notes-settings-integration-card">
+                          <header className="notes-settings-integration-head">
+                            <div>
+                              <strong>阅读统计</strong>
+                              <span>使用 GoatCounter 统计文章详情页访问量</span>
+                            </div>
+                            <button
+                              type="button"
+                              className={`notes-settings-switch ${siteConfigDraft.goatcounter?.enabled ? 'on' : ''}`}
+                              role="switch"
+                              aria-checked={Boolean(siteConfigDraft.goatcounter?.enabled)}
+                              aria-label="开启阅读统计"
+                              onClick={() =>
+                                updateGoatCounterConfigDraft({ enabled: !siteConfigDraft.goatcounter?.enabled })
+                              }
+                            >
+                              <span />
+                            </button>
+                          </header>
+                          {siteConfigDraft.goatcounter?.enabled ? (
+                            <div className="notes-settings-integration-fields">
+                              <label className="notes-settings-field wide">
+                                <span>GoatCounter Endpoint</span>
+                                <input
+                                  value={siteConfigDraft.goatcounter?.endpoint ?? ''}
+                                  onChange={(event) => updateGoatCounterConfigDraft({ endpoint: event.target.value })}
+                                  placeholder="https://your-code.goatcounter.com/count"
+                                />
+                              </label>
+                              <label className="notes-settings-field wide">
+                                <span>统计脚本</span>
+                                <input
+                                  value={siteConfigDraft.goatcounter?.scriptUrl ?? 'https://gc.zgo.at/count.js'}
+                                  onChange={(event) => updateGoatCounterConfigDraft({ scriptUrl: event.target.value })}
+                                  placeholder="https://gc.zgo.at/count.js"
+                                />
+                              </label>
+                            </div>
+                          ) : null}
+                        </section>
+
+                        <section className="notes-settings-integration-card">
+                          <header className="notes-settings-integration-head">
+                            <div>
+                              <strong>评论系统</strong>
+                              <span>使用 Giscus 将 GitHub Discussions 接入文章页</span>
+                            </div>
+                            <button
+                              type="button"
+                              className={`notes-settings-switch ${siteConfigDraft.giscus?.enabled ? 'on' : ''}`}
+                              role="switch"
+                              aria-checked={Boolean(siteConfigDraft.giscus?.enabled)}
+                              aria-label="开启评论系统"
+                              onClick={() => updateGiscusConfigDraft({ enabled: !siteConfigDraft.giscus?.enabled })}
+                            >
+                              <span />
+                            </button>
+                          </header>
+                          {siteConfigDraft.giscus?.enabled ? (
+                            <div className="notes-settings-integration-fields two-column">
+                              <label className="notes-settings-field wide">
+                                <span>Giscus 仓库</span>
+                                <input
+                                  value={siteConfigDraft.giscus?.repo ?? ''}
+                                  onChange={(event) => updateGiscusConfigDraft({ repo: event.target.value })}
+                                  placeholder="owner/repo"
+                                />
+                              </label>
+                              <label className="notes-settings-field">
+                                <span>Repo ID</span>
+                                <input
+                                  value={siteConfigDraft.giscus?.repoId ?? ''}
+                                  onChange={(event) => updateGiscusConfigDraft({ repoId: event.target.value })}
+                                />
+                              </label>
+                              <label className="notes-settings-field">
+                                <span>分类名称</span>
+                                <input
+                                  value={siteConfigDraft.giscus?.category ?? 'Announcements'}
+                                  onChange={(event) => updateGiscusConfigDraft({ category: event.target.value })}
+                                  placeholder="Announcements"
+                                />
+                              </label>
+                              <label className="notes-settings-field wide">
+                                <span>Category ID</span>
+                                <input
+                                  value={siteConfigDraft.giscus?.categoryId ?? ''}
+                                  onChange={(event) => updateGiscusConfigDraft({ categoryId: event.target.value })}
+                                />
+                              </label>
+                              <label className="notes-settings-field">
+                                <span>语言</span>
+                                <input
+                                  value={siteConfigDraft.giscus?.lang ?? 'zh-CN'}
+                                  onChange={(event) => updateGiscusConfigDraft({ lang: event.target.value })}
+                                  placeholder="zh-CN"
+                                />
+                              </label>
+                              <label className="notes-settings-field">
+                                <span>主题</span>
+                                <input
+                                  value={siteConfigDraft.giscus?.theme ?? 'preferred_color_scheme'}
+                                  onChange={(event) => updateGiscusConfigDraft({ theme: event.target.value })}
+                                  placeholder="preferred_color_scheme"
+                                />
+                              </label>
+                            </div>
+                          ) : null}
+                        </section>
+                      </div>
+
+                      <div className="notes-settings-connection notes-settings-publish-only">
+                        <div>
+                          <strong>远程仓库连接</strong>
+                          <span>{publishConnectionMessage}</span>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => void refreshPublishStatus()}
+                          disabled={isTestingRemote || !siteConfigDraft.repository?.remote.trim()}
                         >
-                          <option value="disabled">{'关闭'}</option>
-                          <option value="enabled">{'GoatCounter'}</option>
-                        </select>
-                      </label>
+                          {isTestingRemote ? (
+                            <>
+                              <IconLoader2 className="spinning" aria-hidden="true" />
+                              连接中
+                            </>
+                          ) : (
+                            <>
+                              <IconRefresh aria-hidden="true" />
+                              测试连接
+                            </>
+                          )}
+                        </button>
+                      </div>
 
-                      <label className="notes-settings-field wide">
-                        <span>{'GoatCounter Endpoint'}</span>
-                        <input
-                          value={siteConfigDraft.goatcounter?.endpoint ?? ''}
-                          onChange={(event) => updateGoatCounterConfigDraft({ endpoint: event.target.value })}
-                          placeholder="https://your-code.goatcounter.com/count"
-                        />
-                      </label>
-
-                      <label className="notes-settings-field wide">
-                        <span>{'统计脚本'}</span>
-                        <input
-                          value={siteConfigDraft.goatcounter?.scriptUrl ?? 'https://gc.zgo.at/count.js'}
-                          onChange={(event) => updateGoatCounterConfigDraft({ scriptUrl: event.target.value })}
-                          placeholder="https://gc.zgo.at/count.js"
-                        />
-                      </label>
-
-                      <label className="notes-settings-field">
-                        <span>{'评论系统'}</span>
-                        <select
-                          value={siteConfigDraft.giscus?.enabled ? 'enabled' : 'disabled'}
-                          onChange={(event) =>
-                            updateGiscusConfigDraft({ enabled: event.target.value === 'enabled' })
-                          }
-                        >
-                          <option value="disabled">{'关闭'}</option>
-                          <option value="enabled">{'Giscus'}</option>
-                        </select>
-                      </label>
-
-                      <label className="notes-settings-field wide">
-                        <span>{'Giscus 仓库'}</span>
-                        <input
-                          value={siteConfigDraft.giscus?.repo ?? ''}
-                          onChange={(event) => updateGiscusConfigDraft({ repo: event.target.value })}
-                          placeholder="owner/repo"
-                        />
-                      </label>
-
-                      <label className="notes-settings-field">
-                        <span>{'Repo ID'}</span>
-                        <input
-                          value={siteConfigDraft.giscus?.repoId ?? ''}
-                          onChange={(event) => updateGiscusConfigDraft({ repoId: event.target.value })}
-                        />
-                      </label>
-
-                      <label className="notes-settings-field">
-                        <span>{'分类名称'}</span>
-                        <input
-                          value={siteConfigDraft.giscus?.category ?? 'Announcements'}
-                          onChange={(event) => updateGiscusConfigDraft({ category: event.target.value })}
-                          placeholder="Announcements"
-                        />
-                      </label>
-
-                      <label className="notes-settings-field wide">
-                        <span>{'Category ID'}</span>
-                        <input
-                          value={siteConfigDraft.giscus?.categoryId ?? ''}
-                          onChange={(event) => updateGiscusConfigDraft({ categoryId: event.target.value })}
-                        />
-                      </label>
-
-                      <label className="notes-settings-field">
-                        <span>{'语言'}</span>
-                        <input
-                          value={siteConfigDraft.giscus?.lang ?? 'zh-CN'}
-                          onChange={(event) => updateGiscusConfigDraft({ lang: event.target.value })}
-                          placeholder="zh-CN"
-                        />
-                      </label>
-
-                      <label className="notes-settings-field">
-                        <span>{'主题'}</span>
-                        <input
-                          value={siteConfigDraft.giscus?.theme ?? 'preferred_color_scheme'}
-                          onChange={(event) => updateGiscusConfigDraft({ theme: event.target.value })}
-                          placeholder="preferred_color_scheme"
-                        />
-                      </label>
-
-                      <pre className="notes-settings-publish-status">
-                        {publishStatus
-                          ? publishStatus.clean
-                            ? '\u5f53\u524d\u6ca1\u6709 content \u4fee\u6539\u3002'
-                            : publishStatus.shortStatus
-                          : '\u672a\u8bfb\u53d6 Git \u72b6\u6001\u3002'}
-                      </pre>
                     </div>
                   </section>
                 ) : null}
               </div>
             </div>
+          </section>
+        </div>
+      ) : null}
+
+      {isPublishDialogOpen ? (
+        <div className="notes-dialog-overlay notes-publish-dialog-overlay" onClick={() => setIsPublishDialogOpen(false)}>
+          <section
+            className="notes-publish-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="notes-publish-dialog-title"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <header className="notes-publish-dialog-header">
+              <div>
+                <h2 id="notes-publish-dialog-title">发布站点</h2>
+                <span>
+                  {siteConfigDraft.repository?.remote.trim() || '尚未配置远程仓库'}
+                  {siteConfigDraft.repository?.branch.trim()
+                    ? ` · ${siteConfigDraft.repository.branch.trim()}`
+                    : ''}
+                </span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsPublishDialogOpen(false)}
+                aria-label="关闭发布窗口"
+              >
+                <IconX aria-hidden="true" />
+              </button>
+            </header>
+
+            <div className="notes-publish-dialog-body">
+              <label className="notes-publish-dialog-message">
+                <span>发布说明</span>
+                <input
+                  value={publishMessage}
+                  onChange={(event) => setPublishMessage(event.target.value)}
+                  disabled={isPublishingSite}
+                  placeholder="Update blog content"
+                />
+              </label>
+
+              {publishLogs.length > 0 ? (
+                <section
+                  className={`notes-publish-progress ${publishRunState}`}
+                  aria-live="polite"
+                  aria-label="站点发布进度"
+                >
+                  <header className="notes-publish-progress-head">
+                    <strong>
+                      {publishRunState === 'success'
+                        ? '发布完成'
+                        : publishRunState === 'error'
+                          ? '发布失败'
+                          : '正在发布'}
+                    </strong>
+                    <span>{publishProgress}%</span>
+                  </header>
+                  <div
+                    className="notes-publish-progress-track"
+                    role="progressbar"
+                    aria-valuemin={0}
+                    aria-valuemax={100}
+                    aria-valuenow={publishProgress}
+                  >
+                    <span style={{ width: `${publishProgress}%` }} />
+                  </div>
+                  <div className="notes-publish-log" ref={publishLogViewRef}>
+                    {publishLogs.map((entry) => (
+                      <article className={`notes-publish-log-entry ${entry.level}`} key={entry.id}>
+                        <span className="notes-publish-log-dot" aria-hidden="true" />
+                        <time>{entry.receivedAt}</time>
+                        <div>
+                          <strong>{entry.message}</strong>
+                          {entry.detail ? <pre>{entry.detail}</pre> : null}
+                        </div>
+                      </article>
+                    ))}
+                  </div>
+                </section>
+              ) : (
+                <div className="notes-publish-dialog-pending">
+                  <IconLoader2 className="spinning" aria-hidden="true" />
+                  <span>正在创建发布任务...</span>
+                </div>
+              )}
+            </div>
+
+            <footer className="notes-publish-dialog-actions">
+              <button type="button" className="secondary" onClick={() => setIsPublishDialogOpen(false)}>
+                {isPublishingSite ? '后台运行' : '关闭'}
+              </button>
+              <button
+                type="button"
+                className="primary"
+                onClick={() => void publishSiteChanges()}
+                disabled={isPublishingSite || isBusy || !publishMessage.trim()}
+              >
+                {isPublishingSite ? '发布中...' : publishRunState === 'idle' ? '开始发布' : '重新发布'}
+              </button>
+            </footer>
           </section>
         </div>
       ) : null}

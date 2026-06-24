@@ -1,4 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
+import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { open, save } from '@tauri-apps/plugin-dialog';
 
 export interface ContentFileDescriptor {
@@ -18,9 +19,31 @@ export interface GitCommandResult {
 }
 
 export interface PublishStatusResponse {
+  remote: string;
   branch: string;
+  branchExists: boolean;
+  remoteCommit: string;
   shortStatus: string;
-  clean: boolean;
+}
+
+export interface PublishSiteRequest {
+  taskId: string;
+  remote: string;
+  branch: string;
+  basePath: string;
+  sshKeyPath: string;
+  message: string;
+}
+
+export type PublishProgressLevel = 'info' | 'success' | 'warning' | 'error';
+
+export interface PublishProgressEvent {
+  taskId: string;
+  progress: number;
+  stage: string;
+  message: string;
+  detail: string;
+  level: PublishProgressLevel;
 }
 
 export interface BlogPreviewServerResponse {
@@ -69,6 +92,13 @@ export async function chooseFileToSave(defaultPath: string): Promise<string | nu
   return result;
 }
 
+export async function chooseSshPrivateKey(): Promise<string | null> {
+  if (!isTauri()) return null;
+  const result = await open({ multiple: false, directory: false });
+  if (!result) return null;
+  return Array.isArray(result) ? result[0] ?? null : result;
+}
+
 export async function readTextFile(path: string): Promise<string> {
   return invoke('read_text_file', { path });
 }
@@ -109,12 +139,22 @@ export async function cacheExternalImage(imageUrl: string): Promise<CachedExtern
   };
 }
 
-export async function getPublishStatus(): Promise<PublishStatusResponse> {
-  return invoke('get_publish_status');
+export async function getPublishStatus(
+  remote: string,
+  branch: string,
+  sshKeyPath = '',
+): Promise<PublishStatusResponse> {
+  return invoke('get_publish_status', { remote, branch, sshKeyPath });
 }
 
-export async function publishContentChanges(message: string): Promise<GitCommandResult> {
-  return invoke('publish_content_changes', { message });
+export async function publishContentChanges(request: PublishSiteRequest): Promise<GitCommandResult> {
+  return invoke('publish_content_changes', { request });
+}
+
+export async function listenToPublishProgress(
+  handler: (event: PublishProgressEvent) => void,
+): Promise<UnlistenFn> {
+  return listen<PublishProgressEvent>('publish-progress', (event) => handler(event.payload));
 }
 
 export async function ensureBlogPreviewServer(): Promise<BlogPreviewServerResponse> {

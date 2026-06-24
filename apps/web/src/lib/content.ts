@@ -31,6 +31,14 @@ export interface ContentIndex {
   categoryDocuments: Record<string, Array<RoutedDocument<MarkdownFrontmatter | InkNoteFrontmatter>>>;
 }
 
+export interface RuntimeContentPayload {
+  navigation: NavigationItem[];
+  siteConfig: SiteConfig;
+  categories: ContentCategory[];
+  markdown: Record<string, string>;
+  inknotes: Record<string, string>;
+}
+
 const markdownModules = import.meta.glob('../../../../content/markdown/*/index.md', {
   eager: true,
   import: 'default',
@@ -118,42 +126,73 @@ function parseInkNoteCollection(modules: Record<string, string>): RoutedDocument
   return sortDocumentsByDate(documents);
 }
 
-const markdown = parseMarkdownCollection(markdownModules);
-const notes = markdown.filter((document) => !isMarkdownPage(document.frontmatter));
-const pages = markdown.filter((document) => isMarkdownPage(document.frontmatter));
-const inknotes = parseInkNoteCollection(inknoteModules);
+function buildContentIndex(payload: RuntimeContentPayload): ContentIndex {
+  const markdown = parseMarkdownCollection(payload.markdown);
+  const notes = markdown.filter((document) => !isMarkdownPage(document.frontmatter));
+  const pages = markdown.filter((document) => isMarkdownPage(document.frontmatter));
+  const inknotes = parseInkNoteCollection(payload.inknotes);
+  const configuredCategories = payload.categories
+    .filter((category) => category.slug && category.label)
+    .sort((left, right) => (left.order ?? Number.MAX_SAFE_INTEGER) - (right.order ?? Number.MAX_SAFE_INTEGER));
+  const inferredCategories = [
+    ...new Set(
+      [...notes, ...inknotes]
+        .map((document) => getDocumentCategorySlug(document.frontmatter))
+        .filter(Boolean),
+    ),
+  ]
+    .filter((slug) => !configuredCategories.some((category) => category.slug === slug))
+    .map((slug, index) => ({
+      slug,
+      label: humanizeCategorySlug(slug),
+      order: configuredCategories.length + index + 1,
+    }));
+  const categories = [...configuredCategories, ...inferredCategories];
+  const categoryDocuments = Object.fromEntries(
+    categories.map((category) => [
+      category.slug,
+      sortDocumentsByOrderAndDate(
+        [...notes, ...inknotes].filter(
+          (document) => getDocumentCategorySlug(document.frontmatter) === category.slug,
+        ),
+      ) as Array<RoutedDocument<MarkdownFrontmatter | InkNoteFrontmatter>>,
+    ]),
+  ) as Record<string, Array<RoutedDocument<MarkdownFrontmatter | InkNoteFrontmatter>>>;
 
-const configuredCategories = (categoriesData as ContentCategory[])
-  .filter((category) => category.slug && category.label)
-  .sort((left, right) => (left.order ?? Number.MAX_SAFE_INTEGER) - (right.order ?? Number.MAX_SAFE_INTEGER));
-const inferredCategories = [...new Set([...notes, ...inknotes].map((document) => getDocumentCategorySlug(document.frontmatter)).filter(Boolean))]
-  .filter((slug) => !configuredCategories.some((category) => category.slug === slug))
-  .map((slug, index) => ({
-    slug,
-    label: humanizeCategorySlug(slug),
-    order: configuredCategories.length + index + 1,
-  }));
-const categories = [...configuredCategories, ...inferredCategories];
+  return {
+    navigation: payload.navigation,
+    siteConfig: payload.siteConfig,
+    categories,
+    markdown,
+    notes,
+    pages,
+    inknotes,
+    categoryDocuments,
+  };
+}
 
-const categoryDocuments = Object.fromEntries(
-  categories.map((category) => [
-    category.slug,
-    sortDocumentsByOrderAndDate(
-      [...notes, ...inknotes].filter((document) => getDocumentCategorySlug(document.frontmatter) === category.slug),
-    ) as Array<RoutedDocument<MarkdownFrontmatter | InkNoteFrontmatter>>,
-  ]),
-) as Record<string, Array<RoutedDocument<MarkdownFrontmatter | InkNoteFrontmatter>>>;
-
-export const contentIndex: ContentIndex = {
+export let contentIndex: ContentIndex = buildContentIndex({
   navigation: navigationData as NavigationItem[],
   siteConfig: siteConfigData as SiteConfig,
-  categories,
-  markdown,
-  notes,
-  pages,
-  inknotes,
-  categoryDocuments,
-};
+  categories: categoriesData as ContentCategory[],
+  markdown: markdownModules,
+  inknotes: inknoteModules,
+});
+
+export async function initializeRuntimeContent(): Promise<void> {
+  if (import.meta.env.DEV) {
+    return;
+  }
+
+  const manifestUrl = new URL('inknote-content.json', document.baseURI);
+  const response = await fetch(manifestUrl, { cache: 'no-store' });
+  if (!response.ok) {
+    throw new Error(`Failed to load runtime content: ${response.status}`);
+  }
+
+  const payload = (await response.json()) as RuntimeContentPayload;
+  contentIndex = buildContentIndex(payload);
+}
 
 export function getCategoryDocuments(slug: string): Array<RoutedDocument<MarkdownFrontmatter | InkNoteFrontmatter>> {
   return contentIndex.categoryDocuments[slug] ?? [];

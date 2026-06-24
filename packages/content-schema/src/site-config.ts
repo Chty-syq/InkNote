@@ -23,7 +23,8 @@ export interface RepositoryConfig {
   remote: string;
   branch: string;
   pagesUrl: string;
-  workflow: string;
+  basePath: string;
+  workflow?: string;
 }
 
 export interface GiscusConfig {

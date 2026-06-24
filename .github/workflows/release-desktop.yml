@@ -1,0 +1,57 @@
+name: Release Desktop
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Verify release version
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        run: |
+          node scripts/update-desktop-version.mjs --check
+          $tauriVersion = (Get-Content apps/desktop/src-tauri/tauri.conf.json | ConvertFrom-Json).version
+          $cargoVersion = (Select-String -Path apps/desktop/src-tauri/Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"').Matches[0].Groups[1].Value
+          $packageVersion = (Get-Content apps/desktop/package.json | ConvertFrom-Json).version
+          $expectedTag = "v$tauriVersion"
+          if ($env:GITHUB_REF_NAME -ne $expectedTag) {
+            throw "Tag $env:GITHUB_REF_NAME does not match Tauri version $expectedTag"
+          }
+          if ($cargoVersion -ne $tauriVersion -or $packageVersion -ne $tauriVersion) {
+            throw "Desktop versions are inconsistent: tauri=$tauriVersion cargo=$cargoVersion package=$packageVersion"
+          }
+
+      - name: Build and publish release
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: apps/desktop
+          tagName: v__VERSION__
+          releaseName: InkNote v__VERSION__
+          releaseBody: Download the Windows installer below.
+          releaseDraft: true
+          prerelease: false

@@ -66,10 +66,10 @@
     }
   ],
   "repository": {
-    "remote": "",
-    "branch": "main",
-    "pagesUrl": "",
-    "workflow": "deploy.yml"
+    "remote": "git@github.com:Chty-syq/inknote-web.git",
+    "branch": "gh-pages",
+    "pagesUrl": "https://chty-syq.github.io/inknote-web/",
+    "basePath": "/inknote-web/"
   },
   "giscus": {
     "enabled": true,
