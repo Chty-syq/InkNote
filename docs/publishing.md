@@ -51,6 +51,8 @@ Add these GitHub repository secrets before publishing an auto-updatable release:
 - `TAURI_SIGNING_PRIVATE_KEY`: the private key printed by the signer command.
 - `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`: the signer password, if one was configured. Leave it unset when the key has no password.
 
+Copy only the key value itself. Do not include labels such as `Public key:` or `Private key:`, quotes, Markdown code fences, spaces, or line breaks. Keep any trailing `=` padding characters. If GitHub Actions reports `Invalid padding`, regenerate the key and replace `TAURI_SIGNING_PRIVATE_KEY` with the exact private key value.
+
 During the release workflow, `scripts/configure-tauri-updater.mjs` injects the public key into the temporary CI copy of `tauri.conf.json` and enables updater artifact generation. The built application checks `https://github.com/Chty-syq/InkNote/releases/latest/download/latest.json`, downloads the signed NSIS update, installs it, and relaunches the app.
 
 Only versions built after the updater integration can update themselves automatically. Older installed versions must be upgraded once manually from GitHub Releases.

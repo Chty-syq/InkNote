@@ -48,6 +48,7 @@ jobs:
         shell: pwsh
         env:
           TAURI_UPDATER_PUBKEY: ${{ secrets.TAURI_UPDATER_PUBKEY }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
         run: node scripts/configure-tauri-updater.mjs
 
       - name: Build and publish release
