@@ -35,4 +35,22 @@ Replace `patch` with `minor`, `major`, or an explicit version such as `0.2.0`. R
 
 By default the script updates the version files, creates a release commit, creates the matching `v*` tag, and atomically pushes the current branch and tag to `origin`. It refuses to run when version files are already dirty or when the Git index contains staged work, preventing unrelated changes from entering the release commit. Use `--dry-run` to preview the release or `--no-git` to update version files without committing, tagging, or pushing.
 
-For example, `npm run desktop:version -- 0.2.0` publishes the version commit and `v0.2.0` tag. The workflow then creates a draft GitHub Release containing the Windows installer.
+For example, `npm run desktop:version -- 0.2.0` publishes the version commit and `v0.2.0` tag. The workflow then creates a public GitHub Release containing the Windows installer and updater metadata.
+
+### Desktop auto-updates
+
+The desktop updater uses Tauri's signed update flow. Generate an updater key once and keep the private key out of the repository:
+
+```powershell
+npm run desktop:tauri -- signer generate
+```
+
+Add these GitHub repository secrets before publishing an auto-updatable release:
+
+- `TAURI_UPDATER_PUBKEY`: the public key printed by the signer command.
+- `TAURI_SIGNING_PRIVATE_KEY`: the private key printed by the signer command.
+- `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`: the signer password, if one was configured. Leave it unset when the key has no password.
+
+During the release workflow, `scripts/configure-tauri-updater.mjs` injects the public key into the temporary CI copy of `tauri.conf.json` and enables updater artifact generation. The built application checks `https://github.com/Chty-syq/InkNote/releases/latest/download/latest.json`, downloads the signed NSIS update, installs it, and relaunches the app.
+
+Only versions built after the updater integration can update themselves automatically. Older installed versions must be upgraded once manually from GitHub Releases.

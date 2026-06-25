@@ -1,5 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+import { getVersion as getTauriAppVersion } from '@tauri-apps/api/app';
 import { open, save } from '@tauri-apps/plugin-dialog';
 
 export interface ContentFileDescriptor {
@@ -72,6 +73,11 @@ export function isTauri(): boolean {
 
 export function ensureExtension(path: string, extension: string): string {
   return path.toLowerCase().endsWith(extension.toLowerCase()) ? path : `${path}${extension}`;
+}
+
+export async function getDesktopAppVersion(fallback: string): Promise<string> {
+  if (!isTauri()) return fallback;
+  return getTauriAppVersion();
 }
 
 export async function chooseProjectToOpen(): Promise<string | null> {

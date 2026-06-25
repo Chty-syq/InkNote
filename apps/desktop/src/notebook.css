@@ -3695,6 +3695,312 @@ input[type='range']::-moz-range-thumb {
   font-size: 0.76rem;
 }
 
+.notes-settings-about {
+  gap: 0.86rem;
+}
+
+.notes-about-hero {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  padding: 1.05rem 1.15rem;
+  border: 1px solid #d7d4ff;
+  border-radius: 12px;
+  background:
+    radial-gradient(circle at 88% 18%, rgba(134, 116, 255, 0.18), transparent 32%),
+    linear-gradient(135deg, #f5f3ff 0%, #ffffff 70%);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.78);
+}
+
+.notes-about-logo {
+  display: grid;
+  place-items: center;
+  width: 64px;
+  min-width: 64px;
+  height: 64px;
+  overflow: hidden;
+  border: 1px solid rgba(88, 76, 186, 0.26);
+  border-radius: 18px;
+  background: linear-gradient(145deg, #3d2d6f, #171b3e);
+  color: #efeaff;
+  box-shadow: 0 10px 22px rgba(54, 45, 112, 0.24);
+}
+
+.notes-about-logo img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.notes-about-logo svg {
+  width: 32px;
+  height: 32px;
+  stroke-width: 1.8;
+}
+
+.notes-about-hero h3 {
+  margin: 0;
+  color: #172a3e;
+  font-size: 1.18rem;
+  font-weight: 900;
+  letter-spacing: -0.02em;
+}
+
+.notes-about-hero p {
+  margin: 0.18rem 0 0;
+  color: #6f7d96;
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
+.notes-about-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.38rem;
+  margin-top: 0.48rem;
+}
+
+.notes-about-badges span {
+  display: inline-flex;
+  align-items: center;
+  min-height: 22px;
+  padding: 0.14rem 0.54rem;
+  border-radius: 999px;
+  background: rgba(116, 100, 226, 0.12);
+  color: #7064bb;
+  font-size: 0.72rem;
+  font-weight: 800;
+}
+
+.notes-about-badges span:first-child {
+  background: rgba(89, 80, 218, 0.16);
+  color: #5a4ed5;
+}
+
+.notes-about-update-card,
+.notes-about-links {
+  overflow: hidden;
+  border: 1px solid #dfdff2;
+  border-radius: 10px;
+  background: #f7f6ff;
+}
+
+.notes-about-update-card > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  min-height: 54px;
+  padding: 0.72rem 0.9rem;
+}
+
+.notes-about-update-card > header > div,
+.notes-about-links button > div {
+  display: grid;
+  min-width: 0;
+  gap: 0.08rem;
+}
+
+.notes-about-update-card > header > div:first-child {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.52rem;
+}
+
+.notes-about-update-card strong,
+.notes-about-links strong {
+  color: #35405f;
+  font-size: 0.82rem;
+  font-weight: 900;
+}
+
+.notes-about-update-card > header svg {
+  width: 17px;
+  height: 17px;
+  color: #5e51dc;
+}
+
+.notes-about-update-card > header button,
+.notes-about-update-result button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.34rem;
+  min-height: 32px;
+  padding: 0.38rem 0.68rem;
+  border: 0;
+  border-radius: 8px;
+  background: rgba(114, 101, 209, 0.12);
+  color: #6256a5;
+  font-size: 0.75rem;
+  font-weight: 900;
+  box-shadow: none;
+}
+
+.notes-about-update-card > header button:hover:not(:disabled),
+.notes-about-update-result button:hover:not(:disabled) {
+  transform: none;
+  background: rgba(98, 86, 165, 0.18);
+  box-shadow: none;
+}
+
+.notes-about-update-card > header button:disabled {
+  cursor: default;
+  opacity: 0.7;
+}
+
+.notes-about-update-result button:disabled {
+  cursor: default;
+  opacity: 0.72;
+}
+
+.notes-about-update-result {
+  display: grid;
+  grid-template-columns: 36px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.72rem;
+  min-height: 66px;
+  padding: 0.74rem 0.9rem;
+  border-top: 1px solid #dfdff2;
+  background: rgba(255, 255, 255, 0.58);
+}
+
+.notes-about-update-result > span {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  background: #ebe9ff;
+  color: #6154d7;
+}
+
+.notes-about-update-result.latest > span {
+  background: #dff5e8;
+  color: #248358;
+}
+
+.notes-about-update-result.available > span {
+  background: #fff0d7;
+  color: #bd7428;
+}
+
+.notes-about-update-result.downloading > span,
+.notes-about-update-result.installing > span {
+  background: #ebe9ff;
+  color: #6154d7;
+}
+
+.notes-about-update-result.empty > span {
+  background: #e6f0ff;
+  color: #3f70bd;
+}
+
+.notes-about-update-result.error > span {
+  background: #ffe5e8;
+  color: #bd3e4b;
+}
+
+.notes-about-update-result svg {
+  width: 18px;
+  height: 18px;
+}
+
+.notes-about-update-result small,
+.notes-about-links small {
+  overflow: hidden;
+  color: #858aa7;
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.notes-about-update-track {
+  grid-column: 1 / -1;
+  height: 5px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(116, 126, 150, 0.16);
+}
+
+.notes-about-update-track span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #6a5ce7, #2d9c83);
+  transition: width 160ms ease;
+}
+
+.notes-about-links {
+  display: grid;
+}
+
+.notes-about-links button {
+  display: grid;
+  grid-template-columns: 36px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.72rem;
+  min-height: 62px;
+  padding: 0.78rem 0.9rem;
+  border: 0;
+  border-bottom: 1px solid #dfdff2;
+  border-radius: 0;
+  background: transparent;
+  color: #40506c;
+  text-align: left;
+  box-shadow: none;
+}
+
+.notes-about-links button:last-child {
+  border-bottom: 0;
+}
+
+.notes-about-links button:hover:not(:disabled) {
+  transform: none;
+  background: rgba(255, 255, 255, 0.54);
+  box-shadow: none;
+}
+
+.notes-about-links button > span {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 10px;
+  background: #ebe9ff;
+  color: #6256dc;
+}
+
+.notes-about-links svg {
+  width: 18px;
+  height: 18px;
+}
+
+.notes-about-links button > svg:last-child {
+  width: 15px;
+  height: 15px;
+  color: #9096b2;
+}
+
+.notes-about-footer {
+  margin: 0.1rem 0 0;
+  color: #989db5;
+  font-size: 0.72rem;
+  font-weight: 800;
+  text-align: center;
+}
+
+.spinning {
+  animation: notes-icon-spin 0.8s linear infinite;
+}
+
+@keyframes notes-icon-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 .notes-unsaved-dialog {
   width: min(480px, calc(100vw - 2rem));
   border: 1px solid #d7e0ea;

@@ -17,6 +17,8 @@
     "@tabler/icons-react": "^3.44.0",
     "@tauri-apps/api": "^2.3.0",
     "@tauri-apps/plugin-dialog": "^2.3.0",
+    "@tauri-apps/plugin-process": "^2.3.0",
+    "@tauri-apps/plugin-updater": "^2.3.0",
     "katex": "^0.16.45",
     "pdf-lib": "^1.17.1",
     "react": "^19.1.0",

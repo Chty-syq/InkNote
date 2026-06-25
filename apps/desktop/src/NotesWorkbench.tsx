@@ -20,12 +20,17 @@ import {
   IconBlockquote,
   IconBold,
   IconBook2,
+  IconBrandGithub,
   IconCheck,
+  IconCircleCheck,
   IconCode,
   IconDots,
   IconDownload,
+  IconExternalLink,
   IconGripVertical,
   IconHeading,
+  IconHistory,
+  IconInfoCircle,
   IconItalic,
   IconKey,
   IconLink,
@@ -36,10 +41,14 @@ import {
   IconPhoto,
   IconPlus,
   IconRefresh,
+  IconRocket,
   IconTrash,
   IconWriting,
   IconX,
 } from '@tabler/icons-react';
+import { relaunch } from '@tauri-apps/plugin-process';
+import { check } from '@tauri-apps/plugin-updater';
+import desktopPackage from '../package.json';
 import {
   createDefaultProject,
   deserializeProject,
@@ -93,6 +102,7 @@ import {
   ensureExtension,
   fetchFriendLinkIcon,
   getContentIndex,
+  getDesktopAppVersion,
   getPublishStatus,
   isTauri,
   listenToPublishProgress,
@@ -156,6 +166,13 @@ const BRAND_AVATAR_STORAGE_KEY = 'inknote.desktop.brandAvatar';
 const SSH_KEY_PATH_STORAGE_KEY = 'inknote.desktop.sshKeyPath';
 const SITE_CONFIG_PATH = 'site/site.config.json';
 const LOCAL_BLOG_PREVIEW_ORIGIN = 'http://localhost:4321';
+const DESKTOP_FALLBACK_VERSION = desktopPackage.version || '0.0.0';
+const DESKTOP_RELEASE_REPOSITORY = 'Chty-syq/InkNote';
+const DESKTOP_LATEST_RELEASE_API_URL = `https://api.github.com/repos/${DESKTOP_RELEASE_REPOSITORY}/releases/latest`;
+const DESKTOP_RELEASES_API_URL = `https://api.github.com/repos/${DESKTOP_RELEASE_REPOSITORY}/releases?per_page=1`;
+const DESKTOP_TAGS_API_URL = `https://api.github.com/repos/${DESKTOP_RELEASE_REPOSITORY}/tags?per_page=1`;
+const DESKTOP_REPOSITORY_URL = `https://github.com/${DESKTOP_RELEASE_REPOSITORY}`;
+const DESKTOP_RELEASES_URL = `${DESKTOP_REPOSITORY_URL}/releases`;
 const PASTED_IMAGE_MAX_BYTES = 25 * 1024 * 1024;
 const PASTED_IMAGE_EXTENSIONS: Record<string, string> = {
   'image/png': 'png',
@@ -177,7 +194,23 @@ const TABLER_ICON_OVERRIDES = `
   .notes-editor-toolbar { padding-left: calc(0.75rem - 0.44rem); }
 `;
 
-type SettingsSection = 'basic' | 'images' | 'site' | 'publish';
+type SettingsSection = 'basic' | 'images' | 'site' | 'publish' | 'about';
+type DesktopUpdateState =
+  | 'idle'
+  | 'checking'
+  | 'latest'
+  | 'available'
+  | 'empty'
+  | 'downloading'
+  | 'installing'
+  | 'error';
+
+interface DesktopReleaseInfo {
+  version: string;
+  name: string;
+  url: string;
+  publishedAt: string;
+}
 
 type ImageReferenceLocation = 'body' | 'cover' | 'previewImage';
 
@@ -248,6 +281,39 @@ function getPastedImageTargetPath(
     filePath: `${rootMatch[1]}${separator}${relativeSegments.join(separator)}`,
     publicPath: `/content-images/${collection}/${noteSlug}/${fileName}`,
   };
+}
+
+function normalizeDesktopVersion(version: string): string {
+  return version.trim().replace(/^v/i, '') || '0.0.0';
+}
+
+function compareDesktopVersions(left: string, right: string): number {
+  const leftParts = normalizeDesktopVersion(left).split(/[.-]/);
+  const rightParts = normalizeDesktopVersion(right).split(/[.-]/);
+  const length = Math.max(leftParts.length, rightParts.length, 3);
+
+  for (let index = 0; index < length; index += 1) {
+    const leftValue = Number.parseInt(leftParts[index] ?? '0', 10);
+    const rightValue = Number.parseInt(rightParts[index] ?? '0', 10);
+    const normalizedLeft = Number.isFinite(leftValue) ? leftValue : 0;
+    const normalizedRight = Number.isFinite(rightValue) ? rightValue : 0;
+
+    if (normalizedLeft > normalizedRight) return 1;
+    if (normalizedLeft < normalizedRight) return -1;
+  }
+
+  return 0;
+}
+
+function formatDesktopReleaseDate(value: string): string {
+  if (!value) return '';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '';
+  return date.toLocaleDateString('zh-CN', {
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  });
 }
 
 function resolveDesktopContentImages(markdown: string): string {
@@ -1083,6 +1149,12 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
   const [publishProgress, setPublishProgress] = useState(0);
   const [publishRunState, setPublishRunState] = useState<PublishRunState>('idle');
   const [publishLogs, setPublishLogs] = useState<PublishLogEntry[]>([]);
+  const [desktopVersion, setDesktopVersion] = useState(DESKTOP_FALLBACK_VERSION);
+  const [desktopUpdateState, setDesktopUpdateState] = useState<DesktopUpdateState>('idle');
+  const [desktopUpdateMessage, setDesktopUpdateMessage] = useState('\u5c1a\u672a\u68c0\u67e5\u66f4\u65b0');
+  const [desktopUpdateDetail, setDesktopUpdateDetail] = useState('');
+  const [desktopUpdateProgress, setDesktopUpdateProgress] = useState(0);
+  const [latestDesktopRelease, setLatestDesktopRelease] = useState<DesktopReleaseInfo | null>(null);
   const [brandAvatar, setBrandAvatar] = useState('');
   const [sshKeyPath, setSshKeyPath] = useState('');
   const [siteConfigDraft, setSiteConfigDraft] = useState<SiteConfig>(() => cloneDefaultSiteConfig());
@@ -1152,6 +1224,7 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
   const draftMetadataSaveQueueRef = useRef<Promise<void>>(Promise.resolve());
   const publishLogSequenceRef = useRef(0);
   const publishLogViewRef = useRef<HTMLDivElement | null>(null);
+  const pendingDesktopUpdateRef = useRef<Awaited<ReturnType<typeof check>> | null>(null);
 
   useEffect(() => {
     const view = publishLogViewRef.current;
@@ -1159,6 +1232,26 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
       view.scrollTop = view.scrollHeight;
     }
   }, [publishLogs.length]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    getDesktopAppVersion(DESKTOP_FALLBACK_VERSION)
+      .then((version) => {
+        if (!cancelled) {
+          setDesktopVersion(normalizeDesktopVersion(version));
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setDesktopVersion(DESKTOP_FALLBACK_VERSION);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     linkedNotebookRef.current = linkedNotebook;
@@ -1689,6 +1782,220 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
 
   const appendHistoryEntry = (label: string, detail = '') => {
     setHistoryEntries((current) => [createHistoryEntry(label, detail), ...current].slice(0, NOTE_HISTORY_LIMIT));
+  };
+
+  const checkGitHubReleaseUpdates = async (fallbackDetail = '') => {
+    const releaseHeaders = {
+      Accept: 'application/vnd.github+json',
+    };
+    const parseRelease = (data: Partial<{
+      tag_name: string;
+      name: string;
+      html_url: string;
+      published_at: string;
+    }>): DesktopReleaseInfo => {
+      const latestVersion = normalizeDesktopVersion(data.tag_name ?? data.name ?? '');
+
+      if (!latestVersion) {
+        throw new Error('\u672a\u8bfb\u53d6\u5230\u6700\u65b0\u7248\u672c\u53f7');
+      }
+
+      return {
+        version: latestVersion,
+        name: data.name?.trim() || `v${latestVersion}`,
+        url: data.html_url?.trim() || DESKTOP_RELEASES_URL,
+        publishedAt: data.published_at?.trim() || '',
+      };
+    };
+
+    const latestResponse = await fetch(DESKTOP_LATEST_RELEASE_API_URL, {
+      headers: {
+        ...releaseHeaders,
+      },
+      cache: 'no-store',
+    });
+
+    let releaseInfo: DesktopReleaseInfo | null = null;
+
+    if (latestResponse.ok) {
+      releaseInfo = parseRelease(await latestResponse.json());
+    } else if (latestResponse.status === 404) {
+      const releasesResponse = await fetch(DESKTOP_RELEASES_API_URL, {
+        headers: {
+          ...releaseHeaders,
+        },
+        cache: 'no-store',
+      });
+
+      if (!releasesResponse.ok) {
+        if (releasesResponse.status === 404) {
+          throw new Error(`\u65e0\u6cd5\u8bbf\u95ee GitHub \u4ed3\u5e93 ${DESKTOP_RELEASE_REPOSITORY}`);
+        }
+        throw new Error(`GitHub API ${releasesResponse.status}`);
+      }
+
+      const releases = (await releasesResponse.json()) as Array<Partial<{
+        tag_name: string;
+        name: string;
+        html_url: string;
+        published_at: string;
+      }>>;
+      if (releases.length > 0) {
+        releaseInfo = parseRelease(releases[0]);
+      } else {
+        const tagsResponse = await fetch(DESKTOP_TAGS_API_URL, {
+          headers: {
+            ...releaseHeaders,
+          },
+          cache: 'no-store',
+        });
+        const tagLabel = tagsResponse.ok
+          ? ((await tagsResponse.json()) as Array<{ name?: string }>)[0]?.name?.trim()
+          : '';
+
+        setLatestDesktopRelease(
+          tagLabel
+            ? {
+                version: normalizeDesktopVersion(tagLabel),
+                name: tagLabel,
+                url: DESKTOP_RELEASES_URL,
+                publishedAt: '',
+              }
+            : null,
+        );
+        setDesktopUpdateState('empty');
+        setDesktopUpdateMessage(
+          tagLabel
+            ? `\u5df2\u627e\u5230\u6807\u7b7e ${tagLabel}\uff0c\u4f46\u8fd8\u6ca1\u6709\u53d1\u5e03 Release`
+            : '\u8fd8\u6ca1\u6709\u53d1\u5e03\u684c\u9762\u7aef\u7248\u672c',
+        );
+        setDesktopUpdateDetail(fallbackDetail);
+        return;
+      }
+    } else {
+      throw new Error(`GitHub API ${latestResponse.status}`);
+    }
+
+    setLatestDesktopRelease(releaseInfo);
+
+    if (compareDesktopVersions(releaseInfo.version, desktopVersion) > 0) {
+      setDesktopUpdateState('available');
+      setDesktopUpdateMessage(`\u53d1\u73b0\u65b0\u7248\u672c v${releaseInfo.version}`);
+      setDesktopUpdateDetail(fallbackDetail || '\u81ea\u52a8\u66f4\u65b0\u4e0d\u53ef\u7528\uff0c\u53ef\u6253\u5f00\u53d1\u5e03\u9875\u624b\u52a8\u4e0b\u8f7d\u3002');
+      return;
+    }
+
+    setDesktopUpdateState('latest');
+    setDesktopUpdateMessage(`\u5df2\u662f\u6700\u65b0\u7248\u672c v${desktopVersion}`);
+    setDesktopUpdateDetail(fallbackDetail);
+  };
+
+  const checkDesktopUpdates = async () => {
+    pendingDesktopUpdateRef.current = null;
+    setDesktopUpdateProgress(0);
+    setDesktopUpdateDetail('');
+    setDesktopUpdateState('checking');
+    setDesktopUpdateMessage(
+      isTauri() ? '\u6b63\u5728\u68c0\u67e5\u81ea\u52a8\u66f4\u65b0...' : '\u6b63\u5728\u68c0\u67e5 GitHub Releases...',
+    );
+
+    try {
+      if (isTauri()) {
+        try {
+          const update = await check();
+          if (update) {
+            pendingDesktopUpdateRef.current = update;
+            const latestVersion = normalizeDesktopVersion(update.version);
+            setLatestDesktopRelease({
+              version: latestVersion,
+              name: `v${latestVersion}`,
+              url: DESKTOP_RELEASES_URL,
+              publishedAt: update.date ?? '',
+            });
+            setDesktopUpdateState('available');
+            setDesktopUpdateMessage(`\u53d1\u73b0\u65b0\u7248\u672c v${latestVersion}`);
+            setDesktopUpdateDetail(update.body?.trim() || '\u53ef\u76f4\u63a5\u4e0b\u8f7d\u5e76\u5b89\u88c5\u66f4\u65b0\u3002');
+            return;
+          }
+
+          setLatestDesktopRelease(null);
+          setDesktopUpdateState('latest');
+          setDesktopUpdateMessage(`\u5df2\u662f\u6700\u65b0\u7248\u672c v${desktopVersion}`);
+          setDesktopUpdateDetail('');
+          return;
+        } catch (error) {
+          const detail = error instanceof Error ? error.message : String(error);
+          await checkGitHubReleaseUpdates(`\u81ea\u52a8\u66f4\u65b0\u6682\u4e0d\u53ef\u7528\uff1a${detail}`);
+          return;
+        }
+      }
+
+      await checkGitHubReleaseUpdates();
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      setDesktopUpdateState('error');
+      setDesktopUpdateMessage(`\u68c0\u67e5\u5931\u8d25\uff1a${detail}`);
+      setDesktopUpdateDetail('');
+      setLatestDesktopRelease(null);
+    }
+  };
+
+  const installDesktopUpdate = async () => {
+    const update = pendingDesktopUpdateRef.current;
+    if (!update) {
+      setDesktopUpdateState('error');
+      setDesktopUpdateMessage('\u5f53\u524d\u7248\u672c\u65e0\u6cd5\u76f4\u63a5\u5b89\u88c5\u66f4\u65b0');
+      setDesktopUpdateDetail('\u8bf7\u91cd\u65b0\u68c0\u67e5\u66f4\u65b0\uff0c\u6216\u6253\u5f00\u53d1\u5e03\u9875\u624b\u52a8\u4e0b\u8f7d\u3002');
+      return;
+    }
+
+    let downloaded = 0;
+    let contentLength = 0;
+    setDesktopUpdateState('downloading');
+    setDesktopUpdateProgress(0);
+    setDesktopUpdateMessage(`\u6b63\u5728\u4e0b\u8f7d v${normalizeDesktopVersion(update.version)}...`);
+    setDesktopUpdateDetail('');
+
+    try {
+      await update.downloadAndInstall((event) => {
+        if (event.event === 'Started') {
+          contentLength = event.data.contentLength ?? 0;
+          downloaded = 0;
+          setDesktopUpdateProgress(0);
+          setDesktopUpdateDetail(contentLength > 0 ? `0 / ${Math.round(contentLength / 1024 / 1024)} MB` : '');
+          return;
+        }
+
+        if (event.event === 'Progress') {
+          downloaded += event.data.chunkLength;
+          if (contentLength > 0) {
+            const nextProgress = Math.min(99, Math.round((downloaded / contentLength) * 100));
+            setDesktopUpdateProgress(nextProgress);
+            setDesktopUpdateDetail(
+              `${Math.round(downloaded / 1024 / 1024)} / ${Math.round(contentLength / 1024 / 1024)} MB`,
+            );
+          }
+          return;
+        }
+
+        if (event.event === 'Finished') {
+          setDesktopUpdateProgress(100);
+          setDesktopUpdateState('installing');
+          setDesktopUpdateMessage('\u66f4\u65b0\u5df2\u4e0b\u8f7d\uff0c\u6b63\u5728\u5b89\u88c5...');
+          setDesktopUpdateDetail('\u5b89\u88c5\u5b8c\u6210\u540e\u5c06\u91cd\u542f\u5e94\u7528\u3002');
+        }
+      });
+
+      setDesktopUpdateProgress(100);
+      setDesktopUpdateState('installing');
+      setDesktopUpdateMessage('\u66f4\u65b0\u5b89\u88c5\u5b8c\u6210\uff0c\u6b63\u5728\u91cd\u542f...');
+      await relaunch();
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      setDesktopUpdateState('error');
+      setDesktopUpdateMessage(`\u66f4\u65b0\u5931\u8d25\uff1a${detail}`);
+      setDesktopUpdateDetail('\u53ef\u6253\u5f00\u53d1\u5e03\u9875\u624b\u52a8\u4e0b\u8f7d\u6700\u65b0\u7248\u672c\u3002');
+    }
   };
 
   const refreshPublishStatus = async () => {
@@ -5044,6 +5351,13 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
                 >
                   <strong>{'\u53d1\u5e03\u8bbe\u7f6e'}</strong>
                 </button>
+                <button
+                  type="button"
+                  className={settingsSection === 'about' ? 'active' : ''}
+                  onClick={() => setSettingsSection('about')}
+                >
+                  <strong>{'\u7248\u672c\u66f4\u65b0'}</strong>
+                </button>
               </nav>
 
               <div className="notes-settings-content">
@@ -5573,6 +5887,142 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
                       </div>
 
                     </div>
+                  </section>
+                ) : null}
+
+                {settingsSection === 'about' ? (
+                  <section className="notes-settings-section notes-settings-about">
+                    <article className="notes-about-hero">
+                      <span className="notes-about-logo" aria-hidden="true">
+                        {brandAvatar ? <img src={brandAvatar} alt="" /> : <IconWriting />}
+                      </span>
+                      <div>
+                        <h3>InkNote</h3>
+                        <p>{'\u672c\u5730 Markdown / InkNote \u535a\u5ba2\u7f16\u8f91\u5668'}</p>
+                        <div className="notes-about-badges" aria-label={'\u5e94\u7528\u4fe1\u606f'}>
+                          <span>{`v${desktopVersion}`}</span>
+                          <span>Tauri</span>
+                          <span>React</span>
+                        </div>
+                      </div>
+                    </article>
+
+                    <section className="notes-about-update-card">
+                      <header>
+                        <div>
+                          <IconRefresh aria-hidden="true" />
+                          <strong>{'\u7248\u672c\u66f4\u65b0'}</strong>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => void checkDesktopUpdates()}
+                          disabled={
+                            desktopUpdateState === 'checking' ||
+                            desktopUpdateState === 'downloading' ||
+                            desktopUpdateState === 'installing'
+                          }
+                        >
+                          {desktopUpdateState === 'checking' ||
+                          desktopUpdateState === 'downloading' ||
+                          desktopUpdateState === 'installing' ? (
+                            <IconLoader2 className="spinning" aria-hidden="true" />
+                          ) : (
+                            <IconRefresh aria-hidden="true" />
+                          )}
+                          {'\u68c0\u67e5\u66f4\u65b0'}
+                        </button>
+                      </header>
+
+                      {desktopUpdateState !== 'idle' ? (
+                        <div className={`notes-about-update-result ${desktopUpdateState}`}>
+                          <span aria-hidden="true">
+                            {desktopUpdateState === 'latest' ? (
+                              <IconCircleCheck />
+                            ) : desktopUpdateState === 'available' ? (
+                              <IconRocket />
+                            ) : desktopUpdateState === 'checking' ||
+                            desktopUpdateState === 'downloading' ||
+                            desktopUpdateState === 'installing' ? (
+                              <IconLoader2 className="spinning" />
+                            ) : (
+                              <IconInfoCircle />
+                            )}
+                          </span>
+                          <div>
+                            <strong>{desktopUpdateMessage}</strong>
+                            <small>
+                              {latestDesktopRelease
+                                ? [
+                                    latestDesktopRelease.name,
+                                    formatDesktopReleaseDate(latestDesktopRelease.publishedAt),
+                                  ]
+                                    .filter(Boolean)
+                                    .join(' \u00b7 ')
+                                : DESKTOP_RELEASE_REPOSITORY}
+                              {desktopUpdateDetail ? ` \u00b7 ${desktopUpdateDetail}` : ''}
+                            </small>
+                          </div>
+                          {desktopUpdateState === 'available' &&
+                          latestDesktopRelease &&
+                          isTauri() &&
+                          pendingDesktopUpdateRef.current ? (
+                            <button
+                              type="button"
+                              onClick={() => void installDesktopUpdate()}
+                            >
+                              {'\u7acb\u5373\u5347\u7ea7'}
+                            </button>
+                          ) : desktopUpdateState === 'available' && latestDesktopRelease ? (
+                            <button
+                              type="button"
+                              onClick={() => void openExternalUrl(latestDesktopRelease.url)}
+                            >
+                              {'\u6253\u5f00\u53d1\u5e03\u9875'}
+                            </button>
+                          ) : desktopUpdateState === 'downloading' || desktopUpdateState === 'installing' ? (
+                            <button type="button" disabled>
+                              {'\u5347\u7ea7\u4e2d'}
+                            </button>
+                          ) : null}
+                          {desktopUpdateState === 'downloading' || desktopUpdateState === 'installing' ? (
+                            <div
+                              className="notes-about-update-track"
+                              role="progressbar"
+                              aria-valuemin={0}
+                              aria-valuemax={100}
+                              aria-valuenow={desktopUpdateProgress}
+                            >
+                              <span style={{ width: `${desktopUpdateProgress}%` }} />
+                            </div>
+                          ) : null}
+                        </div>
+                      ) : null}
+                    </section>
+
+                    <section className="notes-about-links" aria-label={'\u7248\u672c\u94fe\u63a5'}>
+                      <button type="button" onClick={() => void openExternalUrl(DESKTOP_REPOSITORY_URL)}>
+                        <span aria-hidden="true">
+                          <IconBrandGithub />
+                        </span>
+                        <div>
+                          <strong>{'GitHub \u4ed3\u5e93'}</strong>
+                          <small>{`github.com/${DESKTOP_RELEASE_REPOSITORY}`}</small>
+                        </div>
+                        <IconExternalLink aria-hidden="true" />
+                      </button>
+                      <button type="button" onClick={() => void openExternalUrl(DESKTOP_RELEASES_URL)}>
+                        <span aria-hidden="true">
+                          <IconHistory />
+                        </span>
+                        <div>
+                          <strong>{'\u53d1\u5e03\u5386\u53f2'}</strong>
+                          <small>{'\u67e5\u770b\u6240\u6709\u684c\u9762\u7f16\u8f91\u5668\u7248\u672c'}</small>
+                        </div>
+                        <IconExternalLink aria-hidden="true" />
+                      </button>
+                    </section>
+
+                    <p className="notes-about-footer">Made with care · MIT License</p>
                   </section>
                 ) : null}
               </div>

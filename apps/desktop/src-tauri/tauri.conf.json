@@ -39,5 +39,16 @@
       "../../web/dist/": "web-dist/",
       "../../../content/": "default-content/"
     }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "__TAURI_UPDATER_PUBKEY__",
+      "endpoints": [
+        "https://github.com/Chty-syq/InkNote/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
   }
 }

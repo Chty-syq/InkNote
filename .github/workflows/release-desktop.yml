@@ -44,14 +44,23 @@ jobs:
             throw "Desktop versions are inconsistent: tauri=$tauriVersion cargo=$cargoVersion package=$packageVersion"
           }
 
+      - name: Configure updater signing
+        shell: pwsh
+        env:
+          TAURI_UPDATER_PUBKEY: ${{ secrets.TAURI_UPDATER_PUBKEY }}
+        run: node scripts/configure-tauri-updater.mjs
+
       - name: Build and publish release
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           projectPath: apps/desktop
           tagName: v__VERSION__
           releaseName: InkNote v__VERSION__
           releaseBody: Download the Windows installer below.
-          releaseDraft: true
+          releaseDraft: false
           prerelease: false
+          updaterJsonPreferNsis: true
