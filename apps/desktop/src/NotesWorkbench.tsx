@@ -32,7 +32,6 @@ import {
   IconHistory,
   IconInfoCircle,
   IconItalic,
-  IconKey,
   IconLink,
   IconList,
   IconListNumbers,
@@ -46,8 +45,10 @@ import {
   IconWriting,
   IconX,
 } from '@tabler/icons-react';
+import { invoke } from '@tauri-apps/api/core';
 import { relaunch } from '@tauri-apps/plugin-process';
-import { check } from '@tauri-apps/plugin-updater';
+import { Update } from '@tauri-apps/plugin-updater';
+import type { DownloadEvent } from '@tauri-apps/plugin-updater';
 import desktopPackage from '../package.json';
 import {
   createDefaultProject,
@@ -95,7 +96,6 @@ import {
 import { MarkdownPreview } from './lib/markdown-preview';
 import {
   chooseFileToSave,
-  chooseSshPrivateKey,
   cacheExternalImage,
   deleteContentFile,
   ensureBlogPreviewServer,
@@ -212,6 +212,15 @@ interface DesktopReleaseInfo {
   publishedAt: string;
 }
 
+interface TauriUpdateMetadata {
+  rid: number;
+  available: boolean;
+  currentVersion: string;
+  version: string;
+  date?: string;
+  body?: string;
+}
+
 type ImageReferenceLocation = 'body' | 'cover' | 'previewImage';
 
 interface ParsedImageReference {
@@ -314,6 +323,15 @@ function formatDesktopReleaseDate(value: string): string {
     month: '2-digit',
     day: '2-digit',
   });
+}
+
+async function checkTauriDesktopUpdate(): Promise<Update | null> {
+  const metadata = await invoke<TauriUpdateMetadata | null>('plugin:updater|check');
+  if (!metadata?.available) {
+    return null;
+  }
+
+  return new Update(metadata);
 }
 
 function resolveDesktopContentImages(markdown: string): string {
@@ -1224,7 +1242,7 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
   const draftMetadataSaveQueueRef = useRef<Promise<void>>(Promise.resolve());
   const publishLogSequenceRef = useRef(0);
   const publishLogViewRef = useRef<HTMLDivElement | null>(null);
-  const pendingDesktopUpdateRef = useRef<Awaited<ReturnType<typeof check>> | null>(null);
+  const pendingDesktopUpdateRef = useRef<Update | null>(null);
 
   useEffect(() => {
     const view = publishLogViewRef.current;
@@ -1902,7 +1920,7 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
     try {
       if (isTauri()) {
         try {
-          const update = await check();
+          const update = await checkTauriDesktopUpdate();
           if (update) {
             pendingDesktopUpdateRef.current = update;
             const latestVersion = normalizeDesktopVersion(update.version);
@@ -1957,7 +1975,7 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
     setDesktopUpdateDetail('');
 
     try {
-      await update.downloadAndInstall((event) => {
+      await update.downloadAndInstall((event: DownloadEvent) => {
         if (event.event === 'Started') {
           contentLength = event.data.contentLength ?? 0;
           downloaded = 0;
@@ -2210,27 +2228,6 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
     setIsPublishDialogOpen(true);
     if (!isPublishingSite) {
       void publishSiteChanges();
-    }
-  };
-
-  const updateSshKeyPath = (value: string) => {
-    setSshKeyPath(value);
-    setPublishConnectionMessage('SSH 配置已修改，请重新测试连接。');
-    try {
-      if (value.trim()) {
-        window.localStorage.setItem(SSH_KEY_PATH_STORAGE_KEY, value);
-      } else {
-        window.localStorage.removeItem(SSH_KEY_PATH_STORAGE_KEY);
-      }
-    } catch {
-      // Keep the value for the current session when local storage is unavailable.
-    }
-  };
-
-  const selectSshPrivateKey = async () => {
-    const keyPath = await chooseSshPrivateKey();
-    if (keyPath) {
-      updateSshKeyPath(keyPath);
     }
   };
 
@@ -5492,14 +5489,6 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
                         />
                       </label>
 
-                      <label className="notes-settings-field wide notes-settings-site-only">
-                        <span>{'\u7ad9\u70b9\u5730\u5740'}</span>
-                        <input
-                          value={siteConfigDraft.baseUrl}
-                          onChange={(event) => updateSiteConfigDraft({ baseUrl: event.target.value })}
-                        />
-                      </label>
-
                       <div className="notes-settings-friend-section notes-settings-site-only">
                         <div className="notes-settings-friend-head">
                           <span>{'\u53cb\u60c5\u94fe\u63a5'}</span>
@@ -5614,15 +5603,6 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
 
                 {settingsSection === 'images' ? (
                   <section className="notes-settings-section notes-settings-images-section">
-                    <div className="notes-settings-image-toolbar">
-                      <div className="notes-settings-image-summary">
-                        <strong>{managedImages.length} 张图片</strong>
-                        <span>
-                          {managedImages.length - externalManagedImages.length} 张内部 · {externalManagedImages.length} 张外部
-                        </span>
-                      </div>
-                    </div>
-
                     {managedImages.length > 0 ? (
                       <div className="notes-settings-image-groups">
                         <section className="notes-settings-image-group">
@@ -5719,36 +5699,6 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
                           placeholder="https://user.github.io/repo/"
                         />
                       </label>
-
-                      <div className="notes-settings-ssh notes-settings-publish-only">
-                        <div className="notes-settings-ssh-head">
-                          <IconKey aria-hidden="true" />
-                          <div>
-                            <strong>SSH 配置</strong>
-                            <span>留空时使用系统 SSH Agent 与 ~/.ssh/config。</span>
-                          </div>
-                        </div>
-                        <div className="notes-settings-ssh-row">
-                          <input
-                            value={sshKeyPath}
-                            onChange={(event) => updateSshKeyPath(event.target.value)}
-                            placeholder="可选：SSH 私钥文件路径"
-                            aria-label="SSH 私钥文件路径"
-                          />
-                          <button type="button" onClick={() => void selectSshPrivateKey()}>
-                            选择私钥
-                          </button>
-                          {sshKeyPath.trim() ? (
-                            <button
-                              type="button"
-                              className="clear"
-                              onClick={() => updateSshKeyPath('')}
-                            >
-                              清除
-                            </button>
-                          ) : null}
-                        </div>
-                      </div>
 
                       <div className="notes-settings-site-only notes-settings-service-grid">
                         <section className="notes-settings-integration-card">
@@ -5950,17 +5900,23 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
                           </span>
                           <div>
                             <strong>{desktopUpdateMessage}</strong>
-                            <small>
-                              {latestDesktopRelease
-                                ? [
-                                    latestDesktopRelease.name,
-                                    formatDesktopReleaseDate(latestDesktopRelease.publishedAt),
-                                  ]
-                                    .filter(Boolean)
-                                    .join(' \u00b7 ')
-                                : DESKTOP_RELEASE_REPOSITORY}
-                              {desktopUpdateDetail ? ` \u00b7 ${desktopUpdateDetail}` : ''}
-                            </small>
+                            {latestDesktopRelease || desktopUpdateDetail ? (
+                              <small>
+                                {[
+                                  latestDesktopRelease
+                                    ? [
+                                        latestDesktopRelease.name,
+                                        formatDesktopReleaseDate(latestDesktopRelease.publishedAt),
+                                      ]
+                                        .filter(Boolean)
+                                        .join(' \u00b7 ')
+                                    : '',
+                                  desktopUpdateDetail,
+                                ]
+                                  .filter(Boolean)
+                                  .join(' \u00b7 ')}
+                              </small>
+                            ) : null}
                           </div>
                           {desktopUpdateState === 'available' &&
                           latestDesktopRelease &&
