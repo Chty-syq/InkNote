@@ -532,7 +532,8 @@ fn store_external_image(source_url: &str, extension: &str, bytes: &[u8]) -> Resu
         fs::create_dir_all(parent)
             .map_err(|error| format!("failed to create image cache directory: {error}"))?;
     }
-    fs::write(&target, bytes).map_err(|error| format!("failed to cache external image: {error}"))?;
+    fs::write(&target, bytes)
+        .map_err(|error| format!("failed to cache external image: {error}"))?;
     Ok(format!("/{relative_path}"))
 }
 

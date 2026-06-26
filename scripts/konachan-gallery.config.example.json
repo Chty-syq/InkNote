@@ -1,0 +1,197 @@
+{
+  "outDir": "apps/web/public/card-images/anime",
+  "hosts": ["https://konachan.com"],
+  "requestMode": "powershell",
+  "totalLimit": 1000,
+  "perTopicLimit": 32,
+  "rating": "safe",
+  "order": "score",
+  "imageVariant": "sample",
+  "minWidth": 1280,
+  "minHeight": 720,
+  "delayMs": 1200,
+  "requestRetries": 3,
+  "retryMs": 2500,
+  "topics": [
+    {
+      "name": "魔卡少女樱",
+      "slug": "cardcaptor-sakura",
+      "tags": ["card_captor_sakura"]
+    },
+    {
+      "name": "灼眼的夏娜",
+      "slug": "shakugan-no-shana",
+      "tags": ["shakugan_no_shana"]
+    },
+    {
+      "name": "零之使魔",
+      "slug": "zero-no-tsukaima",
+      "tags": ["zero_no_tsukaima"]
+    },
+    {
+      "name": "魔法禁书目录",
+      "slug": "toaru-majutsu-no-index",
+      "tags": ["toaru_majutsu_no_index"]
+    },
+    {
+      "name": "某科学的超电磁炮",
+      "slug": "toaru-kagaku-no-railgun",
+      "tags": ["toaru_kagaku_no_railgun"]
+    },
+    {
+      "name": "妄想学生会",
+      "slug": "seitokai-yakuindomo",
+      "tags": ["seitokai_yakuindomo"]
+    },
+    {
+      "name": "缘之空",
+      "slug": "yosuga-no-sora",
+      "tags": ["yosuga_no_sora"]
+    },
+    {
+      "name": "魔法少女小圆",
+      "slug": "madoka-magica",
+      "tags": ["mahou_shoujo_madoka_magica"]
+    },
+    {
+      "name": "罪恶王冠",
+      "slug": "guilty-crown",
+      "tags": ["guilty_crown"]
+    },
+    {
+      "name": "刀剑神域",
+      "slug": "sword-art-online",
+      "tags": ["sword_art_online"]
+    },
+    {
+      "name": "樱花庄的宠物女孩",
+      "slug": "sakurasou",
+      "tags": ["sakurasou_no_pet_na_kanojo"]
+    },
+    {
+      "name": "Love Live",
+      "slug": "love-live",
+      "tags": ["love_live!"]
+    },
+    {
+      "name": "我的青春恋爱物语果然有问题",
+      "slug": "oregairu",
+      "tags": ["yahari_ore_no_seishun_love_comedy_wa_machigatteiru"]
+    },
+    {
+      "name": "约会大作战",
+      "slug": "date-a-live",
+      "tags": ["date_a_live"]
+    },
+    {
+      "name": "魔法科高校的劣等生",
+      "slug": "mahouka",
+      "tags": ["mahouka_koukou_no_rettousei"]
+    },
+    {
+      "name": "狐妖小红娘",
+      "slug": "fox-spirit-matchmaker",
+      "tags": ["huyao_xiao_hongniang"]
+    },
+    {
+      "name": "埃罗芒阿老师",
+      "slug": "eromanga-sensei",
+      "tags": ["eromanga_sensei"]
+    },
+    {
+      "name": "从零开始的魔法书",
+      "slug": "zero-kara-hajimeru-mahou-no-sho",
+      "tags": ["zero_kara_hajimeru_mahou_no_sho"]
+    },
+    {
+      "name": "欢迎来到实力至上主义的教室",
+      "slug": "youkoso-jitsuryoku",
+      "tags": ["youkoso_jitsuryoku_shijou_shugi_no_kyoushitsu_e"]
+    },
+    {
+      "name": "龙王的工作",
+      "slug": "ryuuou-no-oshigoto",
+      "tags": ["ryuuou_no_oshigoto!"]
+    },
+    {
+      "name": "紫罗兰永恒花园",
+      "slug": "violet-evergarden",
+      "tags": ["violet_evergarden"]
+    },
+    {
+      "name": "杀戮天使",
+      "slug": "satsuriku-no-tenshi",
+      "tags": ["satsuriku_no_tenshi"]
+    },
+    {
+      "name": "青春猪头少年不会梦到兔女郎学姐",
+      "slug": "bunny-girl-senpai",
+      "tags": ["seishun_buta_yarou_wa_bunny_girl_senpai_no_yume_wo_minai"]
+    },
+    {
+      "name": "Citrus柑橘味香气",
+      "slug": "citrus",
+      "tags": ["citrus"]
+    },
+    {
+      "name": "终将成为你",
+      "slug": "yagate-kimi-ni-naru",
+      "tags": ["yagate_kimi_ni_naru"]
+    },
+    {
+      "name": "辉夜大小姐想让我告白",
+      "slug": "kaguya-sama",
+      "tags": ["kaguya-sama_wa_kokurasetai"]
+    },
+    {
+      "name": "不正经的魔术讲师与禁忌教典",
+      "slug": "rokudenashi",
+      "tags": ["rokudenashi_majutsu_koushi_to_akashic_records"]
+    },
+    {
+      "name": "转生公主与天才千金的魔法革命",
+      "slug": "magical-revolution",
+      "tags": ["tensei_oujo_to_tensai_reijou_no_mahou_kakumei"]
+    },
+    {
+      "name": "学生会的一己之见",
+      "slug": "seitokai-no-ichizon",
+      "tags": ["seitokai_no_ichizon"]
+    },
+    {
+      "name": "名侦探柯南",
+      "slug": "detective-conan",
+      "tags": ["detective_conan"]
+    },
+    {
+      "name": "五等分的新娘",
+      "slug": "gotoubun-no-hanayome",
+      "tags": ["go-toubun_no_hanayome"]
+    },
+    {
+      "name": "原神",
+      "slug": "genshin-impact",
+      "tags": ["genshin_impact"]
+    },
+    {
+      "name": "星穹铁道",
+      "slug": "honkai-star-rail",
+      "tags": ["honkai:_star_rail"]
+    },
+    {
+      "name": "碧蓝航线",
+      "slug": "azur-lane",
+      "tags": ["azur_lane"]
+    },
+    {
+      "name": "终末地",
+      "slug": "arknights-endfield",
+      "tags": ["arknights:_endfield"]
+    },
+    {
+      "name": "空之轨迹",
+      "slug": "trails-in-the-sky",
+      "tags": ["sora_no_kiseki"]
+    }
+  ]
+}

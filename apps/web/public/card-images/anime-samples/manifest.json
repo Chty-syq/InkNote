@@ -1,0 +1,121 @@
+﻿[
+    {
+        "source":  "nekos.best/neko",
+        "status":  "ok",
+        "url":  "https://nekos.best/api/v2/neko/97d05f77-10a7-4689-b5a7-54a7aa9b5edf.png",
+        "file":  "F:\\projects\\notebook\\apps\\web\\public\\card-images\\anime-samples\\nekosbest-neko-01.png",
+        "message":  ""
+    },
+    {
+        "source":  "nekos.best/neko",
+        "status":  "ok",
+        "url":  "https://nekos.best/api/v2/neko/e4dc1604-e4b9-43ef-a8d1-25dea3e4a6df.png",
+        "file":  "F:\\projects\\notebook\\apps\\web\\public\\card-images\\anime-samples\\nekosbest-neko-02.png",
+        "message":  ""
+    },
+    {
+        "source":  "nekos.best/neko",
+        "status":  "ok",
+        "url":  "https://nekos.best/api/v2/neko/73c6f1ca-ab03-4a0a-ad8b-566f6fde65e6.png",
+        "file":  "F:\\projects\\notebook\\apps\\web\\public\\card-images\\anime-samples\\nekosbest-neko-03.png",
+        "message":  ""
+    },
+    {
+        "source":  "nekos.best/neko",
+        "status":  "ok",
+        "url":  "https://nekos.best/api/v2/neko/45b56aa8-c3b8-4a4f-9006-8b1085031d20.png",
+        "file":  "F:\\projects\\notebook\\apps\\web\\public\\card-images\\anime-samples\\nekosbest-neko-04.png",
+        "message":  ""
+    },
+    {
+        "source":  "waifu.pics/sfw/waifu",
+        "status":  "fail",
+        "url":  "https://api.waifu.pics/sfw/waifu",
+        "file":  "",
+        "message":  "基础连接已经关闭: 发送时发生错误。"
+    },
+    {
+        "source":  "waifu.pics/sfw/waifu",
+        "status":  "fail",
+        "url":  "https://api.waifu.pics/sfw/waifu",
+        "file":  "",
+        "message":  "基础连接已经关闭: 发送时发生错误。"
+    },
+    {
+        "source":  "waifu.pics/sfw/waifu",
+        "status":  "fail",
+        "url":  "https://api.waifu.pics/sfw/waifu",
+        "file":  "",
+        "message":  "基础连接已经关闭: 发送时发生错误。"
+    },
+    {
+        "source":  "waifu.pics/sfw/waifu",
+        "status":  "fail",
+        "url":  "https://api.waifu.pics/sfw/waifu",
+        "file":  "",
+        "message":  "基础连接已经关闭: 发送时发生错误。"
+    },
+    {
+        "source":  "waifu.im/waifu",
+        "status":  "fail",
+        "url":  "https://api.waifu.im/search?included_tags=waifu\u0026is_nsfw=false\u0026limit=4",
+        "file":  "",
+        "message":  "远程服务器返回错误: (403) 已禁止。"
+    },
+    {
+        "source":  "konachan/safe",
+        "status":  "ok",
+        "url":  "https://konachan.net/jpeg/fd9fc6bb7bdb93768f9c2b5d0ca983c8/Konachan.com%20-%20263023%20darling_in_the_franxx%20hyakunin_momoko%20zero_two.jpg",
+        "file":  "F:\\projects\\notebook\\apps\\web\\public\\card-images\\anime-samples\\konachan-safe-01.jpg",
+        "message":  ""
+    },
+    {
+        "source":  "konachan/safe",
+        "status":  "ok",
+        "url":  "https://konachan.net/image/7764a061e4d68974aaba4df7dcc5412c/Konachan.com%20-%20126553%20book%20gloves%20kasane_teto%20mirre%20pink_hair%20red_eyes%20skirt%20tagme%20thighhighs%20tie%20twintails%20utau.jpg",
+        "file":  "F:\\projects\\notebook\\apps\\web\\public\\card-images\\anime-samples\\konachan-safe-02.jpg",
+        "message":  ""
+    },
+    {
+        "source":  "konachan/safe",
+        "status":  "ok",
+        "url":  "https://konachan.net/image/e88d81669bda1ccf59130c77a6e1a54e/Konachan.com%20-%20117885%20armor%20blonde_hair%20blue_eyes%20original%20pixiv_fantasia%20shinazo%20weapon.jpg",
+        "file":  "F:\\projects\\notebook\\apps\\web\\public\\card-images\\anime-samples\\konachan-safe-03.jpg",
+        "message":  ""
+    },
+    {
+        "source":  "konachan/safe",
+        "status":  "ok",
+        "url":  "https://konachan.net/sample/61e6502fd4137c87b8a2bf5614ccfb85/Konachan.com%20-%20396803%20sample%20brown_hair%20building%20close%20long_hair%20original%20petals%20purple_eyes%20shirt%20skirt%20skirt_lift%20spring%20suzuame_yatsumi.jpg",
+        "file":  "F:\\projects\\notebook\\apps\\web\\public\\card-images\\anime-samples\\konachan-safe-04.jpg",
+        "message":  ""
+    },
+    {
+        "source":  "danbooru/rating:g",
+        "status":  "ok",
+        "url":  "https://cdn.donmai.us/sample/4b/e7/sample-4be72c9541e5d406a588a0cafcc7d8d1.jpg",
+        "file":  "F:\\projects\\notebook\\apps\\web\\public\\card-images\\anime-samples\\danbooru-general-01.jpg",
+        "message":  ""
+    },
+    {
+        "source":  "danbooru/rating:g",
+        "status":  "ok",
+        "url":  "https://cdn.donmai.us/sample/25/df/sample-25dfaf065730af6a8211a33f997f136f.jpg",
+        "file":  "F:\\projects\\notebook\\apps\\web\\public\\card-images\\anime-samples\\danbooru-general-02.jpg",
+        "message":  ""
+    },
+    {
+        "source":  "danbooru/rating:g",
+        "status":  "ok",
+        "url":  "https://cdn.donmai.us/sample/d0/23/sample-d023ca36c2828a9f89866d83180897b7.jpg",
+        "file":  "F:\\projects\\notebook\\apps\\web\\public\\card-images\\anime-samples\\danbooru-general-03.jpg",
+        "message":  ""
+    },
+    {
+        "source":  "danbooru/rating:g",
+        "status":  "ok",
+        "url":  "https://cdn.donmai.us/sample/d8/ab/sample-d8abe813c83c3c1b569bacd83d6653cb.jpg",
+        "file":  "F:\\projects\\notebook\\apps\\web\\public\\card-images\\anime-samples\\danbooru-general-04.jpg",
+        "message":  ""
+    }
+]

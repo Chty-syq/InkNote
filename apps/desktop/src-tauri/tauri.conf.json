@@ -36,7 +36,11 @@
       "icons/icon.ico"
     ],
     "resources": {
-      "../../web/dist/": "web-dist/",
+      "../../web/dist/index.html": "web-dist/index.html",
+      "../../web/dist/404.html": "web-dist/404.html",
+      "../../web/dist/assets/": "web-dist/assets/",
+      "../../web/dist/blog-avatar.jpg": "web-dist/blog-avatar.jpg",
+      "../../web/dist/blog-header-bg.png": "web-dist/blog-header-bg.png",
       "../../../content/": "default-content/"
     }
   },

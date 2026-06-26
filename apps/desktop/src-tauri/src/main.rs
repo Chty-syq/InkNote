@@ -196,6 +196,196 @@ fn write_binary_file(path: String, bytes: Vec<u8>) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn copy_file_to_path(source: String, destination: String) -> Result<(), String> {
+    let source_path = PathBuf::from(&source);
+    if !source_path.is_file() {
+        return Err(format!("source file does not exist: {source}"));
+    }
+
+    ensure_parent_directory(&destination)?;
+    fs::copy(&source_path, PathBuf::from(&destination))
+        .map(|_| ())
+        .map_err(|error| format!("failed to copy file: {error}"))
+}
+
+#[tauri::command]
+fn delete_gallery_image_file(public_path: String) -> Result<(), String> {
+    const GALLERY_UPLOAD_PREFIX: &str = "/card-images/gallery/uploads/";
+
+    let normalized_path = public_path.trim().replace('\\', "/");
+    let file_name = normalized_path
+        .strip_prefix(GALLERY_UPLOAD_PREFIX)
+        .ok_or_else(|| "only uploaded gallery images can be deleted".to_string())?;
+
+    if file_name.is_empty()
+        || file_name.contains('/')
+        || file_name.contains('\\')
+        || file_name.contains("..")
+    {
+        return Err("invalid gallery image file name".to_string());
+    }
+
+    let gallery_root = get_workspace_root()?
+        .join("apps")
+        .join("web")
+        .join("public")
+        .join("card-images")
+        .join("gallery")
+        .join("uploads");
+
+    if !gallery_root.exists() {
+        return Ok(());
+    }
+
+    let gallery_root = gallery_root
+        .canonicalize()
+        .map_err(|error| format!("failed to resolve gallery upload directory: {error}"))?;
+    let target = gallery_root.join(file_name);
+    let resolved_target = target.canonicalize().unwrap_or(target);
+
+    if !resolved_target.starts_with(&gallery_root) {
+        return Err("gallery image path escapes upload directory".to_string());
+    }
+
+    if !resolved_target.exists() {
+        return Ok(());
+    }
+
+    if resolved_target.is_dir() {
+        return Err("gallery image path is a directory, expected a file".to_string());
+    }
+
+    fs::remove_file(&resolved_target)
+        .map_err(|error| format!("failed to delete gallery image: {error}"))
+}
+
+#[tauri::command]
+fn convert_slides_to_pdf(source: String, destination: String) -> Result<(), String> {
+    let source_path = PathBuf::from(&source);
+    if !source_path.is_file() {
+        return Err(format!("slides file does not exist: {source}"));
+    }
+
+    let extension = source_path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if !matches!(extension.as_str(), "ppt" | "pptx") {
+        return Err("only PPT and PPTX files need conversion".to_string());
+    }
+
+    let destination_path = PathBuf::from(&destination);
+    ensure_parent_directory(&destination)?;
+    if destination_path.exists() {
+        fs::remove_file(&destination_path)
+            .map_err(|error| format!("failed to replace existing PDF: {error}"))?;
+    }
+
+    let outdir = destination_path
+        .parent()
+        .ok_or_else(|| "invalid PDF destination path".to_string())?;
+    let expected_output = outdir.join(format!(
+        "{}.pdf",
+        source_path
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .ok_or_else(|| "invalid slides file name".to_string())?
+    ));
+    if expected_output.exists() {
+        fs::remove_file(&expected_output)
+            .map_err(|error| format!("failed to clear existing converted PDF: {error}"))?;
+    }
+
+    let mut errors = Vec::new();
+    for candidate in libreoffice_candidates() {
+        if candidate.is_absolute() && !candidate.is_file() {
+            continue;
+        }
+
+        let mut command = Command::new(&candidate);
+        command
+            .args(["--headless", "--convert-to", "pdf", "--outdir"])
+            .arg(outdir)
+            .arg(&source_path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+
+        #[cfg(target_os = "windows")]
+        command.creation_flags(CREATE_NO_WINDOW);
+
+        match command.output() {
+            Ok(output) if output.status.success() => {
+                if !expected_output.is_file() {
+                    errors.push(format!(
+                        "{} finished but did not create {}",
+                        candidate.display(),
+                        expected_output.display()
+                    ));
+                    continue;
+                }
+
+                if expected_output != destination_path {
+                    fs::rename(&expected_output, &destination_path).map_err(|error| {
+                        format!("failed to move converted PDF into place: {error}")
+                    })?;
+                }
+                return Ok(());
+            }
+            Ok(output) => {
+                let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+                errors.push(format!(
+                    "{} exited with {}{}{}",
+                    candidate.display(),
+                    output.status,
+                    if stdout.is_empty() { "" } else { "\nstdout: " },
+                    stdout
+                ));
+                if !stderr.is_empty() {
+                    errors.push(format!("stderr: {stderr}"));
+                }
+            }
+            Err(error) => errors.push(format!("{}: {error}", candidate.display())),
+        }
+    }
+
+    Err(format!(
+        "PPT 转 PDF 失败，请确认已安装 LibreOffice。{}",
+        if errors.is_empty() {
+            String::new()
+        } else {
+            format!("\n{}", errors.join("\n"))
+        }
+    ))
+}
+
+fn libreoffice_candidates() -> Vec<PathBuf> {
+    let mut candidates = vec![PathBuf::from("soffice"), PathBuf::from("libreoffice")];
+
+    #[cfg(target_os = "windows")]
+    {
+        candidates.insert(0, PathBuf::from("soffice.com"));
+        candidates.insert(1, PathBuf::from("soffice.exe"));
+        candidates.push(PathBuf::from(
+            "C:\\Program Files\\LibreOffice\\program\\soffice.com",
+        ));
+        candidates.push(PathBuf::from(
+            "C:\\Program Files\\LibreOffice\\program\\soffice.exe",
+        ));
+        candidates.push(PathBuf::from(
+            "C:\\Program Files (x86)\\LibreOffice\\program\\soffice.com",
+        ));
+        candidates.push(PathBuf::from(
+            "C:\\Program Files (x86)\\LibreOffice\\program\\soffice.exe",
+        ));
+    }
+
+    candidates
+}
+
+#[tauri::command]
 fn get_content_index() -> Result<ContentIndex, String> {
     let root = get_content_root()?;
     let collections = ["markdown", "inknotes"];
@@ -458,11 +648,7 @@ fn publish_built_site(
         format!("检查分支：{branch}"),
         "info",
     );
-    let status = get_publish_status_with_ssh(
-        remote.to_string(),
-        branch.to_string(),
-        ssh_key_path,
-    )?;
+    let status = get_publish_status_with_ssh(remote.to_string(), branch.to_string(), ssh_key_path)?;
     reporter.emit(
         50,
         "remote",
@@ -1354,8 +1540,7 @@ mod tests {
             &reporter,
         )
         .unwrap();
-        let second_status =
-            get_publish_status(remote_value, "gh-pages".to_string(), None).unwrap();
+        let second_status = get_publish_status(remote_value, "gh-pages".to_string(), None).unwrap();
         assert!(second_status.branch_exists);
         assert_ne!(first_status.remote_commit, second_status.remote_commit);
     }
@@ -1387,6 +1572,9 @@ fn main() {
             read_text_file,
             write_text_file,
             write_binary_file,
+            copy_file_to_path,
+            delete_gallery_image_file,
+            convert_slides_to_pdf,
             get_content_index,
             read_content_file,
             write_content_file,

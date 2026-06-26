@@ -89,5 +89,9 @@
     "enabled": true,
     "endpoint": "https://chty.goatcounter.com/count",
     "scriptUrl": "https://gc.zgo.at/count.js"
+  },
+  "cardImages": {
+    "enabled": true,
+    "manifest": "/card-images/gallery/manifest.json"
   }
 }

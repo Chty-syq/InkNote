@@ -97,6 +97,16 @@ type ResolvedGoatCounterConfig = {
   scriptUrl: string;
 };
 
+type ResolvedCardImageConfig = {
+  manifest: string;
+};
+
+type CardGalleryImage = {
+  id: string;
+  path: string;
+  name: string;
+};
+
 type ResolvedGitHubRepo = {
   owner: string;
   name: string;
@@ -129,6 +139,18 @@ const VISIBLE_INKNOTES = contentIndex.inknotes.filter((note) => note.frontmatter
 const ACTIVE_FRIEND_LINKS = (contentIndex.siteConfig.friendLinks ?? []).filter(
   (link) => link.label.trim() && link.href.trim(),
 );
+
+function resolveCardImageConfig(config: typeof contentIndex.siteConfig.cardImages): ResolvedCardImageConfig | null {
+  if (!config?.enabled) {
+    return null;
+  }
+
+  return {
+    manifest: config.manifest?.trim() || '/card-images/gallery/manifest.json',
+  };
+}
+
+const ACTIVE_CARD_IMAGE_CONFIG = resolveCardImageConfig(contentIndex.siteConfig.cardImages);
 
 function FriendLinkAvatar({ label, icon }: { label: string; icon?: string }) {
   const [failed, setFailed] = useState(false);
@@ -294,12 +316,61 @@ function toAssetPath(path: string): string {
   return BASE_PATH ? `${BASE_PATH}${normalized}` : normalized;
 }
 
-function resolveWebContentImages(markdown: string): string {
-  const assetPrefix = toAssetPath('/content-images/');
+function normalizeCardGalleryImages(value: unknown): CardGalleryImage[] {
+  const input = value && typeof value === 'object' ? (value as { images?: unknown }) : {};
+  if (!Array.isArray(input.images)) {
+    return [];
+  }
+
+  return input.images
+    .map((image): CardGalleryImage | null => {
+      if (!image || typeof image !== 'object') {
+        return null;
+      }
+      const item = image as { id?: unknown; path?: unknown; name?: unknown };
+      if (typeof item.path !== 'string' || !item.path.trim()) {
+        return null;
+      }
+
+      const path = item.path.trim();
+      return {
+        id: typeof item.id === 'string' && item.id.trim() ? item.id.trim() : path,
+        path,
+        name: typeof item.name === 'string' && item.name.trim() ? item.name.trim() : 'cover',
+      };
+    })
+    .filter((image): image is CardGalleryImage => Boolean(image));
+}
+
+function hashText(value: string): number {
+  let hash = 2166136261;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+
+  return hash >>> 0;
+}
+
+function pickCardGalleryImage(images: CardGalleryImage[], entry: PortalEntry): CardGalleryImage | null {
+  if (images.length === 0) {
+    return null;
+  }
+
+  return images[hashText(entry.href || entry.id) % images.length] ?? null;
+}
+
+function resolveWebContentAssets(markdown: string): string {
+  const imagePrefix = toAssetPath('/content-images/');
+  const slidesPrefix = toAssetPath('/content-slides/');
 
   return markdown
-    .replace(/(\]\(\s*)\/content-images\//g, `$1${assetPrefix}`)
-    .replace(/(\bsrc\s*=\s*["'])\/content-images\//gi, `$1${assetPrefix}`);
+    .replace(/(\]\(\s*)\/content-images\//g, `$1${imagePrefix}`)
+    .replace(/(\bsrc\s*=\s*["'])\/content-images\//gi, `$1${imagePrefix}`)
+    .replace(/(\]\(\s*)\/content-slides\//g, `$1${slidesPrefix}`)
+    .replace(/(\bsrc\s*=\s*["'])\/content-slides\//gi, `$1${slidesPrefix}`)
+    .replace(/(\boriginal\s*=\s*["'])\/content-slides\//gi, `$1${slidesPrefix}`)
+    .replace(/(\bhref\s*=\s*["'])\/content-slides\//gi, `$1${slidesPrefix}`);
 }
 
 function getGoatCounterPathForRoute(route: Route): string | null {
@@ -1465,19 +1536,59 @@ function GiscusThread({ threadKey }: { threadKey: string }) {
   );
 }
 
+function useCardGalleryImages(): CardGalleryImage[] {
+  const [images, setImages] = useState<CardGalleryImage[]>([]);
+
+  useEffect(() => {
+    if (!ACTIVE_CARD_IMAGE_CONFIG) {
+      setImages([]);
+      return;
+    }
+
+    let cancelled = false;
+    fetch(toAssetPath(ACTIVE_CARD_IMAGE_CONFIG.manifest), { cache: 'no-store' })
+      .then((response) => (response.ok ? response.json() : null))
+      .then((manifest) => {
+        if (!cancelled) {
+          setImages(normalizeCardGalleryImages(manifest));
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setImages([]);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  return images;
+}
+
 function ArticleCard({
   entry,
   navigate,
   viewCount,
   commentCount,
+  cardImage,
+  showCardCover,
 }: {
   entry: PortalEntry;
   navigate: (href: string) => void;
   viewCount?: string;
   commentCount?: string;
+  cardImage?: CardGalleryImage | null;
+  showCardCover: boolean;
 }) {
   return (
-    <article className={`blog-card ${entry.accentClass}`}>
+    <article className={`blog-card ${entry.accentClass}${showCardCover ? ' has-cover' : ''}`}>
+      {showCardCover ? (
+        <SiteLink href={entry.href} navigate={navigate} className="blog-card-cover" aria-label={entry.title}>
+          {cardImage ? <img src={toAssetPath(cardImage.path)} alt="" loading="lazy" /> : <span aria-hidden="true" />}
+        </SiteLink>
+      ) : null}
       <div className="blog-card-body">
         <header className="blog-card-header">
           <SiteLink href={entry.href} navigate={navigate} className="blog-card-title">
@@ -1529,11 +1640,13 @@ function ArticleFeed({
   navigate,
   emptyTitle,
   emptyCopy,
+  cardGalleryImages,
 }: {
   entries: PortalEntry[];
   navigate: (href: string) => void;
   emptyTitle: string;
   emptyCopy: string;
+  cardGalleryImages: CardGalleryImage[];
 }) {
   const viewCounts = useGoatCounterCounts(entries);
   const commentCounts = useGiscusCommentCounts(entries);
@@ -1556,6 +1669,8 @@ function ArticleFeed({
           navigate={navigate}
           viewCount={ACTIVE_GOATCOUNTER_CONFIG ? viewCounts[entry.href] : undefined}
           commentCount={ACTIVE_GISCUS_CONFIG ? commentCounts[entry.href] : undefined}
+          cardImage={ACTIVE_CARD_IMAGE_CONFIG ? pickCardGalleryImage(cardGalleryImages, entry) : null}
+          showCardCover={Boolean(ACTIVE_CARD_IMAGE_CONFIG)}
         />
       ))}
     </section>
@@ -1699,10 +1814,12 @@ function HomePage({
   navigate,
   query,
   setQuery,
+  cardGalleryImages,
 }: {
   navigate: (href: string) => void;
   query: string;
   setQuery: (value: string) => void;
+  cardGalleryImages: CardGalleryImage[];
 }) {
     return (
       <div className="blog-layout">
@@ -1710,6 +1827,7 @@ function HomePage({
           <ArticleFeed
             entries={GLOBAL_ENTRIES}
             navigate={navigate}
+            cardGalleryImages={cardGalleryImages}
           emptyTitle="没有找到匹配的文章"
           emptyCopy="换一个关键词试试，或者直接从上方类目栏进入相应分区。"
         />
@@ -1725,11 +1843,13 @@ function CollectionPage<TFrontmatter extends ContentFrontmatter>({
   navigate,
   query,
   setQuery,
+  cardGalleryImages,
 }: {
   documents: RoutedDocument<TFrontmatter>[];
   navigate: (href: string) => void;
   query: string;
   setQuery: (value: string) => void;
+  cardGalleryImages: CardGalleryImage[];
 }) {
   const publishedEntries = useMemo(
     () =>
@@ -1745,6 +1865,7 @@ function CollectionPage<TFrontmatter extends ContentFrontmatter>({
           <ArticleFeed
             entries={publishedEntries}
             navigate={navigate}
+            cardGalleryImages={cardGalleryImages}
           emptyTitle="当前列表没有匹配结果"
           emptyCopy="可以尝试清空搜索，或者切换到别的类目继续浏览。"
         />
@@ -1931,7 +2052,7 @@ function DetailPage<TFrontmatter extends ContentFrontmatter>({
           </div>
         </section>
 
-        <article className="markdown-body">{renderMarkdown(resolveWebContentImages(document.body))}</article>
+        <article className="markdown-body">{renderMarkdown(resolveWebContentAssets(document.body))}</article>
         {showComments ? <GiscusThread key={document.href} threadKey={document.href} /> : null}
       </section>
 
@@ -1976,6 +2097,7 @@ export default function SiteAppWide() {
     () => typeof window !== 'undefined' && typeof (window as { goatcounter?: { count?: unknown } }).goatcounter?.count === 'function',
   );
   const goatCounterTrackedPathRef = useRef<string | null>(null);
+  const cardGalleryImages = useCardGalleryImages();
   const route = matchRoute(pathname);
 
   useEffect(() => {
@@ -2122,7 +2244,14 @@ export default function SiteAppWide() {
   let page: ReactNode;
 
   if (route.type === 'home') {
-    page = <HomePage navigate={navigate} query={searchQuery} setQuery={setSearchQuery} />;
+    page = (
+      <HomePage
+        navigate={navigate}
+        query={searchQuery}
+        setQuery={setSearchQuery}
+        cardGalleryImages={cardGalleryImages}
+      />
+    );
   } else if (route.type === 'search') {
     page = (
       <SearchPage
@@ -2141,6 +2270,7 @@ export default function SiteAppWide() {
         navigate={navigate}
         query={searchQuery}
         setQuery={setSearchQuery}
+        cardGalleryImages={cardGalleryImages}
       />
     );
   } else if (route.type === 'inknote-list') {
@@ -2150,6 +2280,7 @@ export default function SiteAppWide() {
         navigate={navigate}
         query={searchQuery}
         setQuery={setSearchQuery}
+        cardGalleryImages={cardGalleryImages}
       />
     );
   } else if (route.type === 'category') {
@@ -2161,6 +2292,7 @@ export default function SiteAppWide() {
         navigate={navigate}
         query={searchQuery}
         setQuery={setSearchQuery}
+        cardGalleryImages={cardGalleryImages}
       />
     ) : (
       <NotFoundPage navigate={navigate} query={searchQuery} setQuery={setSearchQuery} />

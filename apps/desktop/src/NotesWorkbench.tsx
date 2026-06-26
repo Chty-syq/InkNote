@@ -38,10 +38,12 @@ import {
   IconLoader2,
   IconPencil,
   IconPhoto,
+  IconPresentation,
   IconPlus,
   IconRefresh,
   IconRocket,
   IconTrash,
+  IconUpload,
   IconWriting,
   IconX,
 } from '@tabler/icons-react';
@@ -61,6 +63,7 @@ import {
   sortDocumentsByOrderAndDate,
 } from '@inknote/site-builder';
 import type {
+  CardImageConfig,
   ContentCategory,
   FriendLinkConfig,
   GoatCounterConfig,
@@ -96,8 +99,13 @@ import {
 import { MarkdownPreview } from './lib/markdown-preview';
 import {
   chooseFileToSave,
+  chooseGalleryImageFiles,
+  chooseSlidesFile,
   cacheExternalImage,
+  convertSlidesToPdf,
+  copyFileToPath,
   deleteContentFile,
+  deleteGalleryImageFile,
   ensureBlogPreviewServer,
   ensureExtension,
   fetchFriendLinkIcon,
@@ -109,6 +117,7 @@ import {
   openExternalUrl,
   publishContentChanges,
   readContentFile,
+  readTextFile,
   writeBinaryFile,
   writeContentFile,
   writeTextFile,
@@ -180,6 +189,11 @@ const PASTED_IMAGE_EXTENSIONS: Record<string, string> = {
   'image/webp': 'webp',
   'image/gif': 'gif',
 };
+const USER_GALLERY_MANIFEST_PUBLIC_PATH = '/card-images/gallery/manifest.json';
+const USER_GALLERY_UPLOADS_PUBLIC_PREFIX = '/card-images/gallery/uploads/';
+const IMAGE_MANAGEMENT_PAGE_SIZE = 10;
+const GALLERY_IMAGE_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'webp', 'gif']);
+const SLIDES_FILE_EXTENSIONS = new Set(['ppt', 'pptx', 'pdf']);
 const TABLER_ICON_OVERRIDES = `
   .notes-settings-close::before,
   .notes-category-dialog-close::before,
@@ -195,6 +209,7 @@ const TABLER_ICON_OVERRIDES = `
 `;
 
 type SettingsSection = 'basic' | 'images' | 'site' | 'publish' | 'about';
+type SettingsImageTab = 'external' | 'internal' | 'gallery';
 type DesktopUpdateState =
   | 'idle'
   | 'checking'
@@ -246,6 +261,38 @@ interface ManagedImageAsset {
 
 type ImageLocalizationStatus = 'processing' | 'success' | 'error';
 
+interface GalleryImageItem {
+  id: string;
+  path: string;
+  name: string;
+  size?: number;
+  uploadedAt?: string;
+}
+
+interface GalleryImageManifest {
+  updatedAt: string;
+  count: number;
+  images: GalleryImageItem[];
+}
+
+interface ImagePageData<T> {
+  items: T[];
+  pageCount: number;
+  safePage: number;
+}
+
+function paginateImageItems<T>(items: T[], page: number): ImagePageData<T> {
+  const pageCount = Math.max(1, Math.ceil(items.length / IMAGE_MANAGEMENT_PAGE_SIZE));
+  const safePage = Math.min(Math.max(page, 1), pageCount);
+  const start = (safePage - 1) * IMAGE_MANAGEMENT_PAGE_SIZE;
+
+  return {
+    items: items.slice(start, start + IMAGE_MANAGEMENT_PAGE_SIZE),
+    pageCount,
+    safePage,
+  };
+}
+
 function padDatePart(value: number, length = 2): string {
   return String(value).padStart(length, '0');
 }
@@ -265,6 +312,56 @@ function createPastedImageFileName(date: Date, index: number, total: number, ext
   const nonce = Math.random().toString(36).slice(2, 6).padEnd(4, '0');
   const sequence = total > 1 ? `-${padDatePart(index + 1)}` : '';
   return `image-${stamp}-${nonce}${sequence}.${extension}`;
+}
+
+function createAssetTimestamp(date: Date): string {
+  return [
+    date.getFullYear(),
+    padDatePart(date.getMonth() + 1),
+    padDatePart(date.getDate()),
+    '-',
+    padDatePart(date.getHours()),
+    padDatePart(date.getMinutes()),
+    padDatePart(date.getSeconds()),
+  ].join('');
+}
+
+function getFileNameFromPath(path: string): string {
+  return path.split(/[\\/]/).pop()?.trim() || 'slides';
+}
+
+function getSlidesFileExtension(path: string): string | null {
+  const extension = getFileNameFromPath(path).match(/\.([a-z0-9]+)$/i)?.[1]?.toLowerCase() ?? '';
+  return SLIDES_FILE_EXTENSIONS.has(extension) ? extension : null;
+}
+
+function sanitizeAssetName(value: string): string {
+  return value
+    .replace(/\.[^.\\/]+$/i, '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 48);
+}
+
+function escapeHtmlAttribute(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/"/g, '&quot;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+function createSlidesFileName(sourcePath: string, date: Date): string {
+  const extension = getSlidesFileExtension(sourcePath) ?? 'pptx';
+  const baseName = sanitizeAssetName(getFileNameFromPath(sourcePath)) || 'slides';
+  const nonce = Math.random().toString(36).slice(2, 6).padEnd(4, '0');
+  return `slides-${createAssetTimestamp(date)}-${nonce}-${baseName}.${extension}`;
+}
+
+function replaceFileExtension(fileName: string, nextExtension: string): string {
+  return `${fileName.replace(/\.[^.]+$/i, '')}.${nextExtension.replace(/^\./, '')}`;
 }
 
 function getPastedImageTargetPath(
@@ -289,6 +386,111 @@ function getPastedImageTargetPath(
   return {
     filePath: `${rootMatch[1]}${separator}${relativeSegments.join(separator)}`,
     publicPath: `/content-images/${collection}/${noteSlug}/${fileName}`,
+  };
+}
+
+function getProjectRootFromContentRoot(contentRoot: string): { root: string; separator: string } {
+  const normalizedRoot = contentRoot.replace(/[\\/]+$/, '');
+  const rootMatch = normalizedRoot.match(/^(.*)[\\/]content$/i);
+  if (!rootMatch) {
+    throw new Error('Unable to locate project root from content directory.');
+  }
+
+  return {
+    root: rootMatch[1],
+    separator: normalizedRoot.includes('\\') ? '\\' : '/',
+  };
+}
+
+function getProjectPath(contentRoot: string, segments: string[]): string {
+  const { root, separator } = getProjectRootFromContentRoot(contentRoot);
+  return `${root}${separator}${segments.join(separator)}`;
+}
+
+function getUserGalleryManifestPath(contentRoot: string): string {
+  return getProjectPath(contentRoot, ['apps', 'web', 'public', 'card-images', 'gallery', 'manifest.json']);
+}
+
+function getUserGalleryUploadPath(contentRoot: string, fileName: string): string {
+  return getProjectPath(contentRoot, ['apps', 'web', 'public', 'card-images', 'gallery', 'uploads', fileName]);
+}
+
+function getImageFileExtension(path: string): string | null {
+  const extension = getFileNameFromPath(path).match(/\.([a-z0-9]+)$/i)?.[1]?.toLowerCase() ?? '';
+  return GALLERY_IMAGE_EXTENSIONS.has(extension) ? extension : null;
+}
+
+function createGalleryImageFileName(sourcePath: string, date: Date, index: number): string {
+  const extension = getImageFileExtension(sourcePath) ?? 'jpg';
+  const baseName = sanitizeAssetName(getFileNameFromPath(sourcePath)) || 'image';
+  const nonce = Math.random().toString(36).slice(2, 6).padEnd(4, '0');
+  return `gallery-${createAssetTimestamp(date)}-${padDatePart(index + 1)}-${nonce}-${baseName}.${extension}`;
+}
+
+function normalizeGalleryManifest(value: unknown): GalleryImageManifest {
+  const input = value && typeof value === 'object' ? (value as Partial<GalleryImageManifest>) : {};
+  const images = Array.isArray(input.images)
+    ? input.images
+        .map<GalleryImageItem | null>((image) =>
+          image && typeof image === 'object' && typeof image.path === 'string' && image.path.trim()
+            ? {
+                id:
+                  typeof image.id === 'string' && image.id.trim()
+                    ? image.id.trim()
+                    : image.path.trim(),
+                path: image.path.trim(),
+                name:
+                  typeof image.name === 'string' && image.name.trim()
+                    ? image.name.trim()
+                    : getFileNameFromPath(image.path),
+                size: typeof image.size === 'number' ? image.size : undefined,
+                uploadedAt: typeof image.uploadedAt === 'string' ? image.uploadedAt : '',
+              }
+            : null,
+        )
+        .filter((image): image is GalleryImageItem => Boolean(image))
+    : [];
+
+  return {
+    updatedAt: typeof input.updatedAt === 'string' ? input.updatedAt : new Date().toISOString(),
+    count: images.length,
+    images,
+  };
+}
+
+function getGalleryImagePreviewSource(path: string): string {
+  const trimmed = path.trim();
+  if (!trimmed) return '';
+  if (/^https?:\/\//i.test(trimmed)) return trimmed;
+  return `${LOCAL_BLOG_PREVIEW_ORIGIN}${trimmed.startsWith('/') ? trimmed : `/${trimmed}`}`;
+}
+
+function getGalleryImageKey(image: GalleryImageItem): string {
+  return image.id || image.path;
+}
+
+function getSlidesTargetPath(
+  contentRoot: string,
+  noteType: ContentDraft['type'],
+  noteSlug: string,
+  fileName: string,
+): { filePath: string; publicPath: string } {
+  const normalizedRoot = contentRoot.replace(/[\\/]+$/, '');
+  const rootMatch = normalizedRoot.match(/^(.*)[\\/]content$/i);
+  if (!rootMatch) {
+    throw new Error('无法从内容仓路径定位项目目录。');
+  }
+  if (!/^[a-z0-9_-]+$/i.test(noteSlug)) {
+    throw new Error('当前文章路由不适合作为 slides 目录。');
+  }
+
+  const separator = normalizedRoot.includes('\\') ? '\\' : '/';
+  const collection = noteType === 'inknote' ? 'inknotes' : 'markdown';
+  const relativeSegments = ['apps', 'web', 'public', 'content-slides', collection, noteSlug, fileName];
+
+  return {
+    filePath: `${rootMatch[1]}${separator}${relativeSegments.join(separator)}`,
+    publicPath: `/content-slides/${collection}/${noteSlug}/${fileName}`,
   };
 }
 
@@ -335,12 +537,16 @@ async function checkTauriDesktopUpdate(): Promise<Update | null> {
 }
 
 function resolveDesktopContentImages(markdown: string): string {
-  const publicPrefix = '/content-images/';
-  const previewPrefix = `${LOCAL_BLOG_PREVIEW_ORIGIN}${publicPrefix}`;
+  const imagePrefix = `${LOCAL_BLOG_PREVIEW_ORIGIN}/content-images/`;
+  const slidesPrefix = `${LOCAL_BLOG_PREVIEW_ORIGIN}/content-slides/`;
 
   return markdown
-    .replace(/(\]\(\s*)\/content-images\//g, `$1${previewPrefix}`)
-    .replace(/(\bsrc\s*=\s*["'])\/content-images\//gi, `$1${previewPrefix}`);
+    .replace(/(\]\(\s*)\/content-images\//g, `$1${imagePrefix}`)
+    .replace(/(\bsrc\s*=\s*["'])\/content-images\//gi, `$1${imagePrefix}`)
+    .replace(/(\]\(\s*)\/content-slides\//g, `$1${slidesPrefix}`)
+    .replace(/(\bsrc\s*=\s*["'])\/content-slides\//gi, `$1${slidesPrefix}`)
+    .replace(/(\boriginal\s*=\s*["'])\/content-slides\//gi, `$1${slidesPrefix}`)
+    .replace(/(\bhref\s*=\s*["'])\/content-slides\//gi, `$1${slidesPrefix}`);
 }
 
 function parseImageReferences(markdown: string): ParsedImageReference[] {
@@ -539,6 +745,109 @@ function ManagedImageCard({
   );
 }
 
+function GalleryImageCard({
+  image,
+  selected,
+  selectable,
+  onToggle,
+}: {
+  image: GalleryImageItem;
+  selected: boolean;
+  selectable: boolean;
+  onToggle: () => void;
+}) {
+  const [failed, setFailed] = useState(false);
+  const previewSource = getGalleryImagePreviewSource(image.path);
+
+  useEffect(() => {
+    setFailed(false);
+  }, [previewSource]);
+
+  return (
+    <article
+      className={`notes-settings-image-card notes-settings-gallery-card${selectable ? ' selectable' : ''}${
+        selected ? ' selected' : ''
+      }`}
+      role={selectable ? 'button' : undefined}
+      tabIndex={selectable ? 0 : undefined}
+      onClick={selectable ? onToggle : undefined}
+      onKeyDown={
+        selectable
+          ? (event) => {
+              if (event.key === 'Enter' || event.key === ' ') {
+                event.preventDefault();
+                onToggle();
+              }
+            }
+          : undefined
+      }
+    >
+      <div className="notes-settings-image-preview">
+        {previewSource && !failed ? (
+          <img
+            src={previewSource}
+            alt={image.name}
+            loading="lazy"
+            referrerPolicy="no-referrer"
+            onError={() => setFailed(true)}
+          />
+        ) : (
+          <IconPhoto aria-hidden="true" />
+        )}
+        {selectable ? (
+          <button
+            type="button"
+            className={`notes-settings-gallery-select${selected ? ' selected' : ''}`}
+            aria-pressed={selected}
+            aria-label={selected ? `取消选择 ${image.name || '图库图片'}` : `选择 ${image.name || '图库图片'}`}
+            onClick={(event) => {
+              event.stopPropagation();
+              onToggle();
+            }}
+          >
+            {selected ? <IconCheck aria-hidden="true" /> : null}
+          </button>
+        ) : null}
+        <span className="notes-settings-image-kind gallery">图库</span>
+      </div>
+      <div className="notes-settings-image-copy">
+        <strong title={image.name}>{image.name || 'Untitled'}</strong>
+        <span title={image.path}>{image.path}</span>
+      </div>
+    </article>
+  );
+}
+
+function ImagePagination({
+  page,
+  pageCount,
+  onPageChange,
+}: {
+  page: number;
+  pageCount: number;
+  onPageChange: (page: number) => void;
+}) {
+  const safePage = Math.min(Math.max(page, 1), pageCount);
+
+  return (
+    <div className="notes-settings-image-pagination">
+      <button type="button" onClick={() => onPageChange(Math.max(1, safePage - 1))} disabled={safePage <= 1}>
+        上一页
+      </button>
+      <span>
+        {safePage} / {pageCount}
+      </span>
+      <button
+        type="button"
+        onClick={() => onPageChange(Math.min(pageCount, safePage + 1))}
+        disabled={safePage >= pageCount}
+      >
+        下一页
+      </button>
+    </div>
+  );
+}
+
 const DEFAULT_SITE_CONFIG: SiteConfig = {
   title: "Chty's Blog",
   tagline: '\u79cb\u9634\u4e0d\u6563\u971c\u98de\u665a\uff0c\u7559\u5f97\u6b8b\u8377\u542c\u96e8\u58f0',
@@ -624,6 +933,10 @@ const DEFAULT_SITE_CONFIG: SiteConfig = {
     enabled: true,
     endpoint: 'https://chty.goatcounter.com/count',
     scriptUrl: 'https://gc.zgo.at/count.js',
+  },
+  cardImages: {
+    enabled: false,
+    manifest: USER_GALLERY_MANIFEST_PUBLIC_PATH,
   },
 };
 
@@ -861,6 +1174,20 @@ function normalizeSiteConfig(value: unknown): SiteConfig {
         ? goatcounterInput.scriptUrl
         : fallback.goatcounter?.scriptUrl ?? 'https://gc.zgo.at/count.js',
   };
+  const cardImagesInput =
+    input.cardImages && typeof input.cardImages === 'object'
+      ? (input.cardImages as Partial<CardImageConfig>)
+      : {};
+  const cardImages: CardImageConfig = {
+    enabled:
+      typeof cardImagesInput.enabled === 'boolean'
+        ? cardImagesInput.enabled
+        : fallback.cardImages?.enabled ?? false,
+    manifest:
+      typeof cardImagesInput.manifest === 'string' && cardImagesInput.manifest.trim()
+        ? cardImagesInput.manifest
+        : fallback.cardImages?.manifest ?? USER_GALLERY_MANIFEST_PUBLIC_PATH,
+  };
 
   return {
     ...fallback,
@@ -890,6 +1217,7 @@ function normalizeSiteConfig(value: unknown): SiteConfig {
     repository,
     giscus,
     goatcounter,
+    cardImages,
   };
 }
 
@@ -1181,6 +1509,16 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
   const [friendIconLoadingIndex, setFriendIconLoadingIndex] = useState<number | null>(null);
   const [isLocalizingImages, setIsLocalizingImages] = useState(false);
   const [imageLocalizationStatus, setImageLocalizationStatus] = useState<Record<string, ImageLocalizationStatus>>({});
+  const [imageSettingsTab, setImageSettingsTab] = useState<SettingsImageTab>('external');
+  const [externalImagePage, setExternalImagePage] = useState(1);
+  const [internalImagePage, setInternalImagePage] = useState(1);
+  const [galleryImages, setGalleryImages] = useState<GalleryImageItem[]>([]);
+  const [galleryPage, setGalleryPage] = useState(1);
+  const [selectedGalleryImageKeys, setSelectedGalleryImageKeys] = useState<string[]>([]);
+  const [isGalleryMultiSelectMode, setIsGalleryMultiSelectMode] = useState(false);
+  const [isGalleryLoading, setIsGalleryLoading] = useState(false);
+  const [isUploadingGalleryImages, setIsUploadingGalleryImages] = useState(false);
+  const [isDeletingGalleryImages, setIsDeletingGalleryImages] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [settingsSection, setSettingsSection] = useState<SettingsSection>('basic');
   const [categoryDialog, setCategoryDialog] = useState<CategoryDialogState | null>(null);
@@ -2489,6 +2827,16 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
     }));
   };
 
+  const updateCardImageConfigDraft = (patch: Partial<CardImageConfig>) => {
+    setSiteConfigDraft((current) => ({
+      ...current,
+      cardImages: {
+        ...(current.cardImages ?? cloneDefaultSiteConfig().cardImages!),
+        ...patch,
+      },
+    }));
+  };
+
   const createUniqueDraftSlug = (baseSlug: string, ignorePath?: string | null) => {
     const normalizedBase = slugifyCategoryLabel(baseSlug) || 'note-copy';
     let nextSlug = normalizedBase;
@@ -2746,6 +3094,24 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
     // Opening the blog settings is the intentional refresh boundary.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isSettingsOpen, settingsSection]);
+
+  useEffect(() => {
+    if (!isSettingsOpen || settingsSection !== 'images') {
+      return;
+    }
+
+    void loadUserGalleryManifest();
+    // Loading the gallery only when the image settings panel is visible keeps startup light.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isSettingsOpen, settingsSection, libraryRoot]);
+
+  useEffect(() => {
+    const existingKeys = new Set(galleryImages.map(getGalleryImageKey));
+    setSelectedGalleryImageKeys((current) => {
+      const next = current.filter((key) => existingKeys.has(key));
+      return next.length === current.length ? current : next;
+    });
+  }, [galleryImages]);
 
   useEffect(() => {
     if (!draft || draft.type !== 'inknote' || !linkedNotebookTarget) {
@@ -4261,6 +4627,73 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
     requestAnimationFrame(() => restoreEditorSelection(nextSelection));
   };
 
+  const insertSlidesDocument = async () => {
+    if (!draft || workspacePanel !== 'write') {
+      return;
+    }
+    if (!libraryRoot || !isTauri()) {
+      setStatus('插入演示文稿需要在已加载内容仓的桌面应用中使用。');
+      return;
+    }
+    if (!draft.sourceRelativePath) {
+      setStatus('请先保存当前笔记，再插入演示文稿。');
+      return;
+    }
+
+    const selection =
+      readEditorSelection() ??
+      editorSelectionRef.current ??
+      ({
+        start: draft.body.length,
+        end: draft.body.length,
+        direction: 'none',
+      } satisfies EditorSelectionState);
+
+    const selectedPath = await chooseSlidesFile();
+    if (!selectedPath) {
+      return;
+    }
+
+    const extension = getSlidesFileExtension(selectedPath);
+    if (!extension) {
+      setStatus('仅支持插入 PPT、PPTX 或 PDF 文件。');
+      return;
+    }
+
+    const noteSlug = draft.slug;
+    const fileTitle = getFileNameFromPath(selectedPath).replace(/\.[^.\\/]+$/i, '') || 'Slides';
+
+    try {
+      setStatus(`正在处理演示文稿：${fileTitle}...`);
+      const fileName = createSlidesFileName(selectedPath, new Date());
+      const originalTarget = getSlidesTargetPath(libraryRoot, draft.type, noteSlug, fileName);
+      const renderTarget =
+        extension === 'pdf'
+          ? originalTarget
+          : getSlidesTargetPath(libraryRoot, draft.type, noteSlug, replaceFileExtension(fileName, 'pdf'));
+
+      if (extension !== 'pdf') {
+        setStatus(`正在转换为 PDF：${fileTitle}...`);
+        await convertSlidesToPdf(selectedPath, renderTarget.filePath);
+      }
+      await copyFileToPath(selectedPath, originalTarget.filePath);
+
+      insertPastedImageReferences(
+        [
+          `<div data-inknote-slides src="${renderTarget.publicPath}"`,
+          extension === 'pdf' ? '' : ` original="${originalTarget.publicPath}"`,
+          ` title="${escapeHtmlAttribute(fileTitle)}" type="pdf"></div>`,
+        ].join(''),
+        selection,
+        noteSlug,
+      );
+      appendHistoryEntry('Inserted slides', fileTitle);
+      setStatus(`已插入演示文稿：${fileTitle}`);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : '插入演示文稿失败。');
+    }
+  };
+
   const handleEditorPaste = (event: ReactClipboardEvent<HTMLTextAreaElement>) => {
     const itemImageFiles = Array.from(event.clipboardData.items)
       .filter((item) => item.kind === 'file' && item.type.startsWith('image/'))
@@ -4346,6 +4779,193 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
     () => managedImages.filter((asset) => asset.kind === 'internal'),
     [managedImages],
   );
+  const externalImagePageData = useMemo(
+    () => paginateImageItems(externalManagedImages, externalImagePage),
+    [externalManagedImages, externalImagePage],
+  );
+  const internalImagePageData = useMemo(
+    () => paginateImageItems(internalManagedImages, internalImagePage),
+    [internalManagedImages, internalImagePage],
+  );
+  const galleryImagePageData = useMemo(
+    () => paginateImageItems(galleryImages, galleryPage),
+    [galleryImages, galleryPage],
+  );
+  const selectedGalleryImageSet = useMemo(
+    () => new Set(selectedGalleryImageKeys),
+    [selectedGalleryImageKeys],
+  );
+  const isGalleryPageFullySelected =
+    galleryImagePageData.items.length > 0 &&
+    galleryImagePageData.items.every((image) => selectedGalleryImageSet.has(getGalleryImageKey(image)));
+
+  const readUserGalleryManifest = async (): Promise<GalleryImageManifest> => {
+    const manifestPath = getUserGalleryManifestPath(libraryRoot);
+    try {
+      const raw = await readTextFile(manifestPath);
+      return normalizeGalleryManifest(JSON.parse(raw));
+    } catch {
+      return normalizeGalleryManifest({});
+    }
+  };
+
+  const writeUserGalleryManifest = async (images: GalleryImageItem[]) => {
+    const manifestPath = getUserGalleryManifestPath(libraryRoot);
+    const manifest = normalizeGalleryManifest({
+      updatedAt: new Date().toISOString(),
+      images,
+    });
+    await writeTextFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+    setGalleryImages(manifest.images);
+  };
+
+  const loadUserGalleryManifest = async () => {
+    if (!isTauri() || !libraryRoot) {
+      setGalleryImages([]);
+      return;
+    }
+
+    setIsGalleryLoading(true);
+    try {
+      const manifest = await readUserGalleryManifest();
+      setGalleryImages(manifest.images);
+      setGalleryPage(1);
+    } catch (error) {
+      setGalleryImages([]);
+      setStatus(error instanceof Error ? error.message : '读取图库失败。');
+    } finally {
+      setIsGalleryLoading(false);
+    }
+  };
+
+  const uploadGalleryImages = async () => {
+    if (!isTauri() || !libraryRoot) {
+      setStatus('图库上传需要在 Tauri 桌面端中执行。');
+      return;
+    }
+
+    const selectedFiles = await chooseGalleryImageFiles();
+    if (selectedFiles.length === 0) {
+      return;
+    }
+
+    setIsUploadingGalleryImages(true);
+    setIsBusy(true);
+    try {
+      const manifest = await readUserGalleryManifest();
+      const existingPaths = new Set(manifest.images.map((image) => image.path));
+      const nextImages = [...manifest.images];
+      const now = new Date();
+
+      for (const [index, sourcePath] of selectedFiles.entries()) {
+        if (!getImageFileExtension(sourcePath)) {
+          continue;
+        }
+
+        const fileName = createGalleryImageFileName(sourcePath, now, index);
+        const publicPath = `${USER_GALLERY_UPLOADS_PUBLIC_PREFIX}${fileName}`;
+        if (existingPaths.has(publicPath)) {
+          continue;
+        }
+
+        await copyFileToPath(sourcePath, getUserGalleryUploadPath(libraryRoot, fileName));
+        existingPaths.add(publicPath);
+        nextImages.unshift({
+          id: `${Date.now()}-${index}-${fileName}`,
+          path: publicPath,
+          name: getFileNameFromPath(sourcePath),
+          uploadedAt: now.toISOString(),
+        });
+      }
+
+      await writeUserGalleryManifest(nextImages);
+      setGalleryPage(1);
+      setStatus(`已上传 ${nextImages.length - manifest.images.length} 张图片到图库。`);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : '图库图片上传失败。');
+    } finally {
+      setIsUploadingGalleryImages(false);
+      setIsBusy(false);
+    }
+  };
+
+  const toggleGalleryImageSelection = (image: GalleryImageItem) => {
+    if (!isGalleryMultiSelectMode) {
+      return;
+    }
+
+    const key = getGalleryImageKey(image);
+    setSelectedGalleryImageKeys((current) =>
+      current.includes(key) ? current.filter((value) => value !== key) : [...current, key],
+    );
+  };
+
+  const enterGalleryMultiSelectMode = () => {
+    setIsGalleryMultiSelectMode(true);
+  };
+
+  const exitGalleryMultiSelectMode = () => {
+    setIsGalleryMultiSelectMode(false);
+    setSelectedGalleryImageKeys([]);
+  };
+
+  const toggleCurrentGalleryPageSelection = () => {
+    const pageKeys = galleryImagePageData.items.map(getGalleryImageKey);
+    if (pageKeys.length === 0) {
+      return;
+    }
+
+    if (isGalleryPageFullySelected) {
+      const pageKeySet = new Set(pageKeys);
+      setSelectedGalleryImageKeys((current) => current.filter((key) => !pageKeySet.has(key)));
+      return;
+    }
+
+    setSelectedGalleryImageKeys((current) => Array.from(new Set([...current, ...pageKeys])));
+  };
+
+  const deleteSelectedGalleryImages = async () => {
+    if (!isTauri() || !libraryRoot) {
+      setStatus('图库删除需要在 Tauri 桌面端中执行。');
+      return;
+    }
+
+    const selectedSet = new Set(selectedGalleryImageKeys);
+    const selectedImages = galleryImages.filter((image) => selectedSet.has(getGalleryImageKey(image)));
+    if (selectedImages.length === 0) {
+      setSelectedGalleryImageKeys([]);
+      return;
+    }
+
+    const confirmed = window.confirm(`确定删除选中的 ${selectedImages.length} 张图库图片吗？`);
+    if (!confirmed) {
+      return;
+    }
+
+    setIsDeletingGalleryImages(true);
+    setIsBusy(true);
+    try {
+      for (const image of selectedImages) {
+        if (image.path.startsWith(USER_GALLERY_UPLOADS_PUBLIC_PREFIX)) {
+          await deleteGalleryImageFile(image.path);
+        }
+      }
+
+      const nextImages = galleryImages.filter((image) => !selectedSet.has(getGalleryImageKey(image)));
+      await writeUserGalleryManifest(nextImages);
+      setSelectedGalleryImageKeys([]);
+      setIsGalleryMultiSelectMode(false);
+      setGalleryPage((current) =>
+        Math.min(current, Math.max(1, Math.ceil(nextImages.length / IMAGE_MANAGEMENT_PAGE_SIZE))),
+      );
+      setStatus(`已删除 ${selectedImages.length} 张图库图片。`);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : '图库图片删除失败。');
+    } finally {
+      setIsDeletingGalleryImages(false);
+      setIsBusy(false);
+    }
+  };
 
   const localizeExternalImages = async () => {
     if (!isTauri()) {
@@ -5020,6 +5640,15 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
                     <button
                       type="button"
                       className="notes-toolbar-button"
+                      onClick={() => void insertSlidesDocument()}
+                      title="Slides"
+                      aria-label="插入演示文稿"
+                    >
+                      <IconPresentation aria-hidden="true" />
+                    </button>
+                    <button
+                      type="button"
+                      className="notes-toolbar-button"
                       onClick={() => applyLinePrefix((line, index) => `${index + 1}. ${line.replace(/^\d+\.\s+/, '')}`)}
                       title="Ordered list"
                       aria-label="Ordered list"
@@ -5603,6 +6232,208 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
 
                 {settingsSection === 'images' ? (
                   <section className="notes-settings-section notes-settings-images-section">
+                    <div className="notes-settings-image-tabs" role="tablist" aria-label="图片管理">
+                      <button
+                        type="button"
+                        className={imageSettingsTab === 'external' ? 'active' : ''}
+                        onClick={() => setImageSettingsTab('external')}
+                      >
+                        外链引用
+                        <span>{externalManagedImages.length}</span>
+                      </button>
+                      <button
+                        type="button"
+                        className={imageSettingsTab === 'internal' ? 'active' : ''}
+                        onClick={() => setImageSettingsTab('internal')}
+                      >
+                        本地存储
+                        <span>{internalManagedImages.length}</span>
+                      </button>
+                      <button
+                        type="button"
+                        className={imageSettingsTab === 'gallery' ? 'active' : ''}
+                        onClick={() => setImageSettingsTab('gallery')}
+                      >
+                        图库
+                        <span>{galleryImages.length}</span>
+                      </button>
+                    </div>
+
+                    <div className="notes-settings-image-groups">
+                      {imageSettingsTab === 'external' ? (
+                        <section className="notes-settings-image-group">
+                          <div className="notes-settings-image-group-head">
+                            <strong>外链引用</strong>
+                            <span>{externalManagedImages.length}</span>
+                            <button
+                              type="button"
+                              className="notes-settings-primary notes-settings-image-localize"
+                              onClick={() => void localizeExternalImages()}
+                              disabled={isLocalizingImages || isBusy || dirty || externalManagedImages.length === 0}
+                            >
+                              {isLocalizingImages ? (
+                                <IconLoader2 className="spinning" aria-hidden="true" />
+                              ) : (
+                                <IconDownload aria-hidden="true" />
+                              )}
+                              <span>下载</span>
+                            </button>
+                          </div>
+                          {externalManagedImages.length > 0 ? (
+                            <>
+                              <div className="notes-settings-image-grid">
+                                {externalImagePageData.items.map((asset) => (
+                                  <ManagedImageCard
+                                    key={asset.source}
+                                    asset={asset}
+                                    localizationStatus={imageLocalizationStatus[asset.source]}
+                                  />
+                                ))}
+                              </div>
+                              <ImagePagination
+                                page={externalImagePageData.safePage}
+                                pageCount={externalImagePageData.pageCount}
+                                onPageChange={setExternalImagePage}
+                              />
+                            </>
+                          ) : (
+                            <div className="notes-settings-image-group-empty">没有外链图片</div>
+                          )}
+                        </section>
+                      ) : null}
+
+                      {imageSettingsTab === 'internal' ? (
+                        <section className="notes-settings-image-group">
+                          <div className="notes-settings-image-group-head">
+                            <strong>本地存储</strong>
+                            <span>{internalManagedImages.length}</span>
+                          </div>
+                          {internalManagedImages.length > 0 ? (
+                            <>
+                              <div className="notes-settings-image-grid">
+                                {internalImagePageData.items.map((asset) => (
+                                  <ManagedImageCard key={asset.source} asset={asset} />
+                                ))}
+                              </div>
+                              <ImagePagination
+                                page={internalImagePageData.safePage}
+                                pageCount={internalImagePageData.pageCount}
+                                onPageChange={setInternalImagePage}
+                              />
+                            </>
+                          ) : (
+                            <div className="notes-settings-image-group-empty">没有本地图片引用</div>
+                          )}
+                        </section>
+                      ) : null}
+
+                      {imageSettingsTab === 'gallery' ? (
+                        <section className="notes-settings-image-group">
+                          <div className="notes-settings-image-group-head">
+                            <strong>图库</strong>
+                            <span>{galleryImages.length}</span>
+                            <div className="notes-settings-gallery-actions">
+                              <button
+                                type="button"
+                                className={`notes-settings-secondary notes-settings-image-localize${
+                                  isGalleryMultiSelectMode ? ' active' : ''
+                                }`}
+                                onClick={isGalleryMultiSelectMode ? exitGalleryMultiSelectMode : enterGalleryMultiSelectMode}
+                                disabled={isGalleryLoading || galleryImages.length === 0 || isDeletingGalleryImages}
+                              >
+                                <IconCheck aria-hidden="true" />
+                                <span>多选</span>
+                              </button>
+                            </div>
+                            <button
+                              type="button"
+                              className="notes-settings-primary notes-settings-image-localize"
+                              onClick={() => void uploadGalleryImages()}
+                              disabled={isUploadingGalleryImages || isGalleryLoading || isBusy}
+                            >
+                              {isUploadingGalleryImages ? (
+                                <IconLoader2 className="spinning" aria-hidden="true" />
+                              ) : (
+                                <IconUpload aria-hidden="true" />
+                              )}
+                              <span>上传</span>
+                            </button>
+                          </div>
+
+                          {isGalleryMultiSelectMode ? (
+                            <div className="notes-settings-gallery-select-bar">
+                              <button
+                                type="button"
+                                className="notes-settings-gallery-check-all"
+                                onClick={toggleCurrentGalleryPageSelection}
+                                disabled={galleryImagePageData.items.length === 0 || isDeletingGalleryImages}
+                              >
+                                <span className={`notes-settings-gallery-mini-check${isGalleryPageFullySelected ? ' checked' : ''}`}>
+                                  {isGalleryPageFullySelected ? <IconCheck aria-hidden="true" /> : null}
+                                </span>
+                                <span>{isGalleryPageFullySelected ? '取消本页' : '全选'}</span>
+                              </button>
+                              <span className="notes-settings-gallery-select-hint">点击图片以选择</span>
+                              <span className="notes-settings-gallery-select-count">
+                                {selectedGalleryImageKeys.length > 0 ? `已选 ${selectedGalleryImageKeys.length}` : ''}
+                              </span>
+                              <button
+                                type="button"
+                                className="notes-settings-danger notes-settings-image-localize"
+                                onClick={() => void deleteSelectedGalleryImages()}
+                                disabled={selectedGalleryImageKeys.length === 0 || isDeletingGalleryImages || isBusy}
+                              >
+                                {isDeletingGalleryImages ? (
+                                  <IconLoader2 className="spinning" aria-hidden="true" />
+                                ) : (
+                                  <IconTrash aria-hidden="true" />
+                                )}
+                                <span>删除</span>
+                              </button>
+                              <button
+                                type="button"
+                                className="notes-settings-secondary notes-settings-image-localize"
+                                onClick={exitGalleryMultiSelectMode}
+                                disabled={isDeletingGalleryImages}
+                              >
+                                <IconX aria-hidden="true" />
+                                <span>取消</span>
+                              </button>
+                            </div>
+                          ) : null}
+
+                          {isGalleryLoading ? (
+                            <div className="notes-settings-image-group-empty">正在读取图库...</div>
+                          ) : galleryImages.length > 0 ? (
+                            <>
+                              <div className="notes-settings-image-grid">
+                                {galleryImagePageData.items.map((image) => (
+                                  <GalleryImageCard
+                                    key={getGalleryImageKey(image)}
+                                    image={image}
+                                    selectable={isGalleryMultiSelectMode}
+                                    selected={selectedGalleryImageSet.has(getGalleryImageKey(image))}
+                                    onToggle={() => toggleGalleryImageSelection(image)}
+                                  />
+                                ))}
+                              </div>
+                              <ImagePagination
+                                page={galleryImagePageData.safePage}
+                                pageCount={galleryImagePageData.pageCount}
+                                onPageChange={setGalleryPage}
+                              />
+                            </>
+                          ) : (
+                            <div className="notes-settings-image-group-empty">还没有上传图库图片</div>
+                          )}
+                        </section>
+                      ) : null}
+                    </div>
+                  </section>
+                ) : null}
+
+                {settingsSection === 'images' && false ? (
+                  <section className="notes-settings-section notes-settings-images-section">
                     {managedImages.length > 0 ? (
                       <div className="notes-settings-image-groups">
                         <section className="notes-settings-image-group">
@@ -5701,6 +6532,27 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
                       </label>
 
                       <div className="notes-settings-site-only notes-settings-service-grid">
+                        <section className="notes-settings-integration-card">
+                          <header className="notes-settings-integration-head">
+                            <div>
+                              <strong>文章卡片配图</strong>
+                              <span>从图库中为文章列表稳定随机展示一张图片</span>
+                            </div>
+                            <button
+                              type="button"
+                              className={`notes-settings-switch ${siteConfigDraft.cardImages?.enabled ? 'on' : ''}`}
+                              role="switch"
+                              aria-checked={Boolean(siteConfigDraft.cardImages?.enabled)}
+                              aria-label="开启文章卡片配图"
+                              onClick={() =>
+                                updateCardImageConfigDraft({ enabled: !siteConfigDraft.cardImages?.enabled })
+                              }
+                            >
+                              <span />
+                            </button>
+                          </header>
+                        </section>
+
                         <section className="notes-settings-integration-card">
                           <header className="notes-settings-integration-head">
                             <div>

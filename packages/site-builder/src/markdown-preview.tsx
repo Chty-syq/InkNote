@@ -7,16 +7,23 @@ import {
   useRef,
   useState,
   type ComponentPropsWithoutRef,
+  type KeyboardEvent,
   type ReactNode,
 } from 'react';
 import ReactMarkdown, { type Components } from 'react-markdown';
+import { Document, Page, pdfjs } from 'react-pdf';
 import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
 import rehypeHighlight from 'rehype-highlight';
 import rehypeKatex from 'rehype-katex';
 import rehypeRaw from 'rehype-raw';
+import pdfWorkerSrc from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 import 'katex/dist/katex.min.css';
+import 'react-pdf/dist/Page/AnnotationLayer.css';
+import 'react-pdf/dist/Page/TextLayer.css';
 import './code-highlight.css';
+
+pdfjs.GlobalWorkerOptions.workerSrc = pdfWorkerSrc;
 
 function escapeHtmlAttribute(value: string): string {
   return value
@@ -200,6 +207,162 @@ type ParagraphComponentProps = ComponentPropsWithoutRef<'p'> & {
   node?: unknown;
   children?: ReactNode;
 };
+
+type DivComponentProps = ComponentPropsWithoutRef<'div'> & {
+  node?: unknown;
+  children?: ReactNode;
+  src?: string;
+  original?: string;
+  title?: string;
+  type?: string;
+  'data-inknote-slides'?: string | boolean;
+};
+
+function getSlidesExtension(src: string, type?: string): string {
+  const explicitType = (type ?? '').trim().toLowerCase();
+  if (explicitType) {
+    return explicitType.replace(/^\./, '');
+  }
+
+  const pathname = src.split(/[?#]/, 1)[0] ?? '';
+  return pathname.match(/\.([a-z0-9]+)$/i)?.[1]?.toLowerCase() ?? '';
+}
+
+function formatSlidesType(extension: string): string {
+  if (extension === 'pdf') return 'PDF';
+  if (extension === 'pptx') return 'PPTX';
+  if (extension === 'ppt') return 'PPT';
+  return 'SLIDES';
+}
+
+function MarkdownSlidesBlock({ src, original, title, type, children }: DivComponentProps) {
+  const source = typeof src === 'string' ? src.trim() : '';
+  const originalSource = typeof original === 'string' ? original.trim() : '';
+  const heading = typeof title === 'string' && title.trim() ? title.trim() : 'Slides';
+  const extension = getSlidesExtension(source, type);
+  const label = formatSlidesType(extension);
+  const isPdf = extension === 'pdf';
+  const hasSource = source.length > 0;
+  const [pageNumber, setPageNumber] = useState(1);
+  const [pageCount, setPageCount] = useState(0);
+  const [containerWidth, setContainerWidth] = useState(0);
+  const [loadError, setLoadError] = useState('');
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const pageWidth = containerWidth > 0 ? Math.max(260, Math.min(containerWidth - 24, 980)) : undefined;
+
+  useEffect(() => {
+    setPageNumber(1);
+    setPageCount(0);
+    setLoadError('');
+  }, [source]);
+
+  useEffect(() => {
+    const element = containerRef.current;
+    if (!element || typeof ResizeObserver === 'undefined') {
+      return;
+    }
+
+    const observer = new ResizeObserver(([entry]) => {
+      setContainerWidth(entry.contentRect.width);
+    });
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
+
+  const handleLoadSuccess = ({ numPages }: { numPages: number }) => {
+    setLoadError('');
+    setPageCount(numPages);
+    setPageNumber((current) => Math.min(Math.max(current, 1), Math.max(numPages, 1)));
+  };
+
+  const handleLoadError = (error: Error) => {
+    setLoadError(error.message || 'Unknown PDF loading error');
+  };
+
+  const goToPreviousPage = () => setPageNumber((current) => Math.max(1, current - 1));
+  const goToNextPage = () => setPageNumber((current) => Math.min(pageCount || current + 1, current + 1));
+  const handleSlidesKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    if (pageCount <= 1) {
+      return;
+    }
+
+    if (event.key === 'ArrowLeft') {
+      event.preventDefault();
+      goToPreviousPage();
+    } else if (event.key === 'ArrowRight') {
+      event.preventDefault();
+      goToNextPage();
+    }
+  };
+
+  return (
+    <section className={`markdown-slides-card${isPdf ? ' has-preview' : ''}`}>
+      <div className="markdown-slides-summary">
+        <span className="markdown-slides-badge" aria-hidden="true">
+          {label}
+        </span>
+        <div className="markdown-slides-copy">
+          <strong>{heading}</strong>
+          <span>{isPdf ? 'PDF slides preview' : 'Slides file saved in blog assets'}</span>
+        </div>
+        {hasSource ? (
+          <a className="markdown-slides-link" href={source} target="_blank" rel="noreferrer">
+            打开
+          </a>
+        ) : null}
+        {originalSource ? (
+          <a className="markdown-slides-link secondary" href={originalSource} target="_blank" rel="noreferrer">
+            源文件
+          </a>
+        ) : null}
+      </div>
+      {hasSource && isPdf ? (
+        <div
+          className="markdown-slides-viewer"
+          ref={containerRef}
+          role="region"
+          tabIndex={0}
+          aria-label={`${heading} slides viewer, use left and right arrow keys to turn pages`}
+          onClick={() => containerRef.current?.focus()}
+          onKeyDown={handleSlidesKeyDown}
+        >
+          <Document
+            file={source}
+            loading={<div className="markdown-slides-status">正在加载 slides...</div>}
+            error={
+              <div className="markdown-slides-status error">
+                PDF slides 加载失败，请点击打开查看。{loadError ? ` (${loadError})` : ''}
+              </div>
+            }
+            onLoadSuccess={handleLoadSuccess}
+            onLoadError={handleLoadError}
+          >
+            <Page
+              pageNumber={pageNumber}
+              width={pageWidth}
+              renderAnnotationLayer={false}
+              renderTextLayer={false}
+            />
+          </Document>
+          {pageCount > 1 ? (
+            <div className="markdown-slides-controls">
+              <button type="button" onClick={goToPreviousPage} disabled={pageNumber <= 1}>
+                上一页
+              </button>
+              <span>
+                {pageNumber} / {pageCount}
+              </span>
+              <button type="button" onClick={goToNextPage} disabled={pageNumber >= pageCount}>
+                下一页
+              </button>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+      {!hasSource && children ? <div className="markdown-slides-fallback">{children}</div> : null}
+    </section>
+  );
+}
 
 function extractNodeText(node: ReactNode): string {
   if (typeof node === 'string' || typeof node === 'number') {
@@ -565,6 +728,13 @@ export const MarkdownPreview = memo(function MarkdownPreview({ markdown }: { mar
             <table {...props}>{children}</table>
           </div>
         );
+      },
+      div({ node: _node, children, ...props }: DivComponentProps) {
+        if (props['data-inknote-slides'] !== undefined) {
+          return <MarkdownSlidesBlock {...props}>{children}</MarkdownSlidesBlock>;
+        }
+
+        return <div {...props}>{children}</div>;
       },
     };
   }, [headings]);

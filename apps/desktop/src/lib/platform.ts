@@ -98,6 +98,28 @@ export async function chooseFileToSave(defaultPath: string): Promise<string | nu
   return result;
 }
 
+export async function chooseSlidesFile(): Promise<string | null> {
+  if (!isTauri()) return null;
+  const result = await open({
+    multiple: false,
+    directory: false,
+    filters: [{ name: 'Slides', extensions: ['ppt', 'pptx', 'pdf'] }],
+  });
+  if (!result) return null;
+  return Array.isArray(result) ? result[0] ?? null : result;
+}
+
+export async function chooseGalleryImageFiles(): Promise<string[]> {
+  if (!isTauri()) return [];
+  const result = await open({
+    multiple: true,
+    directory: false,
+    filters: [{ name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'webp', 'gif'] }],
+  });
+  if (!result) return [];
+  return Array.isArray(result) ? result : [result];
+}
+
 export async function chooseSshPrivateKey(): Promise<string | null> {
   if (!isTauri()) return null;
   const result = await open({ multiple: false, directory: false });
@@ -117,6 +139,14 @@ export async function writeBinaryFile(path: string, bytes: Uint8Array): Promise<
   await invoke('write_binary_file', { path, bytes: Array.from(bytes) });
 }
 
+export async function copyFileToPath(source: string, destination: string): Promise<void> {
+  await invoke('copy_file_to_path', { source, destination });
+}
+
+export async function convertSlidesToPdf(source: string, destination: string): Promise<void> {
+  await invoke('convert_slides_to_pdf', { source, destination });
+}
+
 export async function getContentIndex(): Promise<ContentIndexResponse> {
   return invoke('get_content_index');
 }
@@ -131,6 +161,10 @@ export async function writeContentFile(path: string, contents: string): Promise<
 
 export async function deleteContentFile(path: string): Promise<void> {
   await invoke('delete_content_path', { path });
+}
+
+export async function deleteGalleryImageFile(publicPath: string): Promise<void> {
+  await invoke('delete_gallery_image_file', { publicPath });
 }
 
 export async function fetchFriendLinkIcon(pageUrl: string): Promise<FriendLinkIconResponse> {

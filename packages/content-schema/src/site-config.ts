@@ -48,6 +48,11 @@ export interface GoatCounterConfig {
   scriptUrl: string;
 }
 
+export interface CardImageConfig {
+  enabled: boolean;
+  manifest: string;
+}
+
 export interface SiteConfig {
   title: string;
   tagline: string;
@@ -67,6 +72,7 @@ export interface SiteConfig {
   repository?: RepositoryConfig;
   giscus?: GiscusConfig;
   goatcounter?: GoatCounterConfig;
+  cardImages?: CardImageConfig;
 }
 
 export interface NavigationItem {
