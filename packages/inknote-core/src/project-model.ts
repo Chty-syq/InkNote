@@ -43,12 +43,20 @@ export interface Option<T extends string> {
 interface ParagraphBuffer {
   startLine: number;
   lines: string[];
+  centered: boolean;
 }
 
 interface ListBuffer {
   startLine: number;
   ordered: boolean;
   items: string[];
+  centered: boolean;
+}
+
+interface ParsedContentLine {
+  lineNumber: number;
+  text: string;
+  centered: boolean;
 }
 
 function clamp(value: number, min: number, max: number): number {
@@ -111,12 +119,12 @@ function getLayoutModeForRange(
   return matched;
 }
 
-function createParagraphBuffer(startLine: number): ParagraphBuffer {
-  return { startLine, lines: [] };
+function createParagraphBuffer(startLine: number, centered = false): ParagraphBuffer {
+  return { startLine, lines: [], centered };
 }
 
-function createListBuffer(startLine: number, ordered: boolean): ListBuffer {
-  return { startLine, ordered, items: [] };
+function createListBuffer(startLine: number, ordered: boolean, centered = false): ListBuffer {
+  return { startLine, ordered, items: [], centered };
 }
 
 function normalizeParagraphLines(lines: string[]): string[] {
@@ -125,6 +133,32 @@ function normalizeParagraphLines(lines: string[]): string[] {
 
 function isVerseParagraph(lines: string[]): boolean {
   return lines.length >= 2 && lines.every((line) => Array.from(line).length <= 18);
+}
+
+function countMatches(value: string, pattern: RegExp): number {
+  return value.match(pattern)?.length ?? 0;
+}
+
+function parseContentLines(content: string): ParsedContentLine[] {
+  const centerOpenPattern = /<\s*center\s*>/gi;
+  const centerClosePattern = /<\s*\/\s*center\s*>/gi;
+  let centerDepth = 0;
+
+  return content.replace(/\r/g, '').split('\n').map((rawLine, index) => {
+    const line = rawLine.trimEnd();
+    const openCount = countMatches(line, centerOpenPattern);
+    const closeCount = countMatches(line, centerClosePattern);
+    const centered = centerDepth > 0 || openCount > 0;
+    const text = line.replace(centerOpenPattern, '').replace(centerClosePattern, '').trimEnd();
+
+    centerDepth = Math.max(0, centerDepth + openCount - closeCount);
+
+    return {
+      lineNumber: index + 1,
+      text,
+      centered,
+    };
+  });
 }
 
 export const AUTOSAVE_KEY = 'inknote.autosave.v1';
@@ -186,7 +220,7 @@ export function randomSeed(): number {
 }
 
 export function getSelectableParagraphRanges(content: string): ParagraphRange[] {
-  const lines = content.replace(/\r/g, '').split('\n');
+  const lines = parseContentLines(content);
   const ranges: ParagraphRange[] = [];
   let paragraphBuffer: ParagraphBuffer | null = null;
   let listBuffer: ListBuffer | null = null;
@@ -222,9 +256,9 @@ export function getSelectableParagraphRanges(content: string): ParagraphRange[] 
     listBuffer = null;
   };
 
-  for (const [index, rawLine] of lines.entries()) {
-    const lineNumber = index + 1;
-    const line = rawLine.trimEnd();
+  for (const parsedLine of lines) {
+    const lineNumber = parsedLine.lineNumber;
+    const line = parsedLine.text.trimEnd();
     const trimmed = line.trim();
     const isTitle = /^#{1,2}\s+/.test(trimmed);
     const orderedMatch = trimmed.match(/^\d+\.\s+(.+)$/);
@@ -247,12 +281,13 @@ export function getSelectableParagraphRanges(content: string): ParagraphRange[] 
       const ordered = Boolean(orderedMatch);
       const item = (orderedMatch?.[1] ?? unorderedMatch?.[1] ?? '').trim();
 
-      if (!listBuffer || listBuffer.ordered !== ordered) {
+      if (!listBuffer || listBuffer.ordered !== ordered || listBuffer.centered !== parsedLine.centered) {
         flushList(lineNumber - 1);
-        listBuffer = createListBuffer(lineNumber, ordered);
+        listBuffer = createListBuffer(lineNumber, ordered, parsedLine.centered);
       }
 
       if (item) {
+        listBuffer.centered = listBuffer.centered || parsedLine.centered;
         listBuffer.items.push(item);
       }
       continue;
@@ -260,8 +295,9 @@ export function getSelectableParagraphRanges(content: string): ParagraphRange[] 
 
     flushList(lineNumber - 1);
     if (!paragraphBuffer) {
-      paragraphBuffer = createParagraphBuffer(lineNumber);
+      paragraphBuffer = createParagraphBuffer(lineNumber, parsedLine.centered);
     }
+    paragraphBuffer.centered = paragraphBuffer.centered || parsedLine.centered;
     paragraphBuffer.lines.push(line);
   }
 
@@ -271,7 +307,7 @@ export function getSelectableParagraphRanges(content: string): ParagraphRange[] 
 }
 
 export function parseTextBlocks(content: string, lineLayoutRules: LineLayoutRule[] = []): TextBlock[] {
-  const lines = content.replace(/\r/g, '').split('\n');
+  const lines = parseContentLines(content);
   const blocks: TextBlock[] = [];
   const normalizedRules = sanitizeLineLayoutRules(lineLayoutRules);
   let paragraphBuffer: ParagraphBuffer | null = null;
@@ -288,7 +324,9 @@ export function parseTextBlocks(content: string, lineLayoutRules: LineLayoutRule
       return;
     }
 
-    const align = getLayoutModeForRange(paragraphBuffer.startLine, endLine, normalizedRules) ?? 'left';
+    const align = paragraphBuffer.centered
+      ? 'center'
+      : getLayoutModeForRange(paragraphBuffer.startLine, endLine, normalizedRules) ?? 'left';
     if (isVerseParagraph(normalized)) {
       blocks.push({ type: 'verse', lines: normalized, align });
     } else {
@@ -304,14 +342,16 @@ export function parseTextBlocks(content: string, lineLayoutRules: LineLayoutRule
       return;
     }
 
-    const align = getLayoutModeForRange(listBuffer.startLine, endLine, normalizedRules) ?? 'left';
+    const align = listBuffer.centered
+      ? 'center'
+      : getLayoutModeForRange(listBuffer.startLine, endLine, normalizedRules) ?? 'left';
     blocks.push({ type: 'list', ordered: listBuffer.ordered, items: listBuffer.items, align });
     listBuffer = null;
   };
 
-  for (const [index, rawLine] of lines.entries()) {
-    const lineNumber = index + 1;
-    const line = rawLine.trimEnd();
+  for (const parsedLine of lines) {
+    const lineNumber = parsedLine.lineNumber;
+    const line = parsedLine.text.trimEnd();
     const trimmed = line.trim();
     const subtitleMatch = trimmed.match(/^##\s+(.+)$/);
     const titleMatch = trimmed.match(/^#\s+(.+)$/);
@@ -348,12 +388,13 @@ export function parseTextBlocks(content: string, lineLayoutRules: LineLayoutRule
       const ordered = Boolean(orderedMatch);
       const item = (orderedMatch?.[1] ?? unorderedMatch?.[1] ?? '').trim();
 
-      if (!listBuffer || listBuffer.ordered !== ordered) {
+      if (!listBuffer || listBuffer.ordered !== ordered || listBuffer.centered !== parsedLine.centered) {
         flushList(lineNumber - 1);
-        listBuffer = createListBuffer(lineNumber, ordered);
+        listBuffer = createListBuffer(lineNumber, ordered, parsedLine.centered);
       }
 
       if (item) {
+        listBuffer.centered = listBuffer.centered || parsedLine.centered;
         listBuffer.items.push(item);
       }
       continue;
@@ -361,8 +402,9 @@ export function parseTextBlocks(content: string, lineLayoutRules: LineLayoutRule
 
     flushList(lineNumber - 1);
     if (!paragraphBuffer) {
-      paragraphBuffer = createParagraphBuffer(lineNumber);
+      paragraphBuffer = createParagraphBuffer(lineNumber, parsedLine.centered);
     }
+    paragraphBuffer.centered = paragraphBuffer.centered || parsedLine.centered;
     paragraphBuffer.lines.push(line);
   }
 
@@ -406,10 +448,10 @@ export function deserializeProject(payload: string): ProjectData {
 }
 
 export function getProjectTitle(content: string): string {
-  const lines = content.replace(/\r/g, '').split('\n');
+  const lines = parseContentLines(content);
 
-  for (const rawLine of lines) {
-    const line = rawLine.trim();
+  for (const parsedLine of lines) {
+    const line = parsedLine.text.trim();
     if (!line) {
       continue;
     }

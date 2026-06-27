@@ -21,6 +21,7 @@ import {
   contentIndex,
   findCategory,
   findInkNote,
+  findInkNoteProject,
   findMarkdownNote,
   findPage,
   getCategoryDocuments,
@@ -28,6 +29,7 @@ import {
   getDocumentCategorySlugForRoute,
   type RoutedDocument,
 } from './lib/content';
+import { InkNoteNotebookViewer } from './InkNoteNotebookViewer';
 import { extractMarkdownHeadings, renderInlineMarkdown, renderMarkdown, type MarkdownHeading } from './lib/markdown';
 
 type Route =
@@ -106,6 +108,8 @@ type CardGalleryImage = {
   path: string;
   name: string;
 };
+
+type CardImageAssignment = Map<string, CardGalleryImage>;
 
 type ResolvedGitHubRepo = {
   owner: string;
@@ -322,6 +326,8 @@ function normalizeCardGalleryImages(value: unknown): CardGalleryImage[] {
     return [];
   }
 
+  const seenPaths = new Set<string>();
+
   return input.images
     .map((image): CardGalleryImage | null => {
       if (!image || typeof image !== 'object') {
@@ -339,25 +345,30 @@ function normalizeCardGalleryImages(value: unknown): CardGalleryImage[] {
         name: typeof item.name === 'string' && item.name.trim() ? item.name.trim() : 'cover',
       };
     })
-    .filter((image): image is CardGalleryImage => Boolean(image));
+    .filter((image): image is CardGalleryImage => {
+      if (!image) {
+        return false;
+      }
+
+      const key = image.path.replace(/\\/g, '/');
+      if (seenPaths.has(key)) {
+        return false;
+      }
+
+      seenPaths.add(key);
+      return true;
+    });
 }
 
-function hashText(value: string): number {
-  let hash = 2166136261;
-  for (let index = 0; index < value.length; index += 1) {
-    hash ^= value.charCodeAt(index);
-    hash = Math.imul(hash, 16777619);
+function buildCardImageAssignments(entries: PortalEntry[], images: CardGalleryImage[]): CardImageAssignment {
+  const assignments: CardImageAssignment = new Map();
+  const assignableCount = Math.min(entries.length, images.length);
+
+  for (let index = 0; index < assignableCount; index += 1) {
+    assignments.set(entries[index].id, images[index]);
   }
 
-  return hash >>> 0;
-}
-
-function pickCardGalleryImage(images: CardGalleryImage[], entry: PortalEntry): CardGalleryImage | null {
-  if (images.length === 0) {
-    return null;
-  }
-
-  return images[hashText(entry.href || entry.id) % images.length] ?? null;
+  return assignments;
 }
 
 function resolveWebContentAssets(markdown: string): string {
@@ -1650,6 +1661,10 @@ function ArticleFeed({
 }) {
   const viewCounts = useGoatCounterCounts(entries);
   const commentCounts = useGiscusCommentCounts(entries);
+  const cardImageAssignments = useMemo(
+    () => (ACTIVE_CARD_IMAGE_CONFIG ? buildCardImageAssignments(GLOBAL_ENTRIES, cardGalleryImages) : new Map()),
+    [cardGalleryImages],
+  );
 
   if (entries.length === 0) {
     return (
@@ -1662,17 +1677,21 @@ function ArticleFeed({
 
   return (
     <section className="blog-feed">
-      {entries.map((entry) => (
-        <ArticleCard
-          key={entry.id}
-          entry={entry}
-          navigate={navigate}
-          viewCount={ACTIVE_GOATCOUNTER_CONFIG ? viewCounts[entry.href] : undefined}
-          commentCount={ACTIVE_GISCUS_CONFIG ? commentCounts[entry.href] : undefined}
-          cardImage={ACTIVE_CARD_IMAGE_CONFIG ? pickCardGalleryImage(cardGalleryImages, entry) : null}
-          showCardCover={Boolean(ACTIVE_CARD_IMAGE_CONFIG)}
-        />
-      ))}
+      {entries.map((entry) => {
+        const cardImage = cardImageAssignments.get(entry.id) ?? null;
+
+        return (
+          <ArticleCard
+            key={entry.id}
+            entry={entry}
+            navigate={navigate}
+            viewCount={ACTIVE_GOATCOUNTER_CONFIG ? viewCounts[entry.href] : undefined}
+            commentCount={ACTIVE_GISCUS_CONFIG ? commentCounts[entry.href] : undefined}
+            cardImage={cardImage}
+            showCardCover={Boolean(cardImage)}
+          />
+        );
+      })}
     </section>
   );
 }
@@ -1991,25 +2010,75 @@ function InkNoteAside({ note }: { note: RoutedDocument<InkNoteFrontmatter> }) {
   );
 }
 
+function getInkNoteProjectContent(projectPayload: string | null): string | null {
+  if (!projectPayload) {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(projectPayload) as { content?: unknown };
+    return typeof parsed.content === 'string' ? parsed.content : null;
+  } catch {
+    return null;
+  }
+}
+
+function getInkNoteHeadings(projectPayload: string | null, title: string): MarkdownHeading[] {
+  const projectContent = getInkNoteProjectContent(projectPayload);
+  const projectHeadings = projectContent
+    ? extractMarkdownHeadings(projectContent, { minLevel: 1, maxLevel: 4 })
+    : [];
+
+  return projectHeadings.length > 0
+    ? projectHeadings
+    : extractMarkdownHeadings(`# ${title}`, { minLevel: 1, maxLevel: 4 });
+}
+
+function InkNoteTocAnchors({ headings }: { headings: MarkdownHeading[] }) {
+  if (headings.length === 0) {
+    return null;
+  }
+
+  return (
+    <div className="blog-inknote-toc-anchors" aria-hidden="true">
+      {headings.map((heading) => (
+        <span key={heading.id} id={heading.id} />
+      ))}
+    </div>
+  );
+}
+
 function DetailPage<TFrontmatter extends ContentFrontmatter>({
   eyebrow,
   document,
   meta,
   aside,
+  content,
+  contentClassName = 'markdown-body',
+  headings,
   showComments = false,
 }: {
   eyebrow: string;
   document: RoutedDocument<TFrontmatter>;
   meta: DetailMetaItem[];
   aside?: ReactNode;
+  content?: ReactNode;
+  contentClassName?: string;
+  headings?: MarkdownHeading[];
   showComments?: boolean;
 }) {
-  const headings = useMemo(() => extractMarkdownHeadings(document.body, { minLevel: 1, maxLevel: 4 }), [document.body]);
+  const defaultHeadings = useMemo(
+    () => extractMarkdownHeadings(document.body, { minLevel: 1, maxLevel: 4 }),
+    [document.body],
+  );
+  const effectiveHeadings = headings ?? defaultHeadings;
   const statPaths = useMemo(() => [document.href], [document.href]);
   const viewCounts = useGoatCounterCountsForPaths(statPaths);
   const commentCounts = useGiscusCommentCountsForPaths(statPaths);
   const viewCount = ACTIVE_GOATCOUNTER_CONFIG ? viewCounts[document.href] : undefined;
   const commentCount = ACTIVE_GISCUS_CONFIG && showComments ? commentCounts[document.href] : undefined;
+  const dateMeta = meta.filter((item) => item.type === 'date');
+  const tagMeta = meta.filter((item) => item.type === 'tag');
 
   return (
     <div className="blog-layout detail">
@@ -2019,6 +2088,12 @@ function DetailPage<TFrontmatter extends ContentFrontmatter>({
             <div>
               <h2>{document.frontmatter.title}</h2>
               <div className="blog-detail-meta">
+                {dateMeta.map((item, index) => (
+                  <span key={`${item.type}-${item.label}-${index}`} className="blog-card-meta-item">
+                    <IconCalendar className="blog-card-meta-icon" aria-hidden="true" stroke={1.8} />
+                    <span>{item.label}</span>
+                  </span>
+                ))}
                 {viewCount !== undefined ? (
                   <span className="blog-card-meta-item">
                     <IconEye className="blog-card-meta-icon" aria-hidden="true" stroke={1.8} />
@@ -2031,32 +2106,27 @@ function DetailPage<TFrontmatter extends ContentFrontmatter>({
                     <span>{commentCount} 评论</span>
                   </span>
                 ) : null}
-                {meta.map((item, index) =>
-                  item.type === 'date' ? (
-                    <span key={`${item.type}-${item.label}-${index}`} className="blog-card-meta-item">
-                      <IconCalendar className="blog-card-meta-icon" aria-hidden="true" stroke={1.8} />
-                      <span>{item.label}</span>
-                    </span>
-                  ) : (
-                    <span
-                      key={`${item.type}-${item.label}-${index}`}
-                      className={`blog-card-tag tone-${getTagTone(item.label)}`}
-                    >
-                      {item.label}
-                    </span>
-                  ),
-                )}
+                {tagMeta.map((item, index) => (
+                  <span
+                    key={`${item.type}-${item.label}-${index}`}
+                    className={`blog-card-tag tone-${getTagTone(item.label)}`}
+                  >
+                    {item.label}
+                  </span>
+                ))}
               </div>
               {document.frontmatter.summary ? <p>{document.frontmatter.summary}</p> : null}
             </div>
           </div>
         </section>
 
-        <article className="markdown-body">{renderMarkdown(resolveWebContentAssets(document.body))}</article>
+        <article className={contentClassName}>
+          {content ?? renderMarkdown(resolveWebContentAssets(document.body))}
+        </article>
         {showComments ? <GiscusThread key={document.href} threadKey={document.href} /> : null}
       </section>
 
-      <ArticleTocSidebar headings={headings} extra={aside} />
+      <ArticleTocSidebar headings={effectiveHeadings} extra={aside} />
     </div>
   );
 }
@@ -2314,19 +2384,34 @@ export default function SiteAppWide() {
     );
   } else if (route.type === 'inknote-detail') {
     const note = findInkNote(route.slug);
-    page = note ? (
-      <DetailPage
-        eyebrow="InkNote"
-        document={note}
-        meta={[
-          { type: 'date', label: note.frontmatter.date },
-          { type: 'tag', label: note.frontmatter.paperStyle },
-          { type: 'tag', label: note.frontmatter.handwritingStyle },
-        ]}
-        aside={<InkNoteAside note={note} />}
-        showComments
-      />
-    ) : (
+    page = note ? (() => {
+      const projectPayload = findInkNoteProject(note);
+      const inknoteHeadings = getInkNoteHeadings(projectPayload, note.frontmatter.title);
+
+      return (
+        <DetailPage
+          eyebrow="InkNote"
+          document={note}
+          meta={[
+            { type: 'date', label: note.frontmatter.date },
+            ...(note.frontmatter.tags ?? []).map((tag) => ({ type: 'tag' as const, label: tag })),
+          ]}
+          headings={inknoteHeadings}
+          content={
+            <>
+              <InkNoteTocAnchors headings={inknoteHeadings} />
+              <InkNoteNotebookViewer
+                projectPayload={projectPayload}
+                title={note.frontmatter.title}
+                fallback={renderMarkdown(resolveWebContentAssets(note.body))}
+              />
+            </>
+          }
+          contentClassName="blog-inknote-detail"
+          showComments
+        />
+      );
+    })() : (
       <NotFoundPage navigate={navigate} query={searchQuery} setQuery={setSearchQuery} />
     );
   } else if (route.type === 'page') {

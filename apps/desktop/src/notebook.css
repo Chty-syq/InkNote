@@ -834,6 +834,49 @@ input[type='range']::-moz-range-thumb {
   background: rgba(249, 244, 238, 0.86);
 }
 
+.linked-inknote-editor-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.linked-inknote-tool-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.32rem;
+  min-height: 28px;
+  padding: 0.24rem 0.58rem;
+  border: 1px solid rgba(92, 111, 129, 0.18);
+  border-radius: 8px;
+  background: #f5f7fa;
+  color: #34495d;
+  font-size: 0.78rem;
+  font-weight: 800;
+  box-shadow: none;
+}
+
+.linked-inknote-tool-button svg {
+  width: 15px;
+  height: 15px;
+}
+
+.linked-inknote-tool-button span {
+  color: inherit;
+  font-size: inherit;
+  font-weight: inherit;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.linked-inknote-tool-button:hover:not(:disabled) {
+  transform: none;
+  border-color: rgba(52, 73, 93, 0.24);
+  background: #edf2f7;
+  box-shadow: none;
+}
+
 .linked-inknote-editor {
   min-height: 300px;
 }
@@ -846,6 +889,97 @@ input[type='range']::-moz-range-thumb {
   display: flex;
   flex-direction: column;
   gap: 0.95rem;
+}
+
+.linked-inknote-preview-embedded {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  padding: 0.72rem;
+}
+
+.linked-inknote-preview-badge {
+  position: absolute;
+  top: 0.7rem;
+  right: 0.82rem;
+  z-index: 2;
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 0.12rem 0.46rem;
+  border: 1px solid rgba(94, 111, 129, 0.16);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.86);
+  color: #5e7184;
+  font-size: 0.72rem;
+  font-weight: 800;
+  box-shadow: 0 8px 18px rgba(31, 47, 64, 0.08);
+}
+
+.linked-inknote-spread-shell {
+  display: grid;
+  grid-template-columns: 1fr auto auto 1fr;
+  grid-template-rows: minmax(0, 1fr) auto;
+  gap: 0.7rem;
+  align-items: center;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+}
+
+.linked-inknote-spread-shell .spread-nav {
+  grid-row: 2;
+  min-width: 78px;
+  min-height: 30px;
+  padding: 0.34rem 0.78rem;
+  border-radius: 999px;
+  font-size: 0.78rem;
+  font-weight: 800;
+  writing-mode: horizontal-tb;
+}
+
+.linked-inknote-spread-shell .spread-nav:first-of-type {
+  grid-column: 2;
+}
+
+.linked-inknote-spread-shell .spread-nav:last-of-type {
+  grid-column: 3;
+}
+
+.linked-inknote-spread-stage {
+  grid-column: 1 / -1;
+  grid-row: 1;
+  grid-template-columns: minmax(0, 1fr);
+  min-height: 0;
+  height: 100%;
+  padding: 0.42rem;
+  border: 1px solid rgba(122, 90, 60, 0.12);
+  border-radius: 22px;
+  background: rgba(238, 228, 214, 0.36);
+  cursor: ew-resize;
+}
+
+.linked-inknote-spread-stage .spread-page:not(.spread-page-empty) + .spread-page-empty {
+  display: none;
+}
+
+.linked-inknote-spread-stage .spread-page {
+  min-height: 0;
+  height: 100%;
+  justify-content: center;
+}
+
+.linked-inknote-spread-stage:focus {
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(123, 74, 45, 0.12);
+}
+
+.linked-inknote-spread-stage .spread-page img {
+  width: auto;
+  max-width: 100%;
+  max-height: min(calc(100% - 2rem), calc(100vh - 190px));
+  object-fit: contain;
 }
 
 .notes-app-shell {
@@ -1510,6 +1644,70 @@ input[type='range']::-moz-range-thumb {
   background: rgba(255, 252, 247, 0.58);
 }
 
+/* Keep the embedded InkNote preview single-page. These rules intentionally
+   come after the generic reader spread styles so they win the cascade. */
+.linked-inknote-spread-shell {
+  display: grid;
+  grid-template-columns: 1fr auto auto 1fr;
+  grid-template-rows: minmax(0, 1fr) auto;
+  gap: 0.7rem;
+  align-items: center;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+}
+
+.linked-inknote-spread-shell .spread-nav {
+  grid-row: 2;
+  min-width: 90px;
+  min-height: 32px;
+  padding: 0.34rem 0.86rem;
+  border-radius: 999px;
+  font-size: 0.78rem;
+  font-weight: 800;
+  writing-mode: horizontal-tb;
+}
+
+.linked-inknote-spread-shell .spread-nav:first-of-type {
+  grid-column: 2;
+}
+
+.linked-inknote-spread-shell .spread-nav:last-of-type {
+  grid-column: 3;
+}
+
+.linked-inknote-spread-stage.spread-stage {
+  grid-column: 1 / -1;
+  grid-row: 1;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0;
+  min-height: 0;
+  height: 100%;
+  padding: 0.36rem;
+}
+
+.linked-inknote-spread-stage.spread-stage .spread-page {
+  min-height: 0;
+  height: 100%;
+  justify-content: center;
+  gap: 0;
+}
+
+.linked-inknote-spread-stage.spread-stage .spread-page:not(.spread-page-empty) + .spread-page-empty {
+  display: none;
+}
+
+.linked-inknote-spread-stage.spread-stage .spread-page:not(.spread-page-empty) > span {
+  display: none;
+}
+
+.linked-inknote-spread-stage.spread-stage .spread-page img {
+  width: auto;
+  max-width: 100%;
+  max-height: min(100%, calc(100vh - 180px));
+  object-fit: contain;
+}
+
 ::-webkit-scrollbar {
   width: 10px;
   height: 10px;
@@ -1792,7 +1990,6 @@ input[type='range']::-moz-range-thumb {
 }
 
 .notes-sidebar-add,
-.notes-sidebar-foot-item,
 .notes-topbar-user,
 .notes-tag-trigger,
 .notes-icon-button,
@@ -1807,7 +2004,6 @@ input[type='range']::-moz-range-thumb {
 }
 
 .notes-sidebar-add:hover:not(:disabled),
-.notes-sidebar-foot-item:hover:not(:disabled),
 .notes-topbar-user:hover:not(:disabled),
 .notes-tag-trigger:hover:not(:disabled),
 .notes-icon-button:hover:not(:disabled),
@@ -3508,6 +3704,29 @@ input[type='range']::-moz-range-thumb {
   height: 14px;
 }
 
+.notes-settings-publish-actions {
+  grid-column: 1 / -1;
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.48rem;
+  padding-top: 0.05rem;
+}
+
+.notes-settings-publish-actions button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.34rem;
+  min-height: 30px;
+  padding: 0.34rem 0.7rem;
+  font-size: 0.74rem;
+}
+
+.notes-settings-publish-actions svg {
+  width: 14px;
+  height: 14px;
+}
+
 .notes-settings-publish-card {
   display: grid;
   gap: 0.72rem;
@@ -3780,6 +3999,65 @@ input[type='range']::-moz-range-thumb {
   border-radius: 5px;
   background: #ffffff;
   color: #253b50;
+}
+
+.notes-pull-conflict-strategy {
+  display: grid;
+  grid-template-columns: auto auto minmax(0, 1fr);
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.46rem 0.55rem;
+  border: 1px solid #e0e7ee;
+  border-radius: 6px;
+  background: #fbfcfd;
+}
+
+.notes-pull-conflict-strategy > span {
+  color: #61768a;
+  font-size: 0.74rem;
+  font-weight: 800;
+}
+
+.notes-pull-conflict-strategy > div {
+  display: inline-flex;
+  gap: 0.28rem;
+  padding: 0.16rem;
+  border: 1px solid #d7e0e9;
+  border-radius: 5px;
+  background: #ffffff;
+}
+
+.notes-pull-conflict-strategy button {
+  min-height: 24px;
+  padding: 0.18rem 0.48rem;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: #53687c;
+  font-size: 0.72rem;
+  font-weight: 800;
+  box-shadow: none;
+}
+
+.notes-pull-conflict-strategy button.active {
+  background: #173149;
+  color: #ffffff;
+}
+
+.notes-pull-conflict-strategy button:hover:not(:disabled) {
+  transform: none;
+  background: #edf3f7;
+  box-shadow: none;
+}
+
+.notes-pull-conflict-strategy button.active:hover:not(:disabled) {
+  background: #173149;
+}
+
+.notes-pull-conflict-strategy small {
+  min-width: 0;
+  color: #7a8da0;
+  font-size: 0.72rem;
 }
 
 .notes-publish-dialog .notes-publish-progress {
@@ -4777,49 +5055,6 @@ input[type='range']::-moz-range-thumb {
   padding: 0.28rem 0.36rem 0.32rem;
 }
 
-.notes-sidebar-foot-item {
-  display: flex;
-  align-items: center;
-  gap: 0.56rem;
-  justify-content: flex-start;
-  min-height: 30px;
-  padding: 0.38rem 0.58rem;
-  border-radius: 3px;
-  color: #e3ecf5;
-  background: transparent;
-  font-size: 0.91rem;
-  font-weight: 500;
-}
-
-.notes-sidebar-foot-icon {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 14px;
-  height: 14px;
-  color: #f6fbff;
-}
-
-.notes-sidebar-foot-icon svg {
-  display: block;
-  width: 14px;
-  height: 14px;
-  fill: none;
-  stroke: currentColor;
-  stroke-width: 1.5;
-  stroke-linecap: round;
-  stroke-linejoin: round;
-}
-
-.notes-sidebar-foot-item:hover:not(:disabled) {
-  background: rgba(255, 255, 255, 0.04);
-  border-color: transparent;
-}
-
-.notes-sidebar-foot-label {
-  white-space: nowrap;
-}
-
 .notes-sidebar-status {
   margin-top: 0.18rem;
   padding: 0 0.24rem;
@@ -5619,6 +5854,57 @@ input[type='range']::-moz-range-thumb {
   stroke-linejoin: round;
 }
 
+.notes-inknote-toolbar {
+  gap: 0.1rem 0.18rem;
+  flex-wrap: wrap;
+  min-height: 36px;
+  padding-right: 0.55rem;
+}
+
+.notes-inknote-toolbar-divider {
+  width: 1px;
+  height: 20px;
+  margin: 0 0.32rem;
+  background: #d2dbe4;
+}
+
+.notes-inknote-toolbar-control {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.28rem;
+  min-height: 28px;
+  padding: 0 0.22rem;
+  color: #617386;
+  font-size: 0.74rem;
+  font-weight: 800;
+}
+
+.notes-inknote-toolbar-control span {
+  white-space: nowrap;
+}
+
+.notes-inknote-toolbar-control select,
+.notes-inknote-toolbar-control input {
+  width: auto;
+  min-height: 24px;
+  height: 24px;
+  padding: 0.16rem 0.34rem;
+  border: 1px solid #d2dbe4;
+  border-radius: 4px;
+  background: #ffffff;
+  color: #243648;
+  font-size: 0.74rem;
+  box-shadow: none;
+}
+
+.notes-inknote-toolbar-control select {
+  max-width: 128px;
+}
+
+.notes-inknote-toolbar-control.compact input {
+  width: 48px;
+}
+
 .notes-toolbar-glyph {
   display: inline-flex;
   align-items: center;
@@ -5678,6 +5964,11 @@ input[type='range']::-moz-range-thumb {
   overflow: clip;
   overflow-y: hidden !important;
   overflow-x: hidden !important;
+}
+
+.notes-inknote-rendered-pane {
+  background: #f7f4ee;
+  overflow: hidden !important;
 }
 
 .notes-rendered-pending {

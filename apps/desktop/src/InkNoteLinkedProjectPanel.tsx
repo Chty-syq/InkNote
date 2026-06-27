@@ -1,8 +1,13 @@
-import { useDeferredValue, useEffect, useState } from 'react';
 import {
-  HANDWRITING_OPTIONS,
-  PAPER_OPTIONS,
-  randomSeed,
+  useDeferredValue,
+  useEffect,
+  useRef,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type MouseEvent as ReactMouseEvent,
+  type WheelEvent as ReactWheelEvent,
+} from 'react';
+import {
   renderNotebookPages,
   type ProjectData,
 } from '@inknote/inknote-core';
@@ -11,178 +16,41 @@ interface InkNoteProjectPanelProps {
   project: ProjectData | null;
   projectPath: string | null;
   status: string;
-  isLoading?: boolean;
-  onChange?: (nextProject: ProjectData) => void;
 }
-
 interface PreviewPage {
   pageNumber: number;
   dataUrl: string;
 }
 
-function clamp(value: number, min: number, max: number): number {
-  return Math.min(max, Math.max(min, value));
-}
-
-function patchProject(current: ProjectData, patch: Partial<ProjectData>): ProjectData {
-  return {
-    ...current,
-    ...patch,
-    updatedAt: new Date().toISOString(),
-  };
-}
+const NOTEBOOK_PREVIEW_SCALE = 0.92;
 
 function getProjectPathLabel(projectPath: string | null): string {
   return projectPath ? `content/${projectPath}` : 'No linked notebook file yet.';
 }
 
-export function InkNoteProjectEditorPanel({
-  project,
-  projectPath,
-  status,
-  isLoading = false,
-  onChange,
-}: InkNoteProjectPanelProps) {
-  if (!project || !onChange) {
-    return (
-      <section className="linked-inknote-card">
-        <div className="linked-inknote-header">
-          <div>
-            <h3>Notebook Project</h3>
-            <p>{status || 'Create or load a linked notebook project to start editing.'}</p>
-          </div>
-        </div>
-      </section>
-    );
-  }
+function getLastSpreadStart(pageCount: number): number {
+  return Math.max(0, pageCount - 1);
+}
 
-  const updateProject = (patch: Partial<ProjectData>) => {
-    onChange(patchProject(project, patch));
-  };
-
-  return (
-    <section className="linked-inknote-card">
-      <div className="linked-inknote-header">
-        <div>
-          <h3>Notebook Project</h3>
-          <p>{getProjectPathLabel(projectPath)}</p>
-        </div>
-        <span>{isLoading ? 'Loading...' : status || 'Ready'}</span>
-      </div>
-
-      <div className="linked-inknote-grid">
-        <label className="content-field">
-          <span>Paper</span>
-          <select
-            value={project.paperStyle}
-            onChange={(event) => updateProject({ paperStyle: event.target.value as ProjectData['paperStyle'] })}
-          >
-            {PAPER_OPTIONS.map((option) => (
-              <option key={option.value} value={option.value}>
-                {option.label}
-              </option>
-            ))}
-          </select>
-        </label>
-
-        <label className="content-field">
-          <span>Handwriting</span>
-          <select
-            value={project.handwritingStyle}
-            onChange={(event) =>
-              updateProject({ handwritingStyle: event.target.value as ProjectData['handwritingStyle'] })
-            }
-          >
-            {HANDWRITING_OPTIONS.map((option) => (
-              <option key={option.value} value={option.value}>
-                {option.label}
-              </option>
-            ))}
-          </select>
-        </label>
-
-        <label className="content-field">
-          <span>Paragraph Indent</span>
-          <input
-            type="range"
-            min="0"
-            max="6"
-            step="1"
-            value={project.paragraphIndent}
-            onChange={(event) => updateProject({ paragraphIndent: Number(event.target.value) })}
-          />
-        </label>
-
-        <label className="content-field">
-          <span>Lines Per Page</span>
-          <input
-            type="range"
-            min="10"
-            max="30"
-            step="1"
-            value={project.linesPerPage}
-            onChange={(event) => updateProject({ linesPerPage: clamp(Number(event.target.value), 10, 30) })}
-          />
-        </label>
-
-        <label className="content-field">
-          <span>Font Size</span>
-          <input
-            type="range"
-            min="24"
-            max="56"
-            step="1"
-            value={project.fontSize}
-            onChange={(event) => updateProject({ fontSize: clamp(Number(event.target.value), 24, 56) })}
-          />
-        </label>
-
-        <label className="content-field">
-          <span>Character Spacing</span>
-          <input
-            type="range"
-            min="0"
-            max="16"
-            step="1"
-            value={project.charSpacing}
-            onChange={(event) => updateProject({ charSpacing: clamp(Number(event.target.value), 0, 16) })}
-          />
-        </label>
-      </div>
-
-      <div className="linked-inknote-seed">
-        <div>
-          <span className="field-label">Seed</span>
-          <strong>{project.seed}</strong>
-        </div>
-        <button type="button" onClick={() => updateProject({ seed: randomSeed() })}>
-          Reroll
-        </button>
-      </div>
-
-      <label className="content-body-field">
-        <span>Notebook Content</span>
-        <textarea
-          className="markdown-editor linked-inknote-editor"
-          value={project.content}
-          onChange={(event) => updateProject({ content: event.target.value })}
-          placeholder="Edit the linked notebook.inknote.json content here..."
-          spellCheck={false}
-        />
-      </label>
-    </section>
-  );
+function clampSpreadStart(value: number, pageCount: number): number {
+  return Math.max(0, Math.min(getLastSpreadStart(pageCount), value));
 }
 
 export function InkNoteProjectPreviewPanel({
   project,
   projectPath,
   status,
-}: Pick<InkNoteProjectPanelProps, 'project' | 'projectPath' | 'status'>) {
+  embedded = false,
+}: Pick<InkNoteProjectPanelProps, 'project' | 'projectPath' | 'status'> & { embedded?: boolean }) {
   const [previewPages, setPreviewPages] = useState<PreviewPage[]>([]);
   const [renderError, setRenderError] = useState<string | null>(null);
   const [isRenderPending, setIsRenderPending] = useState(false);
+  const [previewSpreadStart, setPreviewSpreadStart] = useState(0);
+  const wheelTurnLockRef = useRef(0);
   const deferredProject = useDeferredValue(project);
+  const currentSpreadPages = previewPages.slice(previewSpreadStart, previewSpreadStart + 1);
+  const canGoPrevSpread = previewSpreadStart > 0;
+  const canGoNextSpread = previewSpreadStart < getLastSpreadStart(previewPages.length);
 
   useEffect(() => {
     if (!deferredProject) {
@@ -201,7 +69,7 @@ export function InkNoteProjectPreviewPanel({
       }
 
       try {
-        const renderedPages = renderNotebookPages(deferredProject, 0.42).map((canvas, index) => ({
+        const renderedPages = renderNotebookPages(deferredProject, NOTEBOOK_PREVIEW_SCALE).map((canvas, index) => ({
           pageNumber: index + 1,
           dataUrl: canvas.toDataURL('image/png'),
         }));
@@ -232,7 +100,74 @@ export function InkNoteProjectPreviewPanel({
     };
   }, [deferredProject]);
 
+  useEffect(() => {
+    setPreviewSpreadStart((current) => clampSpreadStart(current, previewPages.length));
+  }, [previewPages.length]);
+
+  const goToPrevSpread = () => {
+    setPreviewSpreadStart((current) => clampSpreadStart(current - 1, previewPages.length));
+  };
+
+  const goToNextSpread = () => {
+    setPreviewSpreadStart((current) => clampSpreadStart(current + 1, previewPages.length));
+  };
+
+  const handlePreviewWheel = (event: ReactWheelEvent<HTMLDivElement>) => {
+    const delta = Math.abs(event.deltaY) > Math.abs(event.deltaX) ? event.deltaY : event.deltaX;
+    if (Math.abs(delta) < 28) {
+      return;
+    }
+
+    const now = Date.now();
+    if (now - wheelTurnLockRef.current < 420) {
+      event.preventDefault();
+      return;
+    }
+
+    wheelTurnLockRef.current = now;
+    event.preventDefault();
+    if (delta > 0) {
+      goToNextSpread();
+    } else {
+      goToPrevSpread();
+    }
+  };
+
+  const handlePreviewStageClick = (event: ReactMouseEvent<HTMLDivElement>) => {
+    const rect = event.currentTarget.getBoundingClientRect();
+    const relativeX = event.clientX - rect.left;
+
+    if (relativeX < rect.width / 2) {
+      goToPrevSpread();
+    } else {
+      goToNextSpread();
+    }
+  };
+
+  const handlePreviewKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (event.key === 'ArrowRight' || event.key === 'PageDown' || event.key === ' ') {
+      event.preventDefault();
+      goToNextSpread();
+      return;
+    }
+
+    if (event.key === 'ArrowLeft' || event.key === 'PageUp') {
+      event.preventDefault();
+      goToPrevSpread();
+    }
+  };
+
   if (!project) {
+    if (embedded) {
+      return (
+        <div className="linked-inknote-preview-embedded">
+          <div className="content-empty">
+            <p>{status || 'No linked notebook project loaded.'}</p>
+          </div>
+        </div>
+      );
+    }
+
     return (
       <section className="linked-inknote-card linked-inknote-preview-card">
         <div className="linked-inknote-header">
@@ -245,6 +180,64 @@ export function InkNoteProjectPreviewPanel({
     );
   }
 
+  const statusText = isRenderPending
+    ? 'Rendering...'
+    : renderError
+      ? 'Preview error'
+      : `第 ${currentSpreadPages[0]?.pageNumber ?? 1} / ${previewPages.length || 1} 页`;
+
+  if (embedded) {
+    return (
+      <div className="linked-inknote-preview-embedded">
+        <span className="linked-inknote-preview-badge">{statusText}</span>
+        {renderError ? (
+          <div className="content-empty">
+            <p>{renderError}</p>
+          </div>
+        ) : (
+          <div className="linked-inknote-spread-shell">
+            <button type="button" className="spread-nav" onClick={goToPrevSpread} disabled={!canGoPrevSpread}>
+              上一页
+            </button>
+
+            <div
+              className="spread-stage linked-inknote-spread-stage"
+              onWheel={handlePreviewWheel}
+              onClick={handlePreviewStageClick}
+              onKeyDown={handlePreviewKeyDown}
+              role="button"
+              tabIndex={0}
+              aria-label="双页手写本预览翻页区域"
+            >
+              {currentSpreadPages.length > 0 ? (
+                currentSpreadPages.map((page) => (
+                  <article className="spread-page" key={page.pageNumber}>
+                    <img src={page.dataUrl} alt={`Notebook preview page ${page.pageNumber}`} />
+                    <span>{`第 ${page.pageNumber} 页`}</span>
+                  </article>
+                ))
+              ) : (
+                <article className="spread-page spread-page-empty">
+                  <span>{status || 'Rendering notebook preview...'}</span>
+                </article>
+              )}
+
+              {currentSpreadPages.length === 1 ? (
+                <article className="spread-page spread-page-empty">
+                  <span>空白页</span>
+                </article>
+              ) : null}
+            </div>
+
+            <button type="button" className="spread-nav" onClick={goToNextSpread} disabled={!canGoNextSpread}>
+              下一页
+            </button>
+          </div>
+        )}
+      </div>
+    );
+  }
+
   return (
     <section className="linked-inknote-card linked-inknote-preview-card">
       <div className="linked-inknote-header">
@@ -252,7 +245,13 @@ export function InkNoteProjectPreviewPanel({
           <h3>Notebook Preview</h3>
           <p>{getProjectPathLabel(projectPath)}</p>
         </div>
-        <span>{isRenderPending ? 'Rendering...' : renderError ? 'Preview error' : `${previewPages.length || 1} page(s)`}</span>
+        <span>
+          {isRenderPending
+              ? 'Rendering...'
+              : renderError
+                ? 'Preview error'
+                : `第 ${currentSpreadPages[0]?.pageNumber ?? 1} / ${previewPages.length || 1} 页`}
+        </span>
       </div>
 
       {renderError ? (
@@ -260,19 +259,43 @@ export function InkNoteProjectPreviewPanel({
           <p>{renderError}</p>
         </div>
       ) : (
-        <div className="linked-inknote-preview-stack">
-          {previewPages.length > 0 ? (
-            previewPages.map((page) => (
-              <figure className="page-card" key={page.pageNumber}>
-                <img src={page.dataUrl} alt={`Notebook preview page ${page.pageNumber}`} />
-                <figcaption>{`Page ${page.pageNumber}`}</figcaption>
-              </figure>
-            ))
-          ) : (
-            <div className="content-empty">
-              <p>{status || 'Rendering notebook preview...'}</p>
-            </div>
-          )}
+        <div className="linked-inknote-spread-shell">
+          <button type="button" className="spread-nav" onClick={goToPrevSpread} disabled={!canGoPrevSpread}>
+            上一页
+          </button>
+
+          <div
+            className="spread-stage linked-inknote-spread-stage"
+            onWheel={handlePreviewWheel}
+            onClick={handlePreviewStageClick}
+            onKeyDown={handlePreviewKeyDown}
+            role="button"
+            tabIndex={0}
+            aria-label="双页手写本预览翻页区域"
+          >
+            {currentSpreadPages.length > 0 ? (
+              currentSpreadPages.map((page) => (
+                <article className="spread-page" key={page.pageNumber}>
+                  <img src={page.dataUrl} alt={`Notebook preview page ${page.pageNumber}`} />
+                  <span>{`第 ${page.pageNumber} 页`}</span>
+                </article>
+              ))
+            ) : (
+              <article className="spread-page spread-page-empty">
+                <span>{status || 'Rendering notebook preview...'}</span>
+              </article>
+            )}
+
+            {currentSpreadPages.length === 1 ? (
+              <article className="spread-page spread-page-empty">
+                <span>空白页</span>
+              </article>
+            ) : null}
+          </div>
+
+          <button type="button" className="spread-nav" onClick={goToNextSpread} disabled={!canGoNextSpread}>
+            下一页
+          </button>
         </div>
       )}
     </section>

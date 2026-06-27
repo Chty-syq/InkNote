@@ -1598,6 +1598,173 @@ input {
   border-radius: 8px;
 }
 
+.blog-inknote-detail {
+  padding: 0;
+}
+
+.blog-inknote-toc-anchors {
+  position: relative;
+  height: 0;
+  overflow: visible;
+}
+
+.blog-inknote-toc-anchors span {
+  position: absolute;
+  top: -14px;
+}
+
+.blog-inknote-viewer {
+  position: relative;
+  padding: 14px 16px 12px;
+  border: 0;
+  border-radius: 20px;
+  background:
+    radial-gradient(circle at 18% 12%, rgba(255, 255, 255, 0.72), transparent 34%),
+    linear-gradient(180deg, #f7efe4 0%, #eadfcc 100%);
+  box-shadow: none;
+}
+
+.blog-inknote-stage {
+  display: flex;
+  gap: 18px;
+  min-height: 0;
+  padding: 0;
+  border-radius: 0;
+  background: transparent;
+  cursor: ew-resize;
+  outline: none;
+  align-items: center;
+  justify-content: center;
+}
+
+.blog-inknote-stage:focus-visible {
+  border-radius: 18px;
+  box-shadow: 0 0 0 2px rgba(20, 126, 102, 0.22);
+}
+
+.blog-inknote-page {
+  display: grid;
+  flex: 0 1 585px;
+  width: min(46%, 585px);
+  max-width: 585px;
+  height: auto;
+  margin: 0;
+  place-items: center;
+}
+
+.blog-inknote-page img {
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  max-height: min(84vh, 1040px);
+  border-radius: 18px;
+  background: #fbf5eb;
+  box-shadow:
+    0 1px 0 rgba(255, 255, 255, 0.85) inset,
+    0 16px 42px rgba(70, 52, 32, 0.16);
+}
+
+.blog-inknote-page-blank {
+  width: min(46%, 585px);
+  min-height: min(84vh, 1040px);
+  aspect-ratio: 1240 / 1754;
+  border: 1px dashed rgba(122, 101, 72, 0.18);
+  border-radius: 18px;
+  background:
+    linear-gradient(180deg, rgba(255, 251, 245, 0.42), rgba(244, 234, 219, 0.34)),
+    rgba(255, 255, 255, 0.22);
+  color: rgba(105, 89, 68, 0.38);
+  font-size: 0.92rem;
+  font-weight: 700;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.42);
+}
+
+.blog-inknote-page-badge {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  z-index: 1;
+  padding: 0.24rem 0.58rem;
+  border: 1px solid rgba(124, 102, 75, 0.16);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.86);
+  color: #5e513f;
+  font-size: 0.78rem;
+  font-weight: 750;
+  box-shadow: 0 8px 22px rgba(72, 54, 34, 0.12);
+}
+
+.blog-inknote-controls {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  margin-top: 10px;
+  color: #776958;
+  font-size: 0.86rem;
+  font-weight: 650;
+}
+
+.blog-inknote-controls button {
+  min-width: 76px;
+  padding: 0.36rem 0.82rem;
+  border: 1px solid rgba(132, 106, 73, 0.2);
+  border-radius: 999px;
+  background: rgba(255, 251, 245, 0.84);
+  color: #4d3926;
+  font: inherit;
+  cursor: pointer;
+  box-shadow: 0 6px 16px rgba(79, 56, 31, 0.08);
+}
+
+.blog-inknote-controls button:hover:not(:disabled) {
+  border-color: rgba(139, 93, 47, 0.34);
+  background: #fffaf2;
+}
+
+.blog-inknote-controls button:disabled {
+  color: rgba(112, 98, 80, 0.42);
+  cursor: not-allowed;
+  box-shadow: none;
+}
+
+.blog-inknote-empty {
+  display: grid;
+  gap: 0.35rem;
+  padding: 1.2rem;
+  border: 1px dashed rgba(120, 96, 67, 0.24);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.58);
+  color: #6e604f;
+  text-align: center;
+}
+
+.blog-inknote-empty strong {
+  color: #2c4051;
+}
+
+.blog-inknote-fallback-body {
+  margin-top: 1rem;
+  padding: 1.15rem 1.25rem;
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.62);
+}
+
+@media (max-width: 980px) {
+  .blog-inknote-stage {
+    display: grid;
+    grid-template-columns: 1fr;
+  }
+
+  .blog-inknote-page {
+    width: min(100%, 585px);
+  }
+
+  .blog-inknote-page-blank {
+    display: none;
+  }
+}
+
 .markdown-inline-code {
   padding: 0.04rem 0.26rem;
   border-radius: 4px;

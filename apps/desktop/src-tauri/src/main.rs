@@ -63,6 +63,41 @@ struct PublishSiteRequest {
     message: String,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PullRemoteContentRequest {
+    task_id: String,
+    remote: String,
+    branch: String,
+    ssh_key_path: String,
+    conflict_strategy: String,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ContentSyncConflictStrategy {
+    Remote,
+    Local,
+}
+
+impl ContentSyncConflictStrategy {
+    fn parse(value: &str) -> Result<Self, String> {
+        match value.trim() {
+            "" | "remote" => Ok(Self::Remote),
+            "local" => Ok(Self::Local),
+            other => Err(format!(
+                "unsupported content sync conflict strategy: {other}"
+            )),
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Remote => "远端优先",
+            Self::Local => "本地优先",
+        }
+    }
+}
+
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct PublishProgressEvent {
@@ -77,6 +112,7 @@ struct PublishProgressEvent {
 struct PublishProgressReporter {
     app: Option<tauri::AppHandle>,
     task_id: String,
+    event_name: &'static str,
     progress: AtomicU8,
 }
 
@@ -92,7 +128,7 @@ impl PublishProgressReporter {
         self.progress.store(progress, Ordering::Relaxed);
         if let Some(app) = &self.app {
             let _ = app.emit(
-                "publish-progress",
+                self.event_name,
                 PublishProgressEvent {
                     task_id: self.task_id.clone(),
                     progress,
@@ -114,19 +150,24 @@ impl PublishProgressReporter {
         Self {
             app: None,
             task_id: "test-publish".to_string(),
+            event_name: "publish-progress",
             progress: AtomicU8::new(0),
         }
     }
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RuntimeContentPayload {
     navigation: serde_json::Value,
     site_config: serde_json::Value,
     categories: serde_json::Value,
+    #[serde(default)]
     markdown: BTreeMap<String, String>,
+    #[serde(default)]
     inknotes: BTreeMap<String, String>,
+    #[serde(default)]
+    inknote_projects: BTreeMap<String, String>,
 }
 
 #[derive(Serialize)]
@@ -202,10 +243,7 @@ fn copy_file_to_path(source: String, destination: String) -> Result<(), String> 
         return Err(format!("source file does not exist: {source}"));
     }
 
-    ensure_parent_directory(&destination)?;
-    fs::copy(&source_path, PathBuf::from(&destination))
-        .map(|_| ())
-        .map_err(|error| format!("failed to copy file: {error}"))
+    copy_file_overwriting(&source_path, &PathBuf::from(&destination))
 }
 
 #[tauri::command]
@@ -530,6 +568,7 @@ fn publish_content_changes_blocking(
     let reporter = PublishProgressReporter {
         app: Some(app),
         task_id: request.task_id.clone(),
+        event_name: "publish-progress",
         progress: AtomicU8::new(0),
     };
     reporter.emit(
@@ -558,6 +597,176 @@ fn publish_content_changes_blocking(
         ),
     }
     result
+}
+
+#[tauri::command]
+async fn pull_remote_content(
+    app: tauri::AppHandle,
+    request: PullRemoteContentRequest,
+) -> Result<GitCommandResult, String> {
+    tauri::async_runtime::spawn_blocking(move || pull_remote_content_blocking(app, request))
+        .await
+        .map_err(|error| format!("远端拉取任务线程异常结束：{error}"))?
+}
+
+fn pull_remote_content_blocking(
+    app: tauri::AppHandle,
+    request: PullRemoteContentRequest,
+) -> Result<GitCommandResult, String> {
+    let reporter = PublishProgressReporter {
+        app: Some(app),
+        task_id: request.task_id.clone(),
+        event_name: "content-sync-progress",
+        progress: AtomicU8::new(0),
+    };
+    reporter.emit(
+        8,
+        "validate",
+        "正在校验远端同步配置",
+        "检查仓库地址、分支和 SSH 配置。",
+        "info",
+    );
+
+    let result = pull_remote_content_inner(&request, &reporter);
+    match &result {
+        Ok(output) => reporter.emit(
+            100,
+            "complete",
+            "远端内容同步完成",
+            format_git_result(output),
+            "success",
+        ),
+        Err(error) => reporter.emit(
+            reporter.current_progress(),
+            "failed",
+            "远端内容同步失败",
+            error.as_str(),
+            "error",
+        ),
+    }
+    result
+}
+
+fn pull_remote_content_inner(
+    request: &PullRemoteContentRequest,
+    reporter: &PublishProgressReporter,
+) -> Result<GitCommandResult, String> {
+    let (remote, branch) = validate_publish_target(&request.remote, &request.branch)?;
+    let ssh_key_path = request.ssh_key_path.trim();
+    let conflict_strategy = ContentSyncConflictStrategy::parse(&request.conflict_strategy)?;
+    let ssh_command = create_git_ssh_command((!ssh_key_path.is_empty()).then_some(ssh_key_path))?;
+
+    reporter.emit(
+        14,
+        "prepare",
+        "正在创建拉取工作区",
+        "初始化临时 Git 仓库。",
+        "info",
+    );
+    let sync_directory = TemporaryPublishDirectory::create()?;
+    let sync_root = sync_directory.path();
+    ensure_git_success(
+        run_git_in(sync_root, &["init"])?,
+        "initialize sync repository",
+    )?;
+    ensure_git_success(
+        run_git_in(sync_root, &["remote", "add", "origin", &remote])?,
+        "configure sync remote",
+    )?;
+
+    let remote_ref = format!("refs/heads/{branch}");
+    reporter.emit(
+        25,
+        "fetch",
+        "正在拉取远端发布分支",
+        format!("分支：{branch}"),
+        "info",
+    );
+    let fetched = ensure_git_success(
+        run_git_in_with_ssh(
+            sync_root,
+            &["fetch", "--depth=1", "origin", &remote_ref],
+            ssh_command.as_deref(),
+        )?,
+        "fetch remote content branch",
+    )?;
+    reporter.emit(
+        42,
+        "fetch",
+        "远端分支拉取完成",
+        format_git_result(&fetched),
+        "success",
+    );
+
+    ensure_git_success(
+        run_git_in(sync_root, &["checkout", "--detach", "FETCH_HEAD"])?,
+        "checkout remote content branch",
+    )?;
+
+    let manifest_path = sync_root.join("inknote-content.json");
+    if !manifest_path.is_file() {
+        return Err(
+            "远端分支中没有找到 inknote-content.json，请确认该分支是 InkNote 发布产物。"
+                .to_string(),
+        );
+    }
+
+    reporter.emit(
+        52,
+        "manifest",
+        "正在读取远端内容清单",
+        manifest_path.display().to_string(),
+        "info",
+    );
+    let manifest = fs::read_to_string(&manifest_path)
+        .map_err(|error| format!("failed to read {}: {error}", manifest_path.display()))?;
+    let payload: RuntimeContentPayload =
+        serde_json::from_str(manifest.trim_start_matches('\u{feff}'))
+            .map_err(|error| format!("failed to parse {}: {error}", manifest_path.display()))?;
+
+    reporter.emit(
+        65,
+        "content",
+        "正在写入本地内容库",
+        format!(
+            "远端独有会新增，本地独有会保留；冲突时使用{}。",
+            conflict_strategy.label()
+        ),
+        "info",
+    );
+    restore_runtime_content_payload(&payload, conflict_strategy)?;
+    reporter.emit(
+        80,
+        "content",
+        "本地内容库已更新",
+        "远端内容已经合并写入 content/。",
+        "success",
+    );
+
+    reporter.emit(
+        86,
+        "assets",
+        "正在同步公开资源",
+        "合并图片、图库、slides 与生成资源，不删除本地独有文件。",
+        "info",
+    );
+    restore_runtime_public_assets(sync_root, conflict_strategy)?;
+    reporter.emit(
+        96,
+        "assets",
+        "公开资源同步完成",
+        "本地 web 资源已完成合并同步。",
+        "success",
+    );
+
+    Ok(GitCommandResult {
+        success: true,
+        stdout: format!(
+            "已从 {remote} 的 {branch} 分支合并同步内容到本地，冲突策略：{}。",
+            conflict_strategy.label()
+        ),
+        stderr: String::new(),
+    })
 }
 
 fn publish_content_changes_inner(
@@ -1250,7 +1459,203 @@ fn create_runtime_content_payload() -> Result<RuntimeContentPayload, String> {
         categories: read_json_value(&content.join("site/categories.json"))?,
         markdown: read_markdown_collection(&content, "markdown")?,
         inknotes: read_markdown_collection(&content, "inknotes")?,
+        inknote_projects: read_inknote_project_collection(&content)?,
     })
+}
+
+fn restore_runtime_content_payload(
+    payload: &RuntimeContentPayload,
+    conflict_strategy: ContentSyncConflictStrategy,
+) -> Result<(), String> {
+    write_json_content_file(
+        "site/navigation.json",
+        &payload.navigation,
+        conflict_strategy,
+    )?;
+    write_json_content_file(
+        "site/site.config.json",
+        &payload.site_config,
+        conflict_strategy,
+    )?;
+    write_json_content_file(
+        "site/categories.json",
+        &payload.categories,
+        conflict_strategy,
+    )?;
+
+    for (path, contents) in &payload.markdown {
+        restore_manifest_content_file(path, contents, conflict_strategy)?;
+    }
+    for (path, contents) in &payload.inknotes {
+        restore_manifest_content_file(path, contents, conflict_strategy)?;
+    }
+    for (path, contents) in &payload.inknote_projects {
+        restore_manifest_content_file(path, contents, conflict_strategy)?;
+    }
+
+    Ok(())
+}
+
+fn write_json_content_file(
+    relative_path: &str,
+    value: &serde_json::Value,
+    conflict_strategy: ContentSyncConflictStrategy,
+) -> Result<(), String> {
+    let serialized = serde_json::to_string_pretty(value)
+        .map_err(|error| format!("failed to serialize content/{relative_path}: {error}"))?;
+    write_content_file_with_strategy(relative_path, &format!("{serialized}\n"), conflict_strategy)
+}
+
+fn restore_manifest_content_file(
+    path: &str,
+    contents: &str,
+    conflict_strategy: ContentSyncConflictStrategy,
+) -> Result<(), String> {
+    let relative_path = path
+        .strip_prefix("content/")
+        .ok_or_else(|| format!("invalid runtime content path: {path}"))?;
+    write_content_file_with_strategy(relative_path, contents, conflict_strategy)
+}
+
+fn write_content_file_with_strategy(
+    relative_path: &str,
+    contents: &str,
+    conflict_strategy: ContentSyncConflictStrategy,
+) -> Result<(), String> {
+    let resolved = resolve_content_path(relative_path)?;
+    if resolved.exists() {
+        if resolved.is_dir() {
+            if conflict_strategy == ContentSyncConflictStrategy::Local {
+                return Ok(());
+            }
+            fs::remove_dir_all(&resolved)
+                .map_err(|error| format!("failed to replace content/{relative_path}: {error}"))?;
+        } else {
+            let current = fs::read_to_string(&resolved).unwrap_or_default();
+            if current == contents || conflict_strategy == ContentSyncConflictStrategy::Local {
+                return Ok(());
+            }
+        }
+    }
+
+    ensure_parent_directory(&resolved.to_string_lossy())?;
+    fs::write(&resolved, contents)
+        .map_err(|error| format!("failed to restore content/{relative_path}: {error}"))
+}
+
+fn restore_runtime_public_assets(
+    artifact_root: &Path,
+    conflict_strategy: ContentSyncConflictStrategy,
+) -> Result<(), String> {
+    let public_root = get_workspace_root()?.join("apps/web/public");
+    fs::create_dir_all(&public_root)
+        .map_err(|error| format!("failed to create public asset directory: {error}"))?;
+
+    for directory in [
+        "content-images",
+        "content-slides",
+        "card-images",
+        "generated",
+    ] {
+        merge_public_asset_path(
+            &artifact_root.join(directory),
+            &public_root.join(directory),
+            conflict_strategy,
+        )?;
+    }
+    for file in ["blog-avatar.jpg", "blog-header-bg.png"] {
+        merge_public_asset_path(
+            &artifact_root.join(file),
+            &public_root.join(file),
+            conflict_strategy,
+        )?;
+    }
+
+    Ok(())
+}
+
+fn merge_public_asset_path(
+    source: &Path,
+    target: &Path,
+    conflict_strategy: ContentSyncConflictStrategy,
+) -> Result<(), String> {
+    if !source.exists() {
+        return Ok(());
+    }
+
+    if !target.exists() {
+        return copy_public_asset_path(source, target);
+    }
+
+    let source_metadata = fs::metadata(source)
+        .map_err(|error| format!("failed to inspect {}: {error}", source.display()))?;
+    let target_metadata = fs::metadata(target)
+        .map_err(|error| format!("failed to inspect {}: {error}", target.display()))?;
+
+    if source_metadata.is_dir() && target_metadata.is_dir() {
+        for entry in fs::read_dir(source).map_err(|error| {
+            format!(
+                "failed to read public asset directory {}: {error}",
+                source.display()
+            )
+        })? {
+            let entry =
+                entry.map_err(|error| format!("failed to inspect public asset entry: {error}"))?;
+            merge_public_asset_path(
+                &entry.path(),
+                &target.join(entry.file_name()),
+                conflict_strategy,
+            )?;
+        }
+        return Ok(());
+    }
+
+    if source_metadata.is_file() && target_metadata.is_file() {
+        let source_bytes = fs::read(source).map_err(|error| {
+            format!("failed to read public asset {}: {error}", source.display())
+        })?;
+        let target_bytes = fs::read(target).map_err(|error| {
+            format!("failed to read public asset {}: {error}", target.display())
+        })?;
+        if source_bytes == target_bytes || conflict_strategy == ContentSyncConflictStrategy::Local {
+            return Ok(());
+        }
+        ensure_parent_directory(&target.to_string_lossy())?;
+        fs::write(target, source_bytes).map_err(|error| {
+            format!(
+                "failed to overwrite public asset {} from {}: {error}",
+                target.display(),
+                source.display()
+            )
+        })?;
+        return Ok(());
+    }
+
+    if conflict_strategy == ContentSyncConflictStrategy::Local {
+        return Ok(());
+    }
+
+    clear_path(target)?;
+    copy_public_asset_path(source, target)
+}
+
+fn copy_public_asset_path(source: &Path, target: &Path) -> Result<(), String> {
+    if source.is_dir() {
+        copy_directory_contents(source, target)
+    } else {
+        copy_file_overwriting(source, target)
+    }
+}
+
+fn clear_path(path: &Path) -> Result<(), String> {
+    make_path_writable_recursive(path)?;
+    if path.is_dir() {
+        fs::remove_dir_all(path)
+            .map_err(|error| format!("failed to clear {}: {error}", path.display()))
+    } else {
+        fs::remove_file(path)
+            .map_err(|error| format!("failed to clear {}: {error}", path.display()))
+    }
 }
 
 fn read_json_value(path: &Path) -> Result<serde_json::Value, String> {
@@ -1294,6 +1699,57 @@ fn read_markdown_collection(
         documents.insert(id, raw);
     }
     Ok(documents)
+}
+
+fn read_inknote_project_collection(
+    content_root: &Path,
+) -> Result<BTreeMap<String, String>, String> {
+    let directory = content_root.join("inknotes");
+    let mut projects = BTreeMap::new();
+    if !directory.is_dir() {
+        return Ok(projects);
+    }
+
+    for entry in fs::read_dir(&directory)
+        .map_err(|error| format!("failed to read {}: {error}", directory.display()))?
+    {
+        let entry = entry.map_err(|error| format!("failed to inspect inknote entry: {error}"))?;
+        if !entry
+            .file_type()
+            .map_err(|error| format!("failed to inspect inknote entry type: {error}"))?
+            .is_dir()
+        {
+            continue;
+        }
+
+        let folder = entry.file_name().to_string_lossy().to_string();
+        for project_entry in fs::read_dir(entry.path())
+            .map_err(|error| format!("failed to read {}: {error}", entry.path().display()))?
+        {
+            let project_entry = project_entry
+                .map_err(|error| format!("failed to inspect inknote project: {error}"))?;
+            if !project_entry
+                .file_type()
+                .map_err(|error| format!("failed to inspect inknote project type: {error}"))?
+                .is_file()
+            {
+                continue;
+            }
+
+            let file_name = project_entry.file_name().to_string_lossy().to_string();
+            if !file_name.ends_with(".inknote.json") {
+                continue;
+            }
+
+            let project_path = project_entry.path();
+            let id = format!("content/inknotes/{folder}/{file_name}");
+            let raw = fs::read_to_string(&project_path)
+                .map_err(|error| format!("failed to read {}: {error}", project_path.display()))?;
+            projects.insert(id, raw);
+        }
+    }
+
+    Ok(projects)
 }
 
 fn prepare_spa_artifact(dist: &Path, base_path: &str) -> Result<(), String> {
@@ -1382,16 +1838,72 @@ fn copy_directory_contents(source: &Path, target: &Path) -> Result<(), String> {
         if file_type.is_dir() {
             copy_directory_contents(&source_path, &target_path)?;
         } else if file_type.is_file() {
-            fs::copy(&source_path, &target_path).map_err(|error| {
-                format!(
-                    "failed to copy deployment file {} to {}: {error}",
-                    source_path.display(),
-                    target_path.display()
-                )
-            })?;
+            copy_file_overwriting(&source_path, &target_path)?;
         }
     }
     Ok(())
+}
+
+fn copy_file_overwriting(source: &Path, target: &Path) -> Result<(), String> {
+    ensure_parent_directory(&target.to_string_lossy())?;
+    if target.exists() {
+        clear_path(target)?;
+    }
+
+    fs::copy(source, target).map(|_| ()).map_err(|error| {
+        format!(
+            "failed to copy file {} to {}: {error}",
+            source.display(),
+            target.display()
+        )
+    })?;
+    make_path_writable(target)
+}
+
+fn make_path_writable(path: &Path) -> Result<(), String> {
+    let metadata = match fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(format!(
+                "failed to inspect file permissions for {}: {error}",
+                path.display()
+            ))
+        }
+    };
+    let mut permissions = metadata.permissions();
+    if permissions.readonly() {
+        permissions.set_readonly(false);
+        fs::set_permissions(path, permissions).map_err(|error| {
+            format!(
+                "failed to update permissions for {}: {error}",
+                path.display()
+            )
+        })?;
+    }
+    Ok(())
+}
+
+fn make_path_writable_recursive(path: &Path) -> Result<(), String> {
+    if !path.exists() {
+        return Ok(());
+    }
+
+    if path.is_dir() {
+        for entry in fs::read_dir(path).map_err(|error| {
+            format!(
+                "failed to read directory permissions for {}: {error}",
+                path.display()
+            )
+        })? {
+            let entry = entry.map_err(|error| {
+                format!("failed to inspect directory entry permissions: {error}")
+            })?;
+            make_path_writable_recursive(&entry.path())?;
+        }
+    }
+
+    make_path_writable(path)
 }
 
 fn short_commit(value: &str) -> &str {
@@ -1583,6 +2095,7 @@ fn main() {
             favicon::cache_external_image,
             get_publish_status,
             publish_content_changes,
+            pull_remote_content,
             open_external_url,
             ensure_blog_preview_server
         ])

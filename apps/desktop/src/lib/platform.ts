@@ -36,6 +36,14 @@ export interface PublishSiteRequest {
   message: string;
 }
 
+export interface PullRemoteContentRequest {
+  taskId: string;
+  remote: string;
+  branch: string;
+  sshKeyPath: string;
+  conflictStrategy: 'remote' | 'local';
+}
+
 export type PublishProgressLevel = 'info' | 'success' | 'warning' | 'error';
 
 export interface PublishProgressEvent {
@@ -78,17 +86,6 @@ export function ensureExtension(path: string, extension: string): string {
 export async function getDesktopAppVersion(fallback: string): Promise<string> {
   if (!isTauri()) return fallback;
   return getTauriAppVersion();
-}
-
-export async function chooseProjectToOpen(): Promise<string | null> {
-  if (!isTauri()) return null;
-  const result = await open({
-    multiple: false,
-    directory: false,
-    filters: [{ name: 'InkNote Project', extensions: ['json'] }],
-  });
-  if (!result) return null;
-  return Array.isArray(result) ? result[0] ?? null : result;
 }
 
 export async function chooseFileToSave(defaultPath: string): Promise<string | null> {
@@ -191,10 +188,20 @@ export async function publishContentChanges(request: PublishSiteRequest): Promis
   return invoke('publish_content_changes', { request });
 }
 
+export async function pullRemoteContent(request: PullRemoteContentRequest): Promise<GitCommandResult> {
+  return invoke('pull_remote_content', { request });
+}
+
 export async function listenToPublishProgress(
   handler: (event: PublishProgressEvent) => void,
 ): Promise<UnlistenFn> {
   return listen<PublishProgressEvent>('publish-progress', (event) => handler(event.payload));
+}
+
+export async function listenToContentSyncProgress(
+  handler: (event: PublishProgressEvent) => void,
+): Promise<UnlistenFn> {
+  return listen<PublishProgressEvent>('content-sync-progress', (event) => handler(event.payload));
 }
 
 export async function ensureBlogPreviewServer(): Promise<BlogPreviewServerResponse> {
@@ -222,34 +229,4 @@ export async function openExternalUrl(url: string): Promise<void> {
   if (!openedWindow) {
     throw new Error(`Unable to open ${url}`);
   }
-}
-
-export function saveBlobWithBrowser(blob: Blob, filename: string): void {
-  const url = URL.createObjectURL(blob);
-  const anchor = document.createElement('a');
-  anchor.href = url;
-  anchor.download = filename;
-  anchor.click();
-  URL.revokeObjectURL(url);
-}
-
-export async function openTextFileWithBrowser(): Promise<string | null> {
-  const input = document.createElement('input');
-  input.type = 'file';
-  input.accept = '.json,application/json';
-
-  return new Promise((resolve) => {
-    input.addEventListener('change', () => {
-      const file = input.files?.[0];
-      if (!file) {
-        resolve(null);
-        return;
-      }
-      file
-        .text()
-        .then((content) => resolve(content))
-        .catch(() => resolve(null));
-    });
-    input.click();
-  });
 }

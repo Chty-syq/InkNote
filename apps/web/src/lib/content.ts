@@ -28,6 +28,7 @@ export interface ContentIndex {
   notes: RoutedDocument<MarkdownFrontmatter>[];
   pages: RoutedDocument<MarkdownFrontmatter>[];
   inknotes: RoutedDocument<InkNoteFrontmatter>[];
+  inknoteProjects: Record<string, string>;
   categoryDocuments: Record<string, Array<RoutedDocument<MarkdownFrontmatter | InkNoteFrontmatter>>>;
 }
 
@@ -37,6 +38,7 @@ export interface RuntimeContentPayload {
   categories: ContentCategory[];
   markdown: Record<string, string>;
   inknotes: Record<string, string>;
+  inknoteProjects?: Record<string, string>;
 }
 
 const markdownModules = import.meta.glob('../../../../content/markdown/*/index.md', {
@@ -50,6 +52,34 @@ const inknoteModules = import.meta.glob('../../../../content/inknotes/*/index.md
   import: 'default',
   query: '?raw',
 }) as Record<string, string>;
+
+const inknoteProjectModules = import.meta.glob('../../../../content/inknotes/*/*.inknote.json', {
+  eager: true,
+  import: 'default',
+  query: '?raw',
+}) as Record<string, string>;
+
+function toContentRelativeId(id: string): string {
+  const normalized = id.replace(/\\/g, '/');
+  const contentIndex = normalized.lastIndexOf('/content/');
+  if (contentIndex >= 0) {
+    return normalized.slice(contentIndex + 1);
+  }
+
+  if (normalized.startsWith('content/')) {
+    return normalized;
+  }
+
+  return normalized.replace(/^(\.\.\/)+/, '');
+}
+
+function normalizeRawModuleMap(modules: Record<string, string> | undefined): Record<string, string> {
+  if (!modules) {
+    return {};
+  }
+
+  return Object.fromEntries(Object.entries(modules).map(([id, raw]) => [toContentRelativeId(id), raw]));
+}
 
 function slugifyCategoryLabel(value: string): string {
   return value
@@ -127,10 +157,11 @@ function parseInkNoteCollection(modules: Record<string, string>): RoutedDocument
 }
 
 function buildContentIndex(payload: RuntimeContentPayload): ContentIndex {
-  const markdown = parseMarkdownCollection(payload.markdown);
+  const markdown = parseMarkdownCollection(normalizeRawModuleMap(payload.markdown));
   const notes = markdown.filter((document) => !isMarkdownPage(document.frontmatter));
   const pages = markdown.filter((document) => isMarkdownPage(document.frontmatter));
-  const inknotes = parseInkNoteCollection(payload.inknotes);
+  const inknotes = parseInkNoteCollection(normalizeRawModuleMap(payload.inknotes));
+  const inknoteProjects = normalizeRawModuleMap(payload.inknoteProjects);
   const configuredCategories = payload.categories
     .filter((category) => category.slug && category.label)
     .sort((left, right) => (left.order ?? Number.MAX_SAFE_INTEGER) - (right.order ?? Number.MAX_SAFE_INTEGER));
@@ -167,6 +198,7 @@ function buildContentIndex(payload: RuntimeContentPayload): ContentIndex {
     notes,
     pages,
     inknotes,
+    inknoteProjects,
     categoryDocuments,
   };
 }
@@ -177,6 +209,7 @@ export let contentIndex: ContentIndex = buildContentIndex({
   categories: categoriesData as ContentCategory[],
   markdown: markdownModules,
   inknotes: inknoteModules,
+  inknoteProjects: inknoteProjectModules,
 });
 
 export async function initializeRuntimeContent(): Promise<void> {
@@ -212,6 +245,16 @@ export function findPage(slug: string): RoutedDocument<MarkdownFrontmatter> | nu
 
 export function findInkNote(slug: string): RoutedDocument<InkNoteFrontmatter> | null {
   return contentIndex.inknotes.find((note) => note.frontmatter.slug === slug) ?? null;
+}
+
+export function findInkNoteProject(note: RoutedDocument<InkNoteFrontmatter>): string | null {
+  const projectFile = (note.frontmatter.projectFile?.trim() || 'notebook.inknote.json')
+    .replace(/\\/g, '/')
+    .replace(/^\.\/+/, '');
+  const noteId = toContentRelativeId(note.id).replace(/\/index\.md$/i, '');
+  const projectId = `${noteId}/${projectFile}`;
+
+  return contentIndex.inknoteProjects[projectId] ?? null;
 }
 
 export function getDocumentCategoryLabel(frontmatter: ContentFrontmatter): string {

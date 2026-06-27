@@ -55,6 +55,9 @@ import desktopPackage from '../package.json';
 import {
   createDefaultProject,
   deserializeProject,
+  HANDWRITING_OPTIONS,
+  PAPER_OPTIONS,
+  randomSeed,
   serializeProject,
   type ProjectData,
 } from '@inknote/inknote-core';
@@ -84,10 +87,7 @@ import {
   type ContentDraft,
   type ContentLibraryItem,
 } from './lib/content-drafts';
-import {
-  InkNoteProjectEditorPanel,
-  InkNoteProjectPreviewPanel,
-} from './InkNoteLinkedProjectPanel';
+import { InkNoteProjectPreviewPanel } from './InkNoteLinkedProjectPanel';
 import {
   CATEGORY_CONFIG_PATH,
   ensureUniqueCategorySlug,
@@ -113,9 +113,11 @@ import {
   getDesktopAppVersion,
   getPublishStatus,
   isTauri,
+  listenToContentSyncProgress,
   listenToPublishProgress,
   openExternalUrl,
   publishContentChanges,
+  pullRemoteContent,
   readContentFile,
   readTextFile,
   writeBinaryFile,
@@ -124,12 +126,9 @@ import {
   type PublishProgressEvent,
 } from './lib/platform';
 
-interface NotesWorkbenchProps {
-  onSwitchToNotebook: () => void;
-}
-
 type WorkspacePanel = 'write' | 'inknote';
 type CategoryDialogState = { mode: 'create' } | { mode: 'edit'; slug: string };
+type PullConflictStrategy = 'remote' | 'local';
 
 interface TextTransformResult {
   nextValue: string;
@@ -162,10 +161,23 @@ interface DraftUndoEntry {
   selection: EditorSelectionState | null;
 }
 
+interface NotebookUndoEntry {
+  project: ProjectData;
+  selection: EditorSelectionState | null;
+}
+
 interface DraftAutoSaveMetadata {
   sourceRelativePath: string;
   title?: string;
   tagsText?: string;
+}
+
+function getWorkspacePanelForDraft(draft: Pick<ContentDraft, 'type'> | null): WorkspacePanel {
+  return draft?.type === 'inknote' ? 'inknote' : 'write';
+}
+
+function clampNumber(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
 }
 
 const DRAFT_UNDO_LIMIT = 100;
@@ -1029,6 +1041,37 @@ function getDatePart(value: string): string {
   return match[1];
 }
 
+function parseGitHubRepository(remote: string): { owner: string; repo: string } | null {
+  const normalized = remote.trim().replace(/\/+$/, '').replace(/\.git$/i, '');
+  if (!normalized) {
+    return null;
+  }
+
+  const match = normalized.match(/github\.com[:/]([^/:\s]+)\/([^/:\s]+)$/i);
+  if (!match) {
+    return null;
+  }
+
+  return {
+    owner: match[1],
+    repo: match[2],
+  };
+}
+
+function inferGitHubPagesBasePath(remote: string): string {
+  const repository = parseGitHubRepository(remote);
+  if (!repository) {
+    return '/';
+  }
+
+  const ownerSiteName = `${repository.owner}.github.io`.toLowerCase();
+  if (repository.repo.toLowerCase() === ownerSiteName) {
+    return '/';
+  }
+
+  return `/${repository.repo}/`;
+}
+
 function createHistoryEntry(label: string, detail = ''): NoteHistoryEntry {
   return {
     id: Date.now() + Math.floor(Math.random() * 1000),
@@ -1265,6 +1308,7 @@ function getProjectSnapshot(project: ProjectData): string {
 function createLinkedNotebookProject(draft: ContentDraft, existing?: ProjectData | null): ProjectData {
   const base = existing ?? createDefaultProject();
   const title = draft.title.trim() || 'Untitled inknote';
+  const draftBody = draft.body.trim();
 
   return {
     ...base,
@@ -1276,9 +1320,18 @@ function createLinkedNotebookProject(draft: ContentDraft, existing?: ProjectData
       draft.type === 'inknote' && draft.handwritingStyle
         ? (draft.handwritingStyle as ProjectData['handwritingStyle'])
         : base.handwritingStyle,
-    content: existing?.content?.trim() || `# ${title}\n\nWrite the linked notebook content here.`,
+    content: existing?.content?.trim() || draftBody || `# ${title}\n\nWrite the linked notebook content here.`,
     updatedAt: new Date().toISOString(),
   };
+}
+
+function shouldHydrateLinkedNotebookContent(project: ProjectData, draft: ContentDraft): boolean {
+  const content = project.content.trim();
+  return (
+    draft.type === 'inknote' &&
+    Boolean(draft.body.trim()) &&
+    (!content || /Write the linked notebook content here\./i.test(content))
+  );
 }
 
 function getItemCategorySlug(item: ContentLibraryItem): string {
@@ -1471,7 +1524,7 @@ function FriendLinkAvatar({ label, icon, fetchedAt }: { label: string; icon?: st
   );
 }
 
-export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchProps) {
+export default function NotesWorkbench() {
   const [libraryRoot, setLibraryRoot] = useState('content');
   const [categories, setCategories] = useState<ContentCategory[]>([]);
   const [items, setItems] = useState<ContentLibraryItem[]>([]);
@@ -1495,6 +1548,12 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
   const [publishProgress, setPublishProgress] = useState(0);
   const [publishRunState, setPublishRunState] = useState<PublishRunState>('idle');
   const [publishLogs, setPublishLogs] = useState<PublishLogEntry[]>([]);
+  const [isPullDialogOpen, setIsPullDialogOpen] = useState(false);
+  const [isPullingContent, setIsPullingContent] = useState(false);
+  const [pullProgress, setPullProgress] = useState(0);
+  const [pullRunState, setPullRunState] = useState<PublishRunState>('idle');
+  const [pullLogs, setPullLogs] = useState<PublishLogEntry[]>([]);
+  const [pullConflictStrategy, setPullConflictStrategy] = useState<PullConflictStrategy>('remote');
   const [desktopVersion, setDesktopVersion] = useState(DESKTOP_FALLBACK_VERSION);
   const [desktopUpdateState, setDesktopUpdateState] = useState<DesktopUpdateState>('idle');
   const [desktopUpdateMessage, setDesktopUpdateMessage] = useState('\u5c1a\u672a\u68c0\u67e5\u66f4\u65b0');
@@ -1557,9 +1616,12 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
   const createTitleInputRef = useRef<HTMLInputElement | null>(null);
   const draftUndoStackRef = useRef<DraftUndoEntry[]>([]);
   const draftRedoStackRef = useRef<DraftUndoEntry[]>([]);
+  const linkedNotebookUndoStackRef = useRef<NotebookUndoEntry[]>([]);
+  const linkedNotebookRedoStackRef = useRef<NotebookUndoEntry[]>([]);
   const draftCacheRef = useRef<Map<string, { fingerprint: string; draft: ContentDraft }>>(new Map());
   const cleanDraftsRef = useRef<WeakSet<ContentDraft>>(new WeakSet());
   const editorSelectionRef = useRef<EditorSelectionState | null>(null);
+  const draftRef = useRef<ContentDraft | null>(null);
   const categoriesRef = useRef<ContentCategory[]>([]);
   const itemsRef = useRef<ContentLibraryItem[]>([]);
   const categoryDragSourceRef = useRef<string | null>(null);
@@ -1580,6 +1642,8 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
   const draftMetadataSaveQueueRef = useRef<Promise<void>>(Promise.resolve());
   const publishLogSequenceRef = useRef(0);
   const publishLogViewRef = useRef<HTMLDivElement | null>(null);
+  const pullLogSequenceRef = useRef(0);
+  const pullLogViewRef = useRef<HTMLDivElement | null>(null);
   const pendingDesktopUpdateRef = useRef<Update | null>(null);
 
   useEffect(() => {
@@ -1588,6 +1652,13 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
       view.scrollTop = view.scrollHeight;
     }
   }, [publishLogs.length]);
+
+  useEffect(() => {
+    const view = pullLogViewRef.current;
+    if (view) {
+      view.scrollTop = view.scrollHeight;
+    }
+  }, [pullLogs.length]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1610,6 +1681,10 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
   }, []);
 
   useEffect(() => {
+    draftRef.current = draft;
+  }, [draft]);
+
+  useEffect(() => {
     linkedNotebookRef.current = linkedNotebook;
   }, [linkedNotebook]);
 
@@ -1626,10 +1701,11 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
   }, [linkedNotebookSavedSnapshot]);
 
   useEffect(() => {
-    if (draft?.type !== 'inknote' && workspacePanel === 'inknote') {
-      setWorkspacePanel('write');
+    const expectedPanel = getWorkspacePanelForDraft(draft);
+    if (workspacePanel !== expectedPanel) {
+      setWorkspacePanel(expectedPanel);
     }
-  }, [draft?.type, workspacePanel]);
+  }, [draft, workspacePanel]);
 
   useEffect(() => {
     if (!isTagPickerOpen) {
@@ -2079,6 +2155,8 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
   const activateDraft = (nextDraft: ContentDraft | null) => {
     draftUndoStackRef.current = [];
     draftRedoStackRef.current = [];
+    linkedNotebookUndoStackRef.current = [];
+    linkedNotebookRedoStackRef.current = [];
     editorSelectionRef.current = null;
     setDraftSessionId((current) => current + 1);
     setDraft(nextDraft);
@@ -2507,7 +2585,7 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
       const repository = savedConfig.repository;
       const remote = repository?.remote.trim() ?? '';
       const branch = repository?.branch.trim() ?? '';
-      const basePath = repository?.basePath.trim() || '/';
+      const basePath = inferGitHubPagesBasePath(remote);
       const selectedSshKeyPath = sshKeyPath.trim();
       if (!remote || !branch) {
         recordProgress({
@@ -2521,6 +2599,15 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
         setStatus('\u8bf7先填写远程仓库和发布分支。');
         return;
       }
+
+      recordProgress({
+        taskId,
+        progress: 14,
+        stage: 'config',
+        message: '已自动推导站点基础路径',
+        detail: `${remote} -> ${basePath}`,
+        level: 'success',
+      });
 
       const result = await publishContentChanges({
         taskId,
@@ -2569,6 +2656,163 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
     }
   };
 
+  const openPullRemoteContentDialog = () => {
+    setIsPullDialogOpen(true);
+  };
+
+  const pullRemoteContentToLocal = async () => {
+    setIsPullDialogOpen(true);
+    if (isPullingContent) {
+      return;
+    }
+    if (!isTauri()) {
+      setStatus('远端同步需要在 Tauri 桌面端中执行。');
+      return;
+    }
+
+    const configuredRepository = siteConfigDraft.repository;
+    const configuredRemote = configuredRepository?.remote.trim() ?? '';
+    const configuredBranch = configuredRepository?.branch.trim() ?? '';
+    if (!configuredRemote || !configuredBranch) {
+      setStatus('请先填写远程仓库和发布分支。');
+      setPullLogs([]);
+      setPullRunState('error');
+      return;
+    }
+
+    const conflictLabel = pullConflictStrategy === 'remote' ? '远端优先' : '本地优先';
+    const confirmed = window.confirm(
+      `将从远端发布分支合并内容到本地；本地独有内容会保留，冲突时使用“${conflictLabel}”。是否继续？`,
+    );
+    if (!confirmed) {
+      setStatus('已取消远端内容同步。');
+      return;
+    }
+
+    const taskId = globalThis.crypto?.randomUUID?.() ?? `pull-${Date.now()}`;
+    let currentProgress = 2;
+    const recordProgress = (event: PublishProgressEvent) => {
+      const normalizedProgress = Math.max(0, Math.min(100, event.progress));
+      currentProgress = normalizedProgress;
+      setPullProgress(normalizedProgress);
+      setPullRunState(
+        event.level === 'error'
+          ? 'error'
+          : normalizedProgress >= 100
+            ? 'success'
+            : 'running',
+      );
+      setPullLogs((current) => [
+        ...current,
+        {
+          ...event,
+          progress: normalizedProgress,
+          id: ++pullLogSequenceRef.current,
+          receivedAt: new Date().toLocaleTimeString('zh-CN', { hour12: false }),
+        },
+      ].slice(-120));
+    };
+
+    setPullLogs([]);
+    setPullProgress(2);
+    setPullRunState('running');
+    setIsPullingContent(true);
+    let stopListening: (() => void) | null = null;
+
+    try {
+      stopListening = await listenToContentSyncProgress((event) => {
+        if (event.taskId === taskId) {
+          recordProgress(event);
+        }
+      });
+      recordProgress({
+        taskId,
+        progress: 2,
+        stage: 'prepare',
+        message: '正在准备远端同步',
+        detail: `本次操作会合并远端发布内容；冲突时使用“${conflictLabel}”。`,
+        level: 'info',
+      });
+
+      recordProgress({
+        taskId,
+        progress: 5,
+        stage: 'config',
+        message: '正在保存站点设置',
+        detail: '确保仓库地址和分支配置已经写入本地。',
+        level: 'info',
+      });
+      const savedConfig = await saveSiteConfig();
+      if (!savedConfig) {
+        recordProgress({
+          taskId,
+          progress: 5,
+          stage: 'config',
+          message: '站点设置保存失败',
+          detail: '远端同步已停止，请先修正站点设置。',
+          level: 'error',
+        });
+        return;
+      }
+
+      const repository = savedConfig.repository;
+      const remote = repository?.remote.trim() ?? '';
+      const branch = repository?.branch.trim() ?? '';
+      const selectedSshKeyPath = sshKeyPath.trim();
+      if (!remote || !branch) {
+        recordProgress({
+          taskId,
+          progress: 5,
+          stage: 'config',
+          message: '远端同步配置不完整',
+          detail: '请填写远程仓库地址和发布分支。',
+          level: 'error',
+        });
+        return;
+      }
+
+      const result = await pullRemoteContent({
+        taskId,
+        remote,
+        branch,
+        sshKeyPath: selectedSshKeyPath,
+        conflictStrategy: pullConflictStrategy,
+      });
+
+      draftCacheRef.current.clear();
+      cleanDraftsRef.current = new WeakSet();
+      clearLinkedNotebookState();
+      await loadSiteConfig();
+      await loadLibrary(undefined, true);
+      if (isSettingsOpen && settingsSection === 'images') {
+        await loadUserGalleryManifest();
+      }
+      appendHistoryEntry('Pulled remote content', branch);
+      setStatus(result.stdout || '已从远端同步内容到本地。');
+
+      try {
+        const nextStatus = await getPublishStatus(remote, branch, selectedSshKeyPath);
+        setPublishConnectionMessage(nextStatus.shortStatus);
+      } catch {
+        setPublishConnectionMessage('远端内容已同步，但连接状态刷新失败。');
+      }
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : typeof error === 'string' ? error : String(error);
+      setStatus(detail || '远端内容同步失败。');
+      recordProgress({
+        taskId,
+        progress: currentProgress,
+        stage: 'failed',
+        message: '远端同步任务已终止',
+        detail: detail || '没有收到可识别的错误信息。',
+        level: 'error',
+      });
+    } finally {
+      stopListening?.();
+      setIsPullingContent(false);
+    }
+  };
+
   const handleBrandAvatarChange = (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     event.target.value = '';
@@ -2600,6 +2844,10 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
   };
 
   const clearLinkedNotebookState = () => {
+    linkedNotebookRef.current = null;
+    linkedNotebookSavedSnapshotRef.current = '';
+    linkedNotebookUndoStackRef.current = [];
+    linkedNotebookRedoStackRef.current = [];
     setLinkedNotebook(null);
     setLinkedNotebookPath(null);
     setLinkedNotebookSavedSnapshot('');
@@ -2923,6 +3171,67 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
     return true;
   };
 
+  const pushLinkedNotebookUndoEntry = (entry: NotebookUndoEntry) => {
+    const lastEntry = linkedNotebookUndoStackRef.current[linkedNotebookUndoStackRef.current.length - 1];
+
+    if (lastEntry && lastEntry.project.content === entry.project.content) {
+      return;
+    }
+
+    linkedNotebookUndoStackRef.current = [...linkedNotebookUndoStackRef.current.slice(-(DRAFT_UNDO_LIMIT - 1)), entry];
+    linkedNotebookRedoStackRef.current = [];
+  };
+
+  const undoLinkedNotebookChange = (): boolean => {
+    const currentProject = linkedNotebookRef.current;
+    if (!currentProject) {
+      return false;
+    }
+
+    const previousProject = linkedNotebookUndoStackRef.current.pop();
+    if (!previousProject) {
+      return false;
+    }
+
+    linkedNotebookRedoStackRef.current = [
+      ...linkedNotebookRedoStackRef.current,
+      {
+        project: currentProject,
+        selection: readEditorSelection() ?? editorSelectionRef.current,
+      },
+    ];
+    handleLinkedNotebookChange(previousProject.project);
+    restoreEditorSelection(previousProject.selection);
+    appendHistoryEntry('Undo', draftRef.current?.title ?? 'InkNote');
+    setStatus('Undid the latest notebook editor change.');
+    return true;
+  };
+
+  const redoLinkedNotebookChange = (): boolean => {
+    const currentProject = linkedNotebookRef.current;
+    if (!currentProject) {
+      return false;
+    }
+
+    const nextProject = linkedNotebookRedoStackRef.current.pop();
+    if (!nextProject) {
+      return false;
+    }
+
+    linkedNotebookUndoStackRef.current = [
+      ...linkedNotebookUndoStackRef.current,
+      {
+        project: currentProject,
+        selection: readEditorSelection() ?? editorSelectionRef.current,
+      },
+    ];
+    handleLinkedNotebookChange(nextProject.project);
+    restoreEditorSelection(nextProject.selection);
+    appendHistoryEntry('Redo', draftRef.current?.title ?? 'InkNote');
+    setStatus('Reapplied the latest notebook editor change.');
+    return true;
+  };
+
   const getDraftFromItem = (item: ContentLibraryItem): ContentDraft => {
     const fingerprint = [
       item.relativePath,
@@ -2948,7 +3257,7 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
     return nextDraft;
   };
 
-  const loadLibrary = async (preferredPath?: string) => {
+  const loadLibrary = async (preferredPath?: string, replaceCurrentDraft = false) => {
     setIsBusy(true);
     setStatus('Loading notes...');
 
@@ -3013,7 +3322,7 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
         return loadedCategories[0]?.slug ?? null;
       });
 
-      if (nextItem && (!dirty || preferredPath)) {
+      if (nextItem && (!dirty || preferredPath || replaceCurrentDraft)) {
         activateDraft(getDraftFromItem(nextItem));
       } else if (!nextItem) {
         activateDraft(null);
@@ -3132,14 +3441,25 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
         }
 
         const loadedProject = deserializeProject(raw);
-        setLinkedNotebook(loadedProject);
+        const nextProject = shouldHydrateLinkedNotebookContent(loadedProject, draft)
+          ? {
+              ...loadedProject,
+              content: draft.body.trim(),
+              updatedAt: new Date().toISOString(),
+            }
+          : loadedProject;
+        setLinkedNotebook(nextProject);
         setLinkedNotebookSavedSnapshot(getProjectSnapshot(loadedProject));
-        setLinkedNotebookStatus(`Loaded content/${linkedNotebookTarget}`);
+        setLinkedNotebookStatus(
+          nextProject === loadedProject
+            ? `Loaded content/${linkedNotebookTarget}`
+            : `Loaded content/${linkedNotebookTarget} and initialized notebook content from the entry body.`,
+        );
         setDraft((current) =>
           current && current.type === 'inknote'
             ? patchDraft(current, {
-                paperStyle: loadedProject.paperStyle,
-                handwritingStyle: loadedProject.handwritingStyle,
+                paperStyle: nextProject.paperStyle,
+                handwritingStyle: nextProject.handwritingStyle,
               })
             : current,
         );
@@ -3723,7 +4043,7 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
     startTransition(() => {
       activateDraft(nextDraft);
       setSelectedCategorySlug(getItemCategorySlug(item) || null);
-      setWorkspacePanel('write');
+      setWorkspacePanel(getWorkspacePanelForDraft(nextDraft));
       setIsTagPickerOpen(false);
       setStatus(`\u5df2\u6253\u5f00 "${item.frontmatter.title}"\u3002`);
     });
@@ -3836,7 +4156,7 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
     setIsCreateDialogOpen(false);
     setSelectedCategorySlug(targetCategory.slug);
     setSearchQuery('');
-    setWorkspacePanel('write');
+    setWorkspacePanel(getWorkspacePanelForDraft(nextDraft));
     setShowPreview(true);
     setStatus(`\u6b63\u5728\u4fdd\u5b58 "${normalizedTitle}"...`);
 
@@ -3875,14 +4195,16 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
       return;
     }
 
-    activateDraft(getDraftFromItem(source));
+    const nextDraft = getDraftFromItem(source);
+    activateDraft(nextDraft);
     setSelectedCategorySlug(getItemCategorySlug(source) || null);
-    setWorkspacePanel('write');
+    setWorkspacePanel(getWorkspacePanelForDraft(nextDraft));
     setHistoryEntries([createHistoryEntry('Reverted note', source.frontmatter.title)]);
     setStatus('Reverted to the last saved version.');
   };
 
   const handleLinkedNotebookChange = (nextProject: ProjectData) => {
+    linkedNotebookRef.current = nextProject;
     setLinkedNotebook(nextProject);
     setDraft((current) =>
       current && current.type === 'inknote'
@@ -3894,6 +4216,89 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
     );
     setLinkedNotebookStatus('Linked notebook project updated locally.');
     linkedNotebookSessionIdRef.current = draftSessionId;
+  };
+
+  const patchLinkedNotebook = (patch: Partial<ProjectData>) => {
+    const currentProject = linkedNotebookRef.current;
+    if (!currentProject) {
+      return;
+    }
+
+    handleLinkedNotebookChange({
+      ...currentProject,
+      ...patch,
+      updatedAt: new Date().toISOString(),
+    });
+  };
+
+  const updateLinkedNotebookContent = (
+    nextContent: string,
+    options: { undoSelection?: EditorSelectionState | null } = {},
+  ) => {
+    const currentProject = linkedNotebookRef.current;
+    if (!currentProject || currentProject.content === nextContent) {
+      return;
+    }
+
+    pushLinkedNotebookUndoEntry({
+      project: currentProject,
+      selection: options.undoSelection ?? null,
+    });
+
+    handleLinkedNotebookChange({
+      ...currentProject,
+      content: nextContent,
+      updatedAt: new Date().toISOString(),
+    });
+  };
+
+  const applyLinkedNotebookTransform = (
+    transform: (value: string, selectionStart: number, selectionEnd: number) => TextTransformResult,
+  ) => {
+    const currentProject = linkedNotebookRef.current;
+    if (!currentProject) {
+      return;
+    }
+
+    const editor = editorRef.current;
+    if (!editor) {
+      return;
+    }
+
+    const undoSelection = readEditorSelection();
+    const result = transform(currentProject.content, editor.selectionStart, editor.selectionEnd);
+    updateLinkedNotebookContent(result.nextValue, { undoSelection });
+
+    requestAnimationFrame(() => {
+      if (!editorRef.current) {
+        return;
+      }
+
+      const nextSelection = clampEditorSelection(
+        {
+          start: result.nextSelectionStart,
+          end: result.nextSelectionEnd,
+          direction: 'none',
+        },
+        editorRef.current.value.length,
+      );
+
+      editorRef.current.focus();
+      editorRef.current.setSelectionRange(nextSelection.start, nextSelection.end, nextSelection.direction);
+      editorSelectionRef.current = nextSelection;
+    });
+  };
+
+  const applyLinkedNotebookInlineWrap = (prefix: string, suffix: string, placeholder: string) => {
+    applyLinkedNotebookTransform((value, selectionStart, selectionEnd) =>
+      wrapSelection(value, selectionStart, selectionEnd, prefix, suffix, placeholder),
+    );
+  };
+
+  const applyLinkedNotebookLinePrefix = (formatter: (line: string, index: number) => string) => {
+    applyLinkedNotebookTransform((value, selectionStart, selectionEnd) =>
+      prefixSelectedLines(value, selectionStart, selectionEnd, formatter),
+    );
   };
 
   const persistDraftAutoMetadata = async (metadata: DraftAutoSaveMetadata) => {
@@ -4107,15 +4512,19 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
 
       setItems(nextItems);
       setSelectedCategorySlug(getItemCategorySlug(savedItem) || null);
-      setWorkspacePanel('write');
+      setWorkspacePanel(getWorkspacePanelForDraft(savedItem.frontmatter));
 
       if (options?.resetUndoStack) {
-        activateDraft(getDraftFromItem(savedItem));
+        const nextDraft = getDraftFromItem(savedItem);
+        activateDraft(nextDraft);
+        setWorkspacePanel(getWorkspacePanelForDraft(nextDraft));
         if (options.historyLabel) {
           setHistoryEntries([createHistoryEntry(options.historyLabel, options.historyDetail ?? savedItem.frontmatter.title)]);
         }
       } else {
-        setDraft(getDraftFromItem(savedItem));
+        const nextDraft = getDraftFromItem(savedItem);
+        setDraft(nextDraft);
+        setWorkspacePanel(getWorkspacePanelForDraft(nextDraft));
         if (options?.historyLabel) {
           appendHistoryEntry(options.historyLabel, options.historyDetail ?? savedItem.frontmatter.title);
         }
@@ -4471,17 +4880,6 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
       setStatus(`\u5df2\u6253\u5f00\u672c\u5730\u535a\u5ba2\u9884\u89c8\uff1a${url}`);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      const pagesUrl = siteConfigDraft.repository?.pagesUrl.trim() ?? '';
-      if (pagesUrl) {
-        try {
-          const remoteUrl = new URL(path.replace(/^\/+/, ''), pagesUrl.endsWith('/') ? pagesUrl : `${pagesUrl}/`);
-          await openExternalUrl(remoteUrl.toString());
-          setStatus(`\u672c\u5730\u9884\u89c8\u4e0d\u53ef\u7528\uff0c\u5df2\u6253\u5f00\u7ebf\u4e0a\u535a\u5ba2\uff1a${remoteUrl}`);
-          return;
-        } catch {
-          // Fall through to the original local preview error.
-        }
-      }
       setStatus(`\u65e0\u6cd5\u6253\u5f00\u672c\u5730\u535a\u5ba2\u9884\u89c8\uff1a${url}\uff08${message}\uff09`);
       return;
     }
@@ -4527,7 +4925,19 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
       return;
     }
 
-    if (workspacePanel !== 'write') {
+    if (activeWorkspacePanel === 'inknote') {
+      if ((key === 'y' || (key === 'z' && event.shiftKey)) && redoLinkedNotebookChange()) {
+        event.preventDefault();
+        return;
+      }
+
+      if (key === 'z' && !event.shiftKey && undoLinkedNotebookChange()) {
+        event.preventDefault();
+      }
+      return;
+    }
+
+    if (activeWorkspacePanel !== 'write') {
       return;
     }
 
@@ -4599,8 +5009,34 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
     markdown: string,
     selection: EditorSelectionState,
     expectedSlug: string,
+    targetType: ContentDraft['type'],
   ) => {
     let nextSelection: EditorSelectionState | null = null;
+
+    if (targetType === 'inknote') {
+      const currentDraft = draftRef.current;
+      const currentProject = linkedNotebookRef.current;
+      if (!currentDraft || currentDraft.type !== 'inknote' || currentDraft.slug !== expectedSlug || !currentProject) {
+        return;
+      }
+
+      const safeSelection = clampEditorSelection(selection, currentProject.content.length);
+      const before = currentProject.content.slice(0, safeSelection.start);
+      const after = currentProject.content.slice(safeSelection.end);
+      const prefix = before && !before.endsWith('\n') ? '\n\n' : before.endsWith('\n\n') || !before ? '' : '\n';
+      const suffix = after && !after.startsWith('\n') ? '\n\n' : after.startsWith('\n\n') || !after ? '' : '\n';
+      const snippet = `${prefix}${markdown}${suffix}`;
+      const result = insertSnippet(currentProject.content, safeSelection.start, safeSelection.end, snippet, snippet.length);
+
+      updateLinkedNotebookContent(result.nextValue, { undoSelection: safeSelection });
+      nextSelection = {
+        start: result.nextSelectionStart,
+        end: result.nextSelectionEnd,
+        direction: 'none',
+      };
+      restoreEditorSelection(nextSelection);
+      return;
+    }
 
     setDraft((current) => {
       if (!current || current.slug !== expectedSlug) {
@@ -4686,6 +5122,7 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
         ].join(''),
         selection,
         noteSlug,
+        draft.type,
       );
       appendHistoryEntry('Inserted slides', fileTitle);
       setStatus(`已插入演示文稿：${fileTitle}`);
@@ -4753,7 +5190,7 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
       }
 
       if (references.length > 0) {
-        insertPastedImageReferences(references.join('\n\n'), selection, noteSlug);
+        insertPastedImageReferences(references.join('\n\n'), selection, noteSlug, noteType);
         appendHistoryEntry('Pasted image', `${references.length} image${references.length > 1 ? 's' : ''}`);
       }
 
@@ -5092,8 +5529,15 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
       }),
     );
   }, [items, searchQuery, selectedCategorySlug]);
-  const canUndo = workspacePanel === 'write' && draftUndoStackRef.current.length > 0;
-  const canRedo = workspacePanel === 'write' && draftRedoStackRef.current.length > 0;
+  const activeWorkspacePanel = draft?.type === 'inknote' ? 'inknote' : workspacePanel;
+  const canUndo =
+    activeWorkspacePanel === 'inknote'
+      ? linkedNotebookUndoStackRef.current.length > 0
+      : activeWorkspacePanel === 'write' && draftUndoStackRef.current.length > 0;
+  const canRedo =
+    activeWorkspacePanel === 'inknote'
+      ? linkedNotebookRedoStackRef.current.length > 0
+      : activeWorkspacePanel === 'write' && draftRedoStackRef.current.length > 0;
 
   const saveStateText = draft
     ? draft.type === 'inknote' && notebookDirty && draftDirty
@@ -5165,14 +5609,6 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
         <div className="notes-topbar-right">
           <button
             type="button"
-            className={isPublishDialogOpen ? 'notes-create-button active' : 'notes-create-button'}
-            onClick={openSitePublishDialog}
-            disabled={isBusy}
-          >
-            {'\u53d1\u5e03\u7ad9\u70b9'}
-          </button>
-          <button
-            type="button"
             className={isSettingsOpen ? 'notes-create-button active' : 'notes-create-button'}
             onClick={() => {
               setSettingsSection('basic');
@@ -5207,14 +5643,6 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
             onClick={() => void openLocalBlogPreview()}
           >
             {'\u9884\u89c8'}
-          </button>
-          <button
-            type="button"
-            className={isPublishDialogOpen ? 'notes-topbar-button active' : 'notes-topbar-button'}
-            onClick={openSitePublishDialog}
-            disabled={isBusy}
-          >
-            {'\u53d1\u5e03'}
           </button>
         </div>
       </header>
@@ -5251,12 +5679,6 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
           </nav>
 
           <div className="notes-sidebar-footer">
-            <button type="button" className="notes-sidebar-foot-item" onClick={onSwitchToNotebook}>
-              <span className="notes-sidebar-foot-icon" aria-hidden="true">
-                <IconWriting />
-              </span>
-              <span className="notes-sidebar-foot-label">{'\u624b\u5199\u672c'}</span>
-            </button>
             <div className="notes-sidebar-status">
               <span>{saveStateText}</span>
               <p>{status}</p>
@@ -5450,9 +5872,18 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
                 <div className="notes-editor-actions">
                   <button
                     type="button"
-                    className={workspacePanel === 'write' && showPreview ? 'notes-icon-button active' : 'notes-icon-button'}
+                    className={
+                      draft.type === 'inknote' || (activeWorkspacePanel === 'write' && showPreview)
+                        ? 'notes-icon-button active'
+                        : 'notes-icon-button'
+                    }
                     onClick={() => {
-                      if (workspacePanel !== 'write') {
+                      if (draft.type === 'inknote') {
+                        setWorkspacePanel('inknote');
+                        return;
+                      }
+
+                      if (activeWorkspacePanel !== 'write') {
                         setWorkspacePanel('write');
                         setShowPreview(true);
                         return;
@@ -5553,7 +5984,7 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
                 </div>
               ) : null}
 
-              {workspacePanel === 'write' ? (
+              {activeWorkspacePanel === 'write' ? (
                 <>
                   <div className="notes-editor-toolbar">
                     <button
@@ -5744,20 +6175,237 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
                   </div>
                 </>
               ) : (
-                <div className="notes-inknote-workspace">
-                  <InkNoteProjectEditorPanel
-                    project={linkedNotebook}
-                    projectPath={linkedNotebookPath}
-                    status={linkedNotebookStatus}
-                    isLoading={isLinkedNotebookLoading}
-                    onChange={handleLinkedNotebookChange}
-                  />
-                  <InkNoteProjectPreviewPanel
-                    project={linkedNotebook}
-                    projectPath={linkedNotebookPath}
-                    status={linkedNotebookStatus}
-                  />
-                </div>
+                <>
+                  <div className="notes-editor-toolbar notes-inknote-toolbar">
+                    <button
+                      type="button"
+                      className="notes-toolbar-button"
+                      onClick={() => applyLinkedNotebookLinePrefix((line) => `# ${line.replace(/^#{1,6}\s+/, '')}`)}
+                      disabled={!linkedNotebook}
+                      title="标题"
+                      aria-label="标题"
+                    >
+                      <span className="notes-toolbar-glyph notes-toolbar-glyph-heading">H1</span>
+                    </button>
+                    <button
+                      type="button"
+                      className="notes-toolbar-button"
+                      onClick={() => applyLinkedNotebookLinePrefix((line) => `## ${line.replace(/^#{1,6}\s+/, '')}`)}
+                      disabled={!linkedNotebook}
+                      title="副标题"
+                      aria-label="副标题"
+                    >
+                      <span className="notes-toolbar-glyph notes-toolbar-glyph-heading">H2</span>
+                    </button>
+                    <button
+                      type="button"
+                      className="notes-toolbar-button"
+                      onClick={() => applyLinkedNotebookInlineWrap('<center>', '</center>', '居中文本')}
+                      disabled={!linkedNotebook}
+                      title="居中"
+                      aria-label="居中"
+                    >
+                      <IconAlignCenter aria-hidden="true" />
+                    </button>
+                    <button
+                      type="button"
+                      className="notes-toolbar-button"
+                      onClick={() => applyLinkedNotebookLinePrefix((line) => `- ${line.replace(/^[-*+]\s+/, '')}`)}
+                      disabled={!linkedNotebook}
+                      title="列表"
+                      aria-label="列表"
+                    >
+                      <IconList aria-hidden="true" />
+                    </button>
+                    <button
+                      type="button"
+                      className="notes-toolbar-button"
+                      onClick={() =>
+                        applyLinkedNotebookLinePrefix((line, index) =>
+                          `${index + 1}. ${line.replace(/^\d+\.\s+/, '')}`,
+                        )
+                      }
+                      disabled={!linkedNotebook}
+                      title="编号列表"
+                      aria-label="编号列表"
+                    >
+                      <IconListNumbers aria-hidden="true" />
+                    </button>
+
+                    <span className="notes-inknote-toolbar-divider" aria-hidden="true" />
+
+                    <label className="notes-inknote-toolbar-control">
+                      <span>纸张</span>
+                      <select
+                        value={linkedNotebook?.paperStyle ?? 'school'}
+                        onChange={(event) =>
+                          patchLinkedNotebook({ paperStyle: event.currentTarget.value as ProjectData['paperStyle'] })
+                        }
+                        disabled={!linkedNotebook}
+                      >
+                        {PAPER_OPTIONS.map((option) => (
+                          <option key={option.value} value={option.value}>
+                            {option.label}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+
+                    <label className="notes-inknote-toolbar-control">
+                      <span>笔迹</span>
+                      <select
+                        value={linkedNotebook?.handwritingStyle ?? 'classical'}
+                        onChange={(event) =>
+                          patchLinkedNotebook({
+                            handwritingStyle: event.currentTarget.value as ProjectData['handwritingStyle'],
+                          })
+                        }
+                        disabled={!linkedNotebook}
+                      >
+                        {HANDWRITING_OPTIONS.map((option) => (
+                          <option key={option.value} value={option.value}>
+                            {option.label}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+
+                    <label className="notes-inknote-toolbar-control compact">
+                      <span>缩进</span>
+                      <input
+                        type="number"
+                        min="0"
+                        max="6"
+                        value={linkedNotebook?.paragraphIndent ?? 2}
+                        onChange={(event) =>
+                          patchLinkedNotebook({
+                            paragraphIndent: clampNumber(Number(event.currentTarget.value), 0, 6),
+                          })
+                        }
+                        disabled={!linkedNotebook}
+                      />
+                    </label>
+
+                    <label className="notes-inknote-toolbar-control compact">
+                      <span>行数</span>
+                      <input
+                        type="number"
+                        min="10"
+                        max="30"
+                        value={linkedNotebook?.linesPerPage ?? 20}
+                        onChange={(event) =>
+                          patchLinkedNotebook({
+                            linesPerPage: clampNumber(Math.round(Number(event.currentTarget.value)), 10, 30),
+                          })
+                        }
+                        disabled={!linkedNotebook}
+                      />
+                    </label>
+
+                    <label className="notes-inknote-toolbar-control compact">
+                      <span>字号</span>
+                      <input
+                        type="number"
+                        min="24"
+                        max="56"
+                        value={linkedNotebook?.fontSize ?? 40}
+                        onChange={(event) =>
+                          patchLinkedNotebook({
+                            fontSize: clampNumber(Number(event.currentTarget.value), 24, 56),
+                          })
+                        }
+                        disabled={!linkedNotebook}
+                      />
+                    </label>
+
+                    <label className="notes-inknote-toolbar-control compact">
+                      <span>字距</span>
+                      <input
+                        type="number"
+                        min="0"
+                        max="16"
+                        value={linkedNotebook?.charSpacing ?? 6}
+                        onChange={(event) =>
+                          patchLinkedNotebook({
+                            charSpacing: clampNumber(Number(event.currentTarget.value), 0, 16),
+                          })
+                        }
+                        disabled={!linkedNotebook}
+                      />
+                    </label>
+
+                    <button
+                      type="button"
+                      className="notes-toolbar-button"
+                      onClick={() => patchLinkedNotebook({ seed: randomSeed() })}
+                      disabled={!linkedNotebook}
+                      title="重排笔迹"
+                      aria-label="重排笔迹"
+                    >
+                      <IconRefresh aria-hidden="true" />
+                    </button>
+                    <button
+                      type="button"
+                      className="notes-toolbar-button"
+                      onClick={undoLinkedNotebookChange}
+                      disabled={!canUndo}
+                      title="Undo"
+                      aria-label="Undo"
+                    >
+                      <IconArrowBackUp aria-hidden="true" />
+                    </button>
+                    <button
+                      type="button"
+                      className="notes-toolbar-button"
+                      onClick={redoLinkedNotebookChange}
+                      disabled={!canRedo}
+                      title="Redo"
+                      aria-label="Redo"
+                    >
+                      <IconArrowForwardUp aria-hidden="true" />
+                    </button>
+                  </div>
+
+                  <div className="notes-editor-workbench split notes-inknote-editor-workbench">
+                    <div className="notes-source-pane">
+                      <textarea
+                        ref={editorRef}
+                        className="notes-markdown-editor"
+                        value={linkedNotebook?.content ?? ''}
+                        onBeforeInput={captureEditorSelection}
+                        onPaste={handleEditorPaste}
+                        onCut={captureEditorSelection}
+                        onKeyDown={captureEditorSelection}
+                        onKeyUp={captureEditorSelection}
+                        onClick={captureEditorSelection}
+                        onFocus={captureEditorSelection}
+                        onSelect={captureEditorSelection}
+                        onChange={(event) => {
+                          updateLinkedNotebookContent(event.currentTarget.value, {
+                            undoSelection: editorSelectionRef.current,
+                          });
+                          captureEditorSelection();
+                        }}
+                        placeholder={
+                          isLinkedNotebookLoading
+                            ? '正在加载手写笔记工程...'
+                            : '在这里编辑手写笔记内容，右侧会渲染为手写纸张...'
+                        }
+                        spellCheck={false}
+                        disabled={!linkedNotebook}
+                      />
+                    </div>
+
+                    <div className="notes-rendered-pane notes-inknote-rendered-pane">
+                      <InkNoteProjectPreviewPanel
+                        project={linkedNotebook}
+                        projectPath={linkedNotebookPath}
+                        status={linkedNotebookStatus}
+                        embedded
+                      />
+                    </div>
+                  </div>
+                </>
               )}
 
             </>
@@ -6513,24 +7161,6 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
                         />
                       </label>
 
-                      <label className="notes-settings-field notes-settings-publish-only">
-                        <span>{'\u57fa\u7840\u8def\u5f84'}</span>
-                        <input
-                          value={siteConfigDraft.repository?.basePath ?? '/'}
-                          onChange={(event) => updateRepositoryConfigDraft({ basePath: event.target.value })}
-                          placeholder="/repository/"
-                        />
-                      </label>
-
-                      <label className="notes-settings-field wide notes-settings-publish-only">
-                        <span>{'Pages URL'}</span>
-                        <input
-                          value={siteConfigDraft.repository?.pagesUrl ?? ''}
-                          onChange={(event) => updateRepositoryConfigDraft({ pagesUrl: event.target.value })}
-                          placeholder="https://user.github.io/repo/"
-                        />
-                      </label>
-
                       <div className="notes-settings-site-only notes-settings-service-grid">
                         <section className="notes-settings-integration-card">
                           <header className="notes-settings-integration-head">
@@ -6685,6 +7315,40 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
                               测试连接
                             </>
                           )}
+                        </button>
+                      </div>
+
+                      <div className="notes-settings-publish-actions notes-settings-publish-only">
+                        <button
+                          type="button"
+                          className="notes-settings-secondary"
+                          onClick={openPullRemoteContentDialog}
+                          disabled={
+                            isPullingContent ||
+                            isPublishingSite ||
+                            !siteConfigDraft.repository?.remote.trim() ||
+                            !siteConfigDraft.repository?.branch.trim()
+                          }
+                        >
+                          {isPullingContent ? (
+                            <IconLoader2 className="spinning" aria-hidden="true" />
+                          ) : (
+                            <IconDownload aria-hidden="true" />
+                          )}
+                          拉取远端内容
+                        </button>
+                        <button
+                          type="button"
+                          className="notes-settings-primary"
+                          onClick={openSitePublishDialog}
+                          disabled={isPublishingSite || isPullingContent || isBusy}
+                        >
+                          {isPublishingSite ? (
+                            <IconLoader2 className="spinning" aria-hidden="true" />
+                          ) : (
+                            <IconUpload aria-hidden="true" />
+                          )}
+                          发布站点
                         </button>
                       </div>
 
@@ -6935,6 +7599,124 @@ export default function NotesWorkbench({ onSwitchToNotebook }: NotesWorkbenchPro
                 disabled={isPublishingSite || isBusy || !publishMessage.trim()}
               >
                 {isPublishingSite ? '发布中...' : publishRunState === 'idle' ? '开始发布' : '重新发布'}
+              </button>
+            </footer>
+          </section>
+        </div>
+      ) : null}
+
+      {isPullDialogOpen ? (
+        <div className="notes-dialog-overlay notes-publish-dialog-overlay" onClick={() => setIsPullDialogOpen(false)}>
+          <section
+            className="notes-publish-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="notes-pull-dialog-title"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <header className="notes-publish-dialog-header">
+              <div>
+                <h2 id="notes-pull-dialog-title">同步远端内容</h2>
+                <span>
+                  {siteConfigDraft.repository?.remote.trim() || '尚未配置远程仓库'}
+                  {siteConfigDraft.repository?.branch.trim()
+                    ? ` · ${siteConfigDraft.repository.branch.trim()}`
+                    : ''}
+                </span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsPullDialogOpen(false)}
+                aria-label="关闭同步窗口"
+              >
+                <IconX aria-hidden="true" />
+              </button>
+            </header>
+
+            <div className="notes-publish-dialog-body">
+              <div className="notes-pull-conflict-strategy" aria-label="冲突处理方式">
+                <span>冲突处理</span>
+                <div>
+                  <button
+                    type="button"
+                    className={pullConflictStrategy === 'remote' ? 'active' : ''}
+                    onClick={() => setPullConflictStrategy('remote')}
+                    disabled={isPullingContent}
+                  >
+                    远端优先
+                  </button>
+                  <button
+                    type="button"
+                    className={pullConflictStrategy === 'local' ? 'active' : ''}
+                    onClick={() => setPullConflictStrategy('local')}
+                    disabled={isPullingContent}
+                  >
+                    本地优先
+                  </button>
+                </div>
+                <small>
+                  {pullConflictStrategy === 'remote'
+                    ? '同一路径内容不一致时使用远端版本。'
+                    : '同一路径内容不一致时保留本地版本。'}
+                </small>
+              </div>
+              {pullLogs.length > 0 ? (
+                <section
+                  className={`notes-publish-progress ${pullRunState}`}
+                  aria-live="polite"
+                  aria-label="远端内容同步进度"
+                >
+                  <header className="notes-publish-progress-head">
+                    <strong>
+                      {pullRunState === 'success'
+                        ? '同步完成'
+                        : pullRunState === 'error'
+                          ? '同步失败'
+                          : '正在同步'}
+                    </strong>
+                    <span>{pullProgress}%</span>
+                  </header>
+                  <div
+                    className="notes-publish-progress-track"
+                    role="progressbar"
+                    aria-valuemin={0}
+                    aria-valuemax={100}
+                    aria-valuenow={pullProgress}
+                  >
+                    <span style={{ width: `${pullProgress}%` }} />
+                  </div>
+                  <div className="notes-publish-log" ref={pullLogViewRef}>
+                    {pullLogs.map((entry) => (
+                      <article className={`notes-publish-log-entry ${entry.level}`} key={entry.id}>
+                        <span className="notes-publish-log-dot" aria-hidden="true" />
+                        <time>{entry.receivedAt}</time>
+                        <div>
+                          <strong>{entry.message}</strong>
+                          {entry.detail ? <pre>{entry.detail}</pre> : null}
+                        </div>
+                      </article>
+                    ))}
+                  </div>
+                </section>
+              ) : (
+                <div className="notes-publish-dialog-pending">
+                  <IconDownload aria-hidden="true" />
+                  <span>点击开始后，将合并远端发布分支内容；本地独有内容会保留。</span>
+                </div>
+              )}
+            </div>
+
+            <footer className="notes-publish-dialog-actions">
+              <button type="button" className="secondary" onClick={() => setIsPullDialogOpen(false)}>
+                {isPullingContent ? '后台运行' : '关闭'}
+              </button>
+              <button
+                type="button"
+                className="primary"
+                onClick={() => void pullRemoteContentToLocal()}
+                disabled={isPullingContent || isPublishingSite || isBusy}
+              >
+                {isPullingContent ? '同步中...' : pullRunState === 'idle' ? '开始同步' : '重新同步'}
               </button>
             </footer>
           </section>

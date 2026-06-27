@@ -4,7 +4,8 @@ import { fileURLToPath, URL } from 'node:url';
 
 const pagesBase = process.env.VITE_PAGES_BASE?.trim() || '/';
 const contentRoot = fileURLToPath(new URL('../../content', import.meta.url));
-const contentEntryPattern = /[\\/]content[\\/](?:markdown|inknotes)[\\/][^\\/]+[\\/]index\.md$/i;
+const contentEntryPattern =
+  /[\\/]content[\\/](?:markdown[\\/][^\\/]+[\\/]index\.md|inknotes[\\/][^\\/]+[\\/](?:index\.md|[^\\/]+\.inknote\.json))$/i;
 
 function contentCollectionReloadPlugin(): Plugin {
   return {
@@ -55,6 +56,7 @@ export default defineConfig({
   resolve: {
     alias: {
       '@inknote/content-schema': fileURLToPath(new URL('../../packages/content-schema/src', import.meta.url)),
+      '@inknote/inknote-core': fileURLToPath(new URL('../../packages/inknote-core/src', import.meta.url)),
       '@inknote/site-builder': fileURLToPath(new URL('../../packages/site-builder/src', import.meta.url)),
     },
   },

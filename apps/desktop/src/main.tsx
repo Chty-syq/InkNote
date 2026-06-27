@@ -1,6 +1,6 @@
 import React from 'react';
 import ReactDOM from 'react-dom/client';
-import NotebookApp from './NotebookApp';
+import NotesWorkbench from './NotesWorkbench';
 import './notebook.css';
 
 interface RootErrorBoundaryState {
@@ -44,7 +44,7 @@ class RootErrorBoundary extends React.Component<React.PropsWithChildren, RootErr
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
     <RootErrorBoundary>
-      <NotebookApp />
+      <NotesWorkbench />
     </RootErrorBoundary>
   </React.StrictMode>,
 );

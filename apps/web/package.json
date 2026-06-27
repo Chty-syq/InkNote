@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "@inknote/content-schema": "file:../../packages/content-schema",
+    "@inknote/inknote-core": "file:../../packages/inknote-core",
     "@inknote/site-builder": "file:../../packages/site-builder",
     "@tabler/icons-react": "^3.44.0",
     "react": "^19.1.0",
