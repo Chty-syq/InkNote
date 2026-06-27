@@ -203,7 +203,7 @@ const PASTED_IMAGE_EXTENSIONS: Record<string, string> = {
 };
 const USER_GALLERY_MANIFEST_PUBLIC_PATH = '/card-images/gallery/manifest.json';
 const USER_GALLERY_UPLOADS_PUBLIC_PREFIX = '/card-images/gallery/uploads/';
-const IMAGE_MANAGEMENT_PAGE_SIZE = 10;
+const IMAGE_MANAGEMENT_PAGE_SIZE = 15;
 const GALLERY_IMAGE_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'webp', 'gif']);
 const SLIDES_FILE_EXTENSIONS = new Set(['ppt', 'pptx', 'pdf']);
 const TABLER_ICON_OVERRIDES = `
@@ -285,6 +285,11 @@ interface GalleryImageManifest {
   updatedAt: string;
   count: number;
   images: GalleryImageItem[];
+}
+
+interface ImagePreviewState {
+  src: string;
+  title: string;
 }
 
 interface ImagePageData<T> {
@@ -692,12 +697,15 @@ function collectManagedImages(items: ContentLibraryItem[], draft: ContentDraft |
 function ManagedImageCard({
   asset,
   localizationStatus,
+  onPreview,
 }: {
   asset: ManagedImageAsset;
   localizationStatus?: ImageLocalizationStatus;
+  onPreview?: (preview: ImagePreviewState) => void;
 }) {
   const [failed, setFailed] = useState(false);
   const previewSource = getManagedImagePreviewSource(asset.source);
+  const title = asset.alt || getFileNameFromPath(asset.source) || '图片';
 
   useEffect(() => {
     setFailed(false);
@@ -705,7 +713,23 @@ function ManagedImageCard({
 
   return (
     <article className="notes-settings-image-card">
-      <div className="notes-settings-image-preview">
+      <div
+        className="notes-settings-image-preview"
+        role={previewSource ? 'button' : undefined}
+        tabIndex={previewSource ? 0 : undefined}
+        title={previewSource ? '点击放大预览' : undefined}
+        onClick={previewSource ? () => onPreview?.({ src: previewSource, title }) : undefined}
+        onKeyDown={
+          previewSource
+            ? (event) => {
+                if (event.key === 'Enter' || event.key === ' ') {
+                  event.preventDefault();
+                  onPreview?.({ src: previewSource, title });
+                }
+              }
+            : undefined
+        }
+      >
         {previewSource && !failed ? (
           <img
             src={previewSource}
@@ -749,9 +773,7 @@ function ManagedImageCard({
         ) : null}
       </div>
       <div className="notes-settings-image-copy">
-        <strong title={asset.alt || asset.source}>{asset.alt || '无标题'}</strong>
-        <span title={asset.source}>{asset.source}</span>
-        <small>{asset.usages.length} 篇笔记 · {asset.occurrences} 处引用</small>
+        <strong title={title}>{title}</strong>
       </div>
     </article>
   );
@@ -762,14 +784,17 @@ function GalleryImageCard({
   selected,
   selectable,
   onToggle,
+  onPreview,
 }: {
   image: GalleryImageItem;
   selected: boolean;
   selectable: boolean;
   onToggle: () => void;
+  onPreview?: (preview: ImagePreviewState) => void;
 }) {
   const [failed, setFailed] = useState(false);
   const previewSource = getGalleryImagePreviewSource(image.path);
+  const title = image.name || getFileNameFromPath(image.path) || '图库图片';
 
   useEffect(() => {
     setFailed(false);
@@ -794,7 +819,23 @@ function GalleryImageCard({
           : undefined
       }
     >
-      <div className="notes-settings-image-preview">
+      <div
+        className="notes-settings-image-preview"
+        role={!selectable && previewSource ? 'button' : undefined}
+        tabIndex={!selectable && previewSource ? 0 : undefined}
+        title={!selectable && previewSource ? '点击放大预览' : undefined}
+        onClick={!selectable && previewSource ? () => onPreview?.({ src: previewSource, title }) : undefined}
+        onKeyDown={
+          !selectable && previewSource
+            ? (event) => {
+                if (event.key === 'Enter' || event.key === ' ') {
+                  event.preventDefault();
+                  onPreview?.({ src: previewSource, title });
+                }
+              }
+            : undefined
+        }
+      >
         {previewSource && !failed ? (
           <img
             src={previewSource}
@@ -823,8 +864,7 @@ function GalleryImageCard({
         <span className="notes-settings-image-kind gallery">图库</span>
       </div>
       <div className="notes-settings-image-copy">
-        <strong title={image.name}>{image.name || 'Untitled'}</strong>
-        <span title={image.path}>{image.path}</span>
+        <strong title={title}>{title}</strong>
       </div>
     </article>
   );
@@ -1578,6 +1618,7 @@ export default function NotesWorkbench() {
   const [isGalleryLoading, setIsGalleryLoading] = useState(false);
   const [isUploadingGalleryImages, setIsUploadingGalleryImages] = useState(false);
   const [isDeletingGalleryImages, setIsDeletingGalleryImages] = useState(false);
+  const [imagePreview, setImagePreview] = useState<ImagePreviewState | null>(null);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [settingsSection, setSettingsSection] = useState<SettingsSection>('basic');
   const [categoryDialog, setCategoryDialog] = useState<CategoryDialogState | null>(null);
@@ -5371,6 +5412,35 @@ export default function NotesWorkbench() {
     setSelectedGalleryImageKeys((current) => Array.from(new Set([...current, ...pageKeys])));
   };
 
+  const reassignGalleryCardImages = async () => {
+    if (!isTauri() || !libraryRoot) {
+      setStatus('图库分配需要在 Tauri 桌面端中执行。');
+      return;
+    }
+
+    if (galleryImages.length === 0) {
+      setStatus('图库为空，无法分配文章配图。');
+      return;
+    }
+
+    setIsBusy(true);
+    try {
+      const nextImages = [...galleryImages];
+      for (let index = nextImages.length - 1; index > 0; index -= 1) {
+        const targetIndex = Math.floor(Math.random() * (index + 1));
+        [nextImages[index], nextImages[targetIndex]] = [nextImages[targetIndex], nextImages[index]];
+      }
+
+      await writeUserGalleryManifest(nextImages);
+      setGalleryPage(1);
+      setStatus('已重新分配文章配图，发布站点后生效。');
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : '重新分配文章配图失败。');
+    } finally {
+      setIsBusy(false);
+    }
+  };
+
   const deleteSelectedGalleryImages = async () => {
     if (!isTauri() || !libraryRoot) {
       setStatus('图库删除需要在 Tauri 桌面端中执行。');
@@ -6647,6 +6717,9 @@ export default function NotesWorkbench() {
               <div className="notes-settings-content">
                 {settingsSection === 'basic' ? (
                   <section className="notes-settings-section notes-settings-basic-categories">
+                    <div className="notes-settings-inline-heading">
+                      <span>{'\u7c7b\u76ee'}</span>
+                    </div>
                     <div className="notes-settings-category-list">
                       {categoryCounts.length > 0 ? (
                         categoryCounts.map((category, index) => (
@@ -6945,6 +7018,7 @@ export default function NotesWorkbench() {
                                     key={asset.source}
                                     asset={asset}
                                     localizationStatus={imageLocalizationStatus[asset.source]}
+                                    onPreview={setImagePreview}
                                   />
                                 ))}
                               </div>
@@ -6970,7 +7044,7 @@ export default function NotesWorkbench() {
                             <>
                               <div className="notes-settings-image-grid">
                                 {internalImagePageData.items.map((asset) => (
-                                  <ManagedImageCard key={asset.source} asset={asset} />
+                                  <ManagedImageCard key={asset.source} asset={asset} onPreview={setImagePreview} />
                                 ))}
                               </div>
                               <ImagePagination
@@ -7001,6 +7075,15 @@ export default function NotesWorkbench() {
                               >
                                 <IconCheck aria-hidden="true" />
                                 <span>多选</span>
+                              </button>
+                              <button
+                                type="button"
+                                className="notes-settings-secondary notes-settings-image-localize"
+                                onClick={() => void reassignGalleryCardImages()}
+                                disabled={isGalleryLoading || isBusy || galleryImages.length === 0}
+                              >
+                                <IconRefresh aria-hidden="true" />
+                                <span>分配</span>
                               </button>
                             </div>
                             <button
@@ -7072,6 +7155,7 @@ export default function NotesWorkbench() {
                                     selectable={isGalleryMultiSelectMode}
                                     selected={selectedGalleryImageSet.has(getGalleryImageKey(image))}
                                     onToggle={() => toggleGalleryImageSelection(image)}
+                                    onPreview={setImagePreview}
                                   />
                                 ))}
                               </div>
@@ -7426,23 +7510,6 @@ export default function NotesWorkbench() {
                           </span>
                           <div>
                             <strong>{desktopUpdateMessage}</strong>
-                            {latestDesktopRelease || desktopUpdateDetail ? (
-                              <small>
-                                {[
-                                  latestDesktopRelease
-                                    ? [
-                                        latestDesktopRelease.name,
-                                        formatDesktopReleaseDate(latestDesktopRelease.publishedAt),
-                                      ]
-                                        .filter(Boolean)
-                                        .join(' \u00b7 ')
-                                    : '',
-                                  desktopUpdateDetail,
-                                ]
-                                  .filter(Boolean)
-                                  .join(' \u00b7 ')}
-                              </small>
-                            ) : null}
                           </div>
                           {desktopUpdateState === 'available' &&
                           latestDesktopRelease &&
@@ -7730,6 +7797,29 @@ export default function NotesWorkbench() {
               </button>
             </footer>
           </section>
+        </div>
+      ) : null}
+
+      {imagePreview ? (
+        <div className="notes-image-preview-overlay" onClick={() => setImagePreview(null)}>
+          <div
+            className="notes-image-preview-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-label="图片预览"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <button
+              type="button"
+              className="notes-image-preview-close"
+              onClick={() => setImagePreview(null)}
+              aria-label="关闭图片预览"
+            >
+              <IconX aria-hidden="true" />
+            </button>
+            <img src={imagePreview.src} alt={imagePreview.title} onClick={(event) => event.stopPropagation()} />
+            <span>{imagePreview.title}</span>
+          </div>
         </div>
       ) : null}
 
