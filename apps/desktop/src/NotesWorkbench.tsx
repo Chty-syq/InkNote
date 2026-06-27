@@ -47,7 +47,7 @@ import {
   IconWriting,
   IconX,
 } from '@tabler/icons-react';
-import { invoke } from '@tauri-apps/api/core';
+import { convertFileSrc, invoke } from '@tauri-apps/api/core';
 import { relaunch } from '@tauri-apps/plugin-process';
 import { Update } from '@tauri-apps/plugin-updater';
 import type { DownloadEvent } from '@tauri-apps/plugin-updater';
@@ -204,6 +204,7 @@ const PASTED_IMAGE_EXTENSIONS: Record<string, string> = {
 };
 const USER_GALLERY_MANIFEST_PUBLIC_PATH = '/card-images/gallery/manifest.json';
 const USER_GALLERY_UPLOADS_PUBLIC_PREFIX = '/card-images/gallery/uploads/';
+const LOCAL_PUBLIC_ASSET_PREFIXES = ['/content-images/', '/content-slides/', '/card-images/', '/generated/'];
 const IMAGE_MANAGEMENT_PAGE_SIZE = 15;
 const GALLERY_IMAGE_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'webp', 'gif']);
 const SLIDES_FILE_EXTENSIONS = new Set(['ppt', 'pptx', 'pdf']);
@@ -433,6 +434,47 @@ function getUserGalleryUploadPath(contentRoot: string, fileName: string): string
   return getProjectPath(contentRoot, ['apps', 'web', 'public', 'card-images', 'gallery', 'uploads', fileName]);
 }
 
+function getPublicAssetFilePath(contentRoot: string | null, publicPath: string): string | null {
+  if (!contentRoot) {
+    return null;
+  }
+  const normalized = publicPath.trim();
+  if (
+    !normalized.startsWith('/') ||
+    normalized.includes('\\') ||
+    normalized.split('/').some((segment) => segment === '..')
+  ) {
+    return null;
+  }
+  const allowed =
+    LOCAL_PUBLIC_ASSET_PREFIXES.some((prefix) => normalized.startsWith(prefix)) ||
+    normalized === '/blog-avatar.jpg' ||
+    normalized === '/blog-header-bg.png';
+  if (!allowed) {
+    return null;
+  }
+
+  return getProjectPath(contentRoot, ['apps', 'web', 'public', ...normalized.split('/').filter(Boolean)]);
+}
+
+function getDesktopPublicAssetSource(contentRoot: string | null, source: string): string {
+  const trimmed = source.trim();
+  if (!trimmed) {
+    return '';
+  }
+  if (/^https?:\/\//i.test(trimmed) || /^(?:data:|blob:)/i.test(trimmed)) {
+    return trimmed;
+  }
+  const filePath = getPublicAssetFilePath(contentRoot, trimmed);
+  if (filePath && isTauri()) {
+    return convertFileSrc(filePath);
+  }
+  if (trimmed.startsWith('/')) {
+    return `${LOCAL_BLOG_PREVIEW_ORIGIN}${trimmed}`;
+  }
+  return '';
+}
+
 function getImageFileExtension(path: string): string | null {
   const extension = getFileNameFromPath(path).match(/\.([a-z0-9]+)$/i)?.[1]?.toLowerCase() ?? '';
   return GALLERY_IMAGE_EXTENSIONS.has(extension) ? extension : null;
@@ -476,11 +518,8 @@ function normalizeGalleryManifest(value: unknown): GalleryImageManifest {
   };
 }
 
-function getGalleryImagePreviewSource(path: string): string {
-  const trimmed = path.trim();
-  if (!trimmed) return '';
-  if (/^https?:\/\//i.test(trimmed)) return trimmed;
-  return `${LOCAL_BLOG_PREVIEW_ORIGIN}${trimmed.startsWith('/') ? trimmed : `/${trimmed}`}`;
+function getGalleryImagePreviewSource(path: string, contentRoot: string | null): string {
+  return getDesktopPublicAssetSource(contentRoot, path);
 }
 
 function getGalleryImageKey(image: GalleryImageItem): string {
@@ -554,17 +593,19 @@ async function checkTauriDesktopUpdate(): Promise<Update | null> {
   return new Update(metadata);
 }
 
-function resolveDesktopContentImages(markdown: string): string {
-  const imagePrefix = `${LOCAL_BLOG_PREVIEW_ORIGIN}/content-images/`;
-  const slidesPrefix = `${LOCAL_BLOG_PREVIEW_ORIGIN}/content-slides/`;
-
+function resolveDesktopContentImages(markdown: string, contentRoot: string | null): string {
   return markdown
-    .replace(/(\]\(\s*)\/content-images\//g, `$1${imagePrefix}`)
-    .replace(/(\bsrc\s*=\s*["'])\/content-images\//gi, `$1${imagePrefix}`)
-    .replace(/(\]\(\s*)\/content-slides\//g, `$1${slidesPrefix}`)
-    .replace(/(\bsrc\s*=\s*["'])\/content-slides\//gi, `$1${slidesPrefix}`)
-    .replace(/(\boriginal\s*=\s*["'])\/content-slides\//gi, `$1${slidesPrefix}`)
-    .replace(/(\bhref\s*=\s*["'])\/content-slides\//gi, `$1${slidesPrefix}`);
+    .replace(/(\]\(\s*)(\/(?:content-images|content-slides|card-images|generated)\/[^\s)\r\n]+)/g, (_match, prefix, source) => {
+      const resolved = getDesktopPublicAssetSource(contentRoot, source);
+      return resolved ? `${prefix}${resolved}` : `${prefix}${source}`;
+    })
+    .replace(
+      /(\b(?:src|original|href)\s*=\s*["'])(\/(?:content-images|content-slides|card-images|generated)\/[^"']+)/gi,
+      (_match, prefix, source) => {
+        const resolved = getDesktopPublicAssetSource(contentRoot, source);
+        return resolved ? `${prefix}${resolved}` : `${prefix}${source}`;
+      },
+    );
 }
 
 function parseImageReferences(markdown: string): ParsedImageReference[] {
@@ -621,15 +662,8 @@ function isExternalImageSource(source: string): boolean {
   return /^https?:\/\//i.test(source.trim());
 }
 
-function getManagedImagePreviewSource(source: string): string {
-  const trimmed = source.trim();
-  if (isExternalImageSource(trimmed) || /^(?:data:|blob:)/i.test(trimmed)) {
-    return trimmed;
-  }
-  if (trimmed.startsWith('/')) {
-    return `${LOCAL_BLOG_PREVIEW_ORIGIN}${trimmed}`;
-  }
-  return '';
+function getManagedImagePreviewSource(source: string, contentRoot: string | null): string {
+  return getDesktopPublicAssetSource(contentRoot, source);
 }
 
 function collectManagedImages(items: ContentLibraryItem[], draft: ContentDraft | null): ManagedImageAsset[] {
@@ -697,15 +731,17 @@ function collectManagedImages(items: ContentLibraryItem[], draft: ContentDraft |
 
 function ManagedImageCard({
   asset,
+  contentRoot,
   localizationStatus,
   onPreview,
 }: {
   asset: ManagedImageAsset;
+  contentRoot: string | null;
   localizationStatus?: ImageLocalizationStatus;
   onPreview?: (preview: ImagePreviewState) => void;
 }) {
   const [failed, setFailed] = useState(false);
-  const previewSource = getManagedImagePreviewSource(asset.source);
+  const previewSource = getManagedImagePreviewSource(asset.source, contentRoot);
   const title = asset.alt || getFileNameFromPath(asset.source) || '图片';
 
   useEffect(() => {
@@ -782,19 +818,21 @@ function ManagedImageCard({
 
 function GalleryImageCard({
   image,
+  contentRoot,
   selected,
   selectable,
   onToggle,
   onPreview,
 }: {
   image: GalleryImageItem;
+  contentRoot: string | null;
   selected: boolean;
   selectable: boolean;
   onToggle: () => void;
   onPreview?: (preview: ImagePreviewState) => void;
 }) {
   const [failed, setFailed] = useState(false);
-  const previewSource = getGalleryImagePreviewSource(image.path);
+  const previewSource = getGalleryImagePreviewSource(image.path, contentRoot);
   const title = image.name || getFileNameFromPath(image.path) || '图库图片';
 
   useEffect(() => {
@@ -2088,8 +2126,8 @@ export default function NotesWorkbench() {
   const previewBody = draft?.body ?? '';
   const deferredPreviewBody = useDeferredValue(previewRenderBody);
   const renderedPreview = useMemo(
-    () => <MarkdownPreview markdown={resolveDesktopContentImages(deferredPreviewBody)} />,
-    [deferredPreviewBody],
+    () => <MarkdownPreview markdown={resolveDesktopContentImages(deferredPreviewBody, libraryRoot)} />,
+    [deferredPreviewBody, libraryRoot],
   );
 
   useEffect(() => {
@@ -2407,7 +2445,7 @@ export default function NotesWorkbench() {
           return;
         } catch (error) {
           const detail = error instanceof Error ? error.message : String(error);
-          await checkGitHubReleaseUpdates(detail ? '\u5c06\u4f7f\u7528 GitHub Release \u68c0\u67e5\u66f4\u65b0\u3002' : '');
+          await checkGitHubReleaseUpdates(detail ? `\u81ea\u52a8\u66f4\u65b0\u4e0d\u53ef\u7528\uff1a${detail}` : '');
           return;
         }
       }
@@ -7225,6 +7263,7 @@ export default function NotesWorkbench() {
                                   <ManagedImageCard
                                     key={asset.source}
                                     asset={asset}
+                                    contentRoot={libraryRoot}
                                     localizationStatus={imageLocalizationStatus[asset.source]}
                                     onPreview={setImagePreview}
                                   />
@@ -7252,7 +7291,12 @@ export default function NotesWorkbench() {
                             <>
                               <div className="notes-settings-image-grid">
                                 {internalImagePageData.items.map((asset) => (
-                                  <ManagedImageCard key={asset.source} asset={asset} onPreview={setImagePreview} />
+                                  <ManagedImageCard
+                                    key={asset.source}
+                                    asset={asset}
+                                    contentRoot={libraryRoot}
+                                    onPreview={setImagePreview}
+                                  />
                                 ))}
                               </div>
                               <ImagePagination
@@ -7360,6 +7404,7 @@ export default function NotesWorkbench() {
                                   <GalleryImageCard
                                     key={getGalleryImageKey(image)}
                                     image={image}
+                                    contentRoot={libraryRoot}
                                     selectable={isGalleryMultiSelectMode}
                                     selected={selectedGalleryImageSet.has(getGalleryImageKey(image))}
                                     onToggle={() => toggleGalleryImageSelection(image)}
@@ -7410,6 +7455,7 @@ export default function NotesWorkbench() {
                                 <ManagedImageCard
                                   key={asset.source}
                                   asset={asset}
+                                  contentRoot={libraryRoot}
                                   localizationStatus={imageLocalizationStatus[asset.source]}
                                 />
                               ))}
@@ -7427,7 +7473,7 @@ export default function NotesWorkbench() {
                           {internalManagedImages.length > 0 ? (
                             <div className="notes-settings-image-grid">
                               {internalManagedImages.map((asset) => (
-                                <ManagedImageCard key={asset.source} asset={asset} />
+                                <ManagedImageCard key={asset.source} asset={asset} contentRoot={libraryRoot} />
                               ))}
                             </div>
                           ) : (
