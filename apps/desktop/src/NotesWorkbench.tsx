@@ -5071,18 +5071,19 @@ export default function NotesWorkbench() {
       }
     }
 
-    const url = `${LOCAL_BLOG_PREVIEW_ORIGIN}${path}`;
-
     try {
       const server = await ensureBlogPreviewServer();
       if (!server.ready) {
         throw new Error(server.message || '\u672c\u5730\u535a\u5ba2\u670d\u52a1\u5c1a\u672a\u5c31\u7eea\u3002');
       }
 
+      const origin = server.origin || LOCAL_BLOG_PREVIEW_ORIGIN;
+      const url = `${origin}${path}`;
       await openExternalUrl(url);
       setStatus(`\u5df2\u6253\u5f00\u672c\u5730\u535a\u5ba2\u9884\u89c8\uff1a${url}`);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      const url = `${LOCAL_BLOG_PREVIEW_ORIGIN}${path}`;
       setStatus(`\u65e0\u6cd5\u6253\u5f00\u672c\u5730\u535a\u5ba2\u9884\u89c8\uff1a${url}\uff08${message}\uff09`);
       return;
     }

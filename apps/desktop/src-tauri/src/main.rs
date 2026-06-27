@@ -27,6 +27,7 @@ const BLOG_PREVIEW_PORT: u16 = 4321;
 const BLOG_PREVIEW_ORIGIN: &str = "http://localhost:4321";
 const BLOG_PREVIEW_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
 const BLOG_PREVIEW_WAIT_STEP: Duration = Duration::from_millis(100);
+const BLOG_PREVIEW_HTTP_TIMEOUT: Duration = Duration::from_millis(800);
 
 static WORKSPACE_ROOT: OnceLock<PathBuf> = OnceLock::new();
 static CONTENT_ROOT: OnceLock<PathBuf> = OnceLock::new();
@@ -202,21 +203,8 @@ struct BlogPreviewServer {
 impl BlogPreviewServer {
     fn stop(&self) {
         if let Ok(mut child_guard) = self.child.lock() {
-            if let Some(mut child) = child_guard.take() {
-                #[cfg(target_os = "windows")]
-                {
-                    let _ = Command::new("taskkill")
-                        .args(["/PID", &child.id().to_string(), "/T", "/F"])
-                        .stdin(Stdio::null())
-                        .stdout(Stdio::null())
-                        .stderr(Stdio::null())
-                        .status();
-                }
-
-                #[cfg(not(target_os = "windows"))]
-                let _ = child.kill();
-
-                let _ = child.wait();
+            if let Some(child) = child_guard.take() {
+                terminate_blog_preview_child(child);
             }
         }
     }
@@ -227,6 +215,23 @@ impl BlogPreviewServer {
             .ok()
             .is_some_and(|server| server.is_some())
     }
+}
+
+fn terminate_blog_preview_child(mut child: Child) {
+    #[cfg(target_os = "windows")]
+    {
+        let _ = Command::new("taskkill")
+            .args(["/PID", &child.id().to_string(), "/T", "/F"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    let _ = child.kill();
+
+    let _ = child.wait();
 }
 
 #[tauri::command]
@@ -1388,38 +1393,54 @@ fn ensure_blog_preview_server_state(
         ));
     }
 
-    let mut child_guard = server
-        .child
-        .lock()
-        .map_err(|_| "failed to lock local blog preview server state".to_string())?;
+    let has_running_child = {
+        let mut child_guard = server
+            .child
+            .lock()
+            .map_err(|_| "failed to lock local blog preview server state".to_string())?;
 
-    if let Some(child) = child_guard.as_mut() {
-        match child.try_wait() {
-            Ok(None) => {
-                drop(child_guard);
-                let ready = wait_for_blog_preview_server(wait_for_ready);
-                return Ok(create_blog_preview_server_status(
-                    false,
-                    ready,
-                    if ready {
-                        "Local blog preview server is ready."
-                    } else {
-                        "Local blog preview server is starting."
-                    },
-                ));
+        if let Some(child) = child_guard.as_mut() {
+            match child.try_wait() {
+                Ok(None) => true,
+                Ok(Some(_)) => {
+                    *child_guard = None;
+                    false
+                }
+                Err(error) => {
+                    return Err(format!(
+                        "failed to inspect local blog preview server: {error}"
+                    ));
+                }
             }
-            Ok(Some(_)) => {
-                *child_guard = None;
-            }
-            Err(error) => {
-                return Err(format!(
-                    "failed to inspect local blog preview server: {error}"
-                ));
-            }
+        } else {
+            false
+        }
+    };
+
+    if has_running_child {
+        let ready = wait_for_blog_preview_server(wait_for_ready);
+        if ready {
+            return Ok(create_blog_preview_server_status(
+                false,
+                true,
+                "Local blog preview server is ready.",
+            ));
+        }
+
+        let mut child_guard = server
+            .child
+            .lock()
+            .map_err(|_| "failed to lock local blog preview server state".to_string())?;
+        if let Some(child) = child_guard.take() {
+            terminate_blog_preview_child(child);
         }
     }
 
     if can_start_npm_preview_server() {
+        let mut child_guard = server
+            .child
+            .lock()
+            .map_err(|_| "failed to lock local blog preview server state".to_string())?;
         match spawn_blog_preview_server() {
             Ok(child) => {
                 *child_guard = Some(child);
@@ -1433,13 +1454,19 @@ fn ensure_blog_preview_server_state(
                         "Local blog preview server has started.",
                     ));
                 }
+
+                let mut child_guard = server
+                    .child
+                    .lock()
+                    .map_err(|_| "failed to lock local blog preview server state".to_string())?;
+                if let Some(child) = child_guard.take() {
+                    terminate_blog_preview_child(child);
+                }
             }
             Err(error) => {
                 eprintln!("failed to start npm blog preview server, using static preview: {error}");
             }
         }
-    } else {
-        drop(child_guard);
     }
 
     if !server.has_static_server() {
@@ -1517,7 +1544,9 @@ fn spawn_static_blog_preview_server() -> Result<JoinHandle<()>, String> {
     let handle = thread::spawn(move || {
         for stream in listener.incoming() {
             match stream {
-                Ok(stream) => handle_static_blog_preview_connection(stream),
+                Ok(stream) => {
+                    thread::spawn(move || handle_static_blog_preview_connection(stream));
+                }
                 Err(error) => eprintln!("failed to accept local blog preview request: {error}"),
             }
         }
@@ -1526,6 +1555,9 @@ fn spawn_static_blog_preview_server() -> Result<JoinHandle<()>, String> {
 }
 
 fn handle_static_blog_preview_connection(mut stream: TcpStream) {
+    let _ = stream.set_read_timeout(Some(BLOG_PREVIEW_HTTP_TIMEOUT));
+    let _ = stream.set_write_timeout(Some(BLOG_PREVIEW_HTTP_TIMEOUT));
+
     let mut buffer = [0_u8; 8192];
     let bytes_read = match stream.read(&mut buffer) {
         Ok(bytes_read) => bytes_read,
@@ -1740,9 +1772,29 @@ fn is_blog_preview_server_ready() -> bool {
         SocketAddr::from(([0, 0, 0, 0, 0, 0, 0, 1], BLOG_PREVIEW_PORT)),
     ];
 
-    addresses
-        .iter()
-        .any(|address| TcpStream::connect_timeout(address, Duration::from_millis(120)).is_ok())
+    addresses.iter().any(probe_blog_preview_server)
+}
+
+fn probe_blog_preview_server(address: &SocketAddr) -> bool {
+    let Ok(mut stream) = TcpStream::connect_timeout(address, Duration::from_millis(120)) else {
+        return false;
+    };
+    let _ = stream.set_read_timeout(Some(BLOG_PREVIEW_HTTP_TIMEOUT));
+    let _ = stream.set_write_timeout(Some(BLOG_PREVIEW_HTTP_TIMEOUT));
+
+    let request = b"HEAD / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+    if stream.write_all(request).is_err() || stream.flush().is_err() {
+        return false;
+    }
+
+    let mut buffer = [0_u8; 96];
+    match stream.read(&mut buffer) {
+        Ok(bytes_read) if bytes_read > 0 => {
+            let response = &buffer[..bytes_read];
+            response.starts_with(b"HTTP/1.1 200") || response.starts_with(b"HTTP/1.0 200")
+        }
+        _ => false,
+    }
 }
 
 struct TemporaryPublishDirectory {
@@ -2439,6 +2491,10 @@ fn run_git_in_with_ssh(
     if let Some(ssh_command) = ssh_command {
         command.env("GIT_SSH_COMMAND", ssh_command);
     }
+
+    #[cfg(target_os = "windows")]
+    command.creation_flags(CREATE_NO_WINDOW);
+
     let output = command
         .output()
         .map_err(|error| format!("failed to run git {:?}: {error}", args))?;
