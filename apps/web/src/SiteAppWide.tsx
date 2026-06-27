@@ -540,6 +540,18 @@ function getGoatCounterLookupPaths(path: string): string[] {
   return [...new Set(paths)];
 }
 
+function canReadGoatCounterPublicCounts(config: ResolvedGoatCounterConfig): boolean {
+  if (typeof window === 'undefined') {
+    return false;
+  }
+
+  try {
+    return new URL(config.baseUrl).origin === window.location.origin;
+  } catch {
+    return false;
+  }
+}
+
 function getGoatCounterDisplayCount(config: ResolvedGoatCounterConfig, path: string): string | undefined {
   const cacheKey = getGoatCounterCacheKey(config.baseUrl, path);
   const cachedCount = goatCounterCountCache.get(cacheKey);
@@ -1055,6 +1067,14 @@ function useGoatCounterCountsForPaths(paths: string[]): Record<string, string> {
       return next;
     });
 
+    // GoatCounter's public counter endpoint is cross-origin on GitHub Pages and
+    // does not expose permissive CORS headers, so the browser cannot read it
+    // directly. In that case we still keep optimistic in-session counts and
+    // avoid noisy console errors.
+    if (!canReadGoatCounterPublicCounts(ACTIVE_GOATCOUNTER_CONFIG)) {
+      return;
+    }
+
     if (missingPaths.length === 0) {
       return;
     }
@@ -1066,8 +1086,7 @@ function useGoatCounterCountsForPaths(paths: string[]): Record<string, string> {
         try {
           const count = await fetchGoatCounterCount(ACTIVE_GOATCOUNTER_CONFIG, path);
           return [path, count] as const;
-        } catch (error) {
-          console.warn('GoatCounter count fetch failed', path, error);
+        } catch {
           return null;
         }
       }),

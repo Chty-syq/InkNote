@@ -2352,10 +2352,7 @@ export default function NotesWorkbench() {
             return;
           }
 
-          setLatestDesktopRelease(null);
-          setDesktopUpdateState('latest');
-          setDesktopUpdateMessage(`\u5df2\u662f\u6700\u65b0\u7248\u672c v${desktopVersion}`);
-          setDesktopUpdateDetail('');
+          await checkGitHubReleaseUpdates('\u81ea\u52a8\u66f4\u65b0\u6682\u672a\u8fd4\u56de\u53ef\u5b89\u88c5\u7248\u672c\u3002');
           return;
         } catch (error) {
           const detail = error instanceof Error ? error.message : String(error);
@@ -2581,6 +2578,19 @@ export default function NotesWorkbench() {
         });
         return;
       }
+
+      const normalizedLibraryRoot = libraryRoot.replace(/[\\/]+$/, '');
+      const siteConfigDisplayPath = normalizedLibraryRoot
+        ? `${normalizedLibraryRoot}/site/site.config.json`
+        : 'site/site.config.json';
+      recordProgress({
+        taskId,
+        progress: 12,
+        stage: 'config',
+        message: '已确认本次发布使用的内容库',
+        detail: `内容库：${libraryRoot}\n配置：${siteConfigDisplayPath}\n标题：${savedConfig.title}`,
+        level: 'success',
+      });
 
       const repository = savedConfig.repository;
       const remote = repository?.remote.trim() ?? '';

@@ -67,7 +67,7 @@
   ],
   "repository": {
     "remote": "git@github.com:Chty-syq/inknote-web.git",
-    "branch": "gh-pages",
+    "branch": "gh-page",
     "pagesUrl": "https://chty-syq.github.io/inknote-web/",
     "basePath": "/inknote-web/"
   },

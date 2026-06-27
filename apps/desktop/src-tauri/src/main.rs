@@ -782,6 +782,44 @@ fn publish_content_changes_inner(
     }
 
     let base_path = normalize_pages_base(&request.base_path)?;
+    if can_rebuild_web_shell_from_workspace() {
+        reporter.emit(
+            14,
+            "shell",
+            "正在重建 Web 前端外壳",
+            "检测到源码工作区，发布前会自动执行 npm run web:build。",
+            "info",
+        );
+        let rebuild_result = rebuild_web_shell_from_workspace()?;
+        if !rebuild_result.success {
+            return Err(format!(
+                "failed to rebuild web shell before publishing:\n{}",
+                format_git_result(&rebuild_result)
+            ));
+        }
+        reporter.emit(
+            16,
+            "shell",
+            "Web 前端外壳重建完成",
+            format_git_result(&rebuild_result),
+            "success",
+        );
+    } else {
+        reporter.emit(
+            14,
+            "shell",
+            "本次发布使用现有 Web 外壳",
+            "未检测到可重建的源码工作区；若修改了 apps/web/src，请先构建新版桌面应用或在源码仓库中发布。",
+            "info",
+        );
+    }
+    reporter.emit(
+        17,
+        "shell",
+        "已确认 Web 外壳来源",
+        get_web_shell_root()?.display().to_string(),
+        "info",
+    );
     reporter.emit(
         18,
         "build",
@@ -790,6 +828,9 @@ fn publish_content_changes_inner(
         "info",
     );
     let artifact = create_runtime_web_artifact(&base_path)?;
+    if let Ok(summary) = summarize_runtime_manifest(artifact.path()) {
+        reporter.emit(24, "build", "已生成运行时内容清单", summary, "success");
+    }
     reporter.emit(
         30,
         "build",
@@ -967,6 +1008,9 @@ fn publish_built_site(
 
     let staged = run_git_in(publish_root, &["diff", "--cached", "--quiet"])?;
     if staged.success {
+        let manifest_summary = summarize_runtime_manifest(publish_root)
+            .unwrap_or_else(|error| format!("无法读取当前发布清单：{error}"));
+        reporter.emit(94, "complete", "本次发布清单摘要", manifest_summary, "info");
         reporter.emit(
             96,
             "complete",
@@ -993,6 +1037,10 @@ fn publish_built_site(
         format_git_result(&committed),
         "success",
     );
+
+    if let Ok(summary) = summarize_runtime_manifest(publish_root) {
+        reporter.emit(86, "commit", "本次发布清单摘要", summary, "info");
+    }
 
     let refspec = format!("HEAD:{remote_ref}");
     reporter.emit(
@@ -1034,9 +1082,43 @@ fn publish_built_site(
         run_git_in(publish_root, &["rev-parse", "HEAD"])?,
         "read deployment commit",
     )?;
+    let deployed_commit = commit.stdout.trim().to_string();
+    let remote_status_after_push =
+        get_publish_status_with_ssh(remote.to_string(), branch.to_string(), ssh_key_path)?;
+    let remote_commit_after_push = remote_status_after_push.remote_commit.trim().to_string();
+    let remote_matches_local = !remote_commit_after_push.is_empty()
+        && short_commit(&remote_commit_after_push) == short_commit(&deployed_commit);
+    reporter.emit(
+        98,
+        "verify",
+        if remote_matches_local {
+            "远端分支校验通过"
+        } else {
+            "远端分支校验异常"
+        },
+        format!(
+            "本地：{}\n远端：{}\n分支：{}",
+            short_commit(&deployed_commit),
+            if remote_commit_after_push.is_empty() {
+                "(empty)"
+            } else {
+                short_commit(&remote_commit_after_push)
+            },
+            branch
+        ),
+        if remote_matches_local { "success" } else { "warning" },
+    );
     Ok(GitCommandResult {
         success: push_result.success,
-        stdout: format!("已发布到 {branch}，版本 {}。", short_commit(&commit.stdout)),
+        stdout: format!(
+            "已发布到 {branch}，本地版本 {}，远端版本 {}。",
+            short_commit(&deployed_commit),
+            if remote_commit_after_push.is_empty() {
+                "(empty)"
+            } else {
+                short_commit(&remote_commit_after_push)
+            }
+        ),
         stderr: push_result.stderr,
     })
 }
@@ -1433,9 +1515,46 @@ fn normalize_pages_base(value: &str) -> Result<String, String> {
     Ok(format!("/{}/", trimmed.trim_matches('/')))
 }
 
+fn can_rebuild_web_shell_from_workspace() -> bool {
+    get_workspace_root().ok().is_some_and(|root| {
+        root.join("package.json").is_file()
+            && root.join("apps/web/package.json").is_file()
+            && root.join("apps/web/src").is_dir()
+    })
+}
+
+fn rebuild_web_shell_from_workspace() -> Result<GitCommandResult, String> {
+    let workspace_root = get_workspace_root()?;
+    let mut command = Command::new(if cfg!(target_os = "windows") {
+        "npm.cmd"
+    } else {
+        "npm"
+    });
+    command
+        .args(["run", "web:build"])
+        .current_dir(&workspace_root)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    #[cfg(target_os = "windows")]
+    command.creation_flags(CREATE_NO_WINDOW);
+
+    let output = command
+        .output()
+        .map_err(|error| format!("failed to run `npm run web:build`: {error}"))?;
+
+    Ok(GitCommandResult {
+        success: output.status.success(),
+        stdout: String::from_utf8_lossy(&output.stdout).trim().to_string(),
+        stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+    })
+}
+
 fn create_runtime_web_artifact(base_path: &str) -> Result<TemporaryPublishDirectory, String> {
     let artifact = TemporaryPublishDirectory::create()?;
-    copy_directory_contents(&get_web_shell_root()?, artifact.path())?;
+    let web_shell_root = get_web_shell_root()?;
+    copy_directory_contents(&web_shell_root, artifact.path())?;
 
     let public_assets = get_workspace_root()?.join("apps/web/public");
     if public_assets.is_dir() {
@@ -1461,6 +1580,37 @@ fn create_runtime_content_payload() -> Result<RuntimeContentPayload, String> {
         inknotes: read_markdown_collection(&content, "inknotes")?,
         inknote_projects: read_inknote_project_collection(&content)?,
     })
+}
+
+fn summarize_runtime_manifest(artifact_root: &Path) -> Result<String, String> {
+    let manifest_path = artifact_root.join("inknote-content.json");
+    let manifest = fs::read_to_string(&manifest_path)
+        .map_err(|error| format!("failed to read {}: {error}", manifest_path.display()))?;
+    let payload: RuntimeContentPayload =
+        serde_json::from_str(manifest.trim_start_matches('\u{feff}'))
+            .map_err(|error| format!("failed to parse {}: {error}", manifest_path.display()))?;
+
+    let title = payload
+        .site_config
+        .get("title")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("(untitled)");
+    let tagline = payload
+        .site_config
+        .get("tagline")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    let category_count = payload
+        .categories
+        .as_array()
+        .map(|items| items.len())
+        .unwrap_or(0);
+
+    Ok(format!(
+        "标题：{title}\n签名：{tagline}\n类目：{category_count}\nMarkdown：{}\nInkNote：{}",
+        payload.markdown.len(),
+        payload.inknotes.len()
+    ))
 }
 
 fn restore_runtime_content_payload(
@@ -1766,6 +1916,12 @@ fn prepare_spa_artifact(dist: &Path, base_path: &str) -> Result<(), String> {
     } else {
         index.replacen("<head>", &format!("<head>{base_tag}"), 1)
     };
+    let asset_prefix = format!("{base_path}assets/");
+    let index = index
+        .replace("src=\"/assets/", &format!("src=\"{asset_prefix}"))
+        .replace("href=\"/assets/", &format!("href=\"{asset_prefix}"))
+        .replace("src='/assets/", &format!("src='{asset_prefix}"))
+        .replace("href='/assets/", &format!("href='{asset_prefix}"));
     fs::write(&index_path, &index)
         .map_err(|error| format!("failed to configure static site base path: {error}"))?;
     fs::write(dist.join("404.html"), index)
@@ -1918,6 +2074,15 @@ fn get_workspace_root() -> Result<PathBuf, String> {
 }
 
 fn get_web_shell_root() -> Result<PathBuf, String> {
+    if let Ok(workspace_root) = get_workspace_root() {
+        let workspace_web_dist = workspace_root.join("apps/web/dist");
+        if workspace_root.join("apps/web/src").is_dir()
+            && workspace_web_dist.join("index.html").is_file()
+        {
+            return Ok(workspace_web_dist);
+        }
+    }
+
     let root = WEB_SHELL_ROOT
         .get()
         .cloned()
@@ -1998,6 +2163,28 @@ mod tests {
         assert!(index.contains("<base href=\"/InkNote/\" />"));
         assert_eq!(index, fallback);
         assert!(directory.path().join(".nojekyll").is_file());
+    }
+
+    #[test]
+    fn rewrites_root_asset_urls_for_project_pages() {
+        let directory = TemporaryPublishDirectory::create().unwrap();
+        fs::write(
+            directory.path().join("index.html"),
+            concat!(
+                "<html><head>",
+                "<base href=\"/\" />",
+                "<script type=\"module\" src=\"/assets/index.js\"></script>",
+                "<link rel=\"stylesheet\" href=\"/assets/index.css\">",
+                "</head><body></body></html>"
+            ),
+        )
+        .unwrap();
+
+        prepare_spa_artifact(directory.path(), "/inknote-web/").unwrap();
+        let index = fs::read_to_string(directory.path().join("index.html")).unwrap();
+        assert!(index.contains("<base href=\"/inknote-web/\" />"));
+        assert!(index.contains("src=\"/inknote-web/assets/index.js\""));
+        assert!(index.contains("href=\"/inknote-web/assets/index.css\""));
     }
 
     #[test]
