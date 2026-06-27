@@ -2393,11 +2393,11 @@ export default function NotesWorkbench() {
             return;
           }
 
-          await checkGitHubReleaseUpdates('\u81ea\u52a8\u66f4\u65b0\u6682\u672a\u8fd4\u56de\u53ef\u5b89\u88c5\u7248\u672c\u3002');
+          await checkGitHubReleaseUpdates();
           return;
         } catch (error) {
           const detail = error instanceof Error ? error.message : String(error);
-          await checkGitHubReleaseUpdates(`\u81ea\u52a8\u66f4\u65b0\u6682\u4e0d\u53ef\u7528\uff1a${detail}`);
+          await checkGitHubReleaseUpdates(detail ? '\u5c06\u4f7f\u7528 GitHub Release \u68c0\u67e5\u66f4\u65b0\u3002' : '');
           return;
         }
       }
