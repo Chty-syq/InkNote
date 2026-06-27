@@ -69,6 +69,7 @@ export interface SiteConfig {
   };
   channels: ChannelConfig[];
   friendLinks?: FriendLinkConfig[];
+  toolLinks?: FriendLinkConfig[];
   repository?: RepositoryConfig;
   giscus?: GiscusConfig;
   goatcounter?: GoatCounterConfig;

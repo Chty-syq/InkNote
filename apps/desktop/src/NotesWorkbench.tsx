@@ -102,6 +102,7 @@ import {
   chooseGalleryImageFiles,
   chooseSlidesFile,
   cacheExternalImage,
+  compressGalleryImageFile,
   convertSlidesToPdf,
   copyFileToPath,
   deleteContentFile,
@@ -438,10 +439,10 @@ function getImageFileExtension(path: string): string | null {
 }
 
 function createGalleryImageFileName(sourcePath: string, date: Date, index: number): string {
-  const extension = getImageFileExtension(sourcePath) ?? 'jpg';
   const baseName = sanitizeAssetName(getFileNameFromPath(sourcePath)) || 'image';
   const nonce = Math.random().toString(36).slice(2, 6).padEnd(4, '0');
-  return `gallery-${createAssetTimestamp(date)}-${padDatePart(index + 1)}-${nonce}-${baseName}.${extension}`;
+  const stem = baseName.replace(/\.[a-z0-9]+$/i, '') || 'image';
+  return `gallery-${createAssetTimestamp(date)}-${padDatePart(index + 1)}-${nonce}-${stem}.jpg`;
 }
 
 function normalizeGalleryManifest(value: unknown): GalleryImageManifest {
@@ -961,6 +962,7 @@ const DEFAULT_SITE_CONFIG: SiteConfig = {
       note: '\u4fdd\u7559\u7ed9\u6280\u672f\u535a\u5ba2\u6216\u9879\u76ee\u7ad9\u70b9\u3002',
     },
   ],
+  toolLinks: [],
   repository: {
     remote: '',
     branch: 'gh-pages',
@@ -1144,6 +1146,26 @@ function cloneDefaultSiteConfig(): SiteConfig {
   return JSON.parse(JSON.stringify(DEFAULT_SITE_CONFIG)) as SiteConfig;
 }
 
+function normalizeSiteLinkList(value: unknown, fallback: FriendLinkConfig[] | undefined): FriendLinkConfig[] | undefined {
+  return Array.isArray(value)
+    ? value
+        .map<FriendLinkConfig | null>((link) =>
+          link && typeof link === 'object'
+            ? {
+                label: typeof link.label === 'string' ? link.label : '',
+                href: typeof link.href === 'string' ? link.href : '',
+                note: typeof link.note === 'string' ? link.note : '',
+                icon: typeof link.icon === 'string' ? link.icon : '',
+                iconSource: typeof link.iconSource === 'string' ? link.iconSource : '',
+                iconTarget: typeof link.iconTarget === 'string' ? link.iconTarget : '',
+                iconFetchedAt: typeof link.iconFetchedAt === 'string' ? link.iconFetchedAt : '',
+              }
+            : null,
+        )
+        .filter((link): link is FriendLinkConfig => Boolean(link?.label.trim() && link.href.trim()))
+    : fallback;
+}
+
 function normalizeSiteConfig(value: unknown): SiteConfig {
   const input = value && typeof value === 'object' ? (value as Partial<SiteConfig>) : {};
   const fallback = cloneDefaultSiteConfig();
@@ -1167,23 +1189,8 @@ function normalizeSiteConfig(value: unknown): SiteConfig {
           Boolean(channel?.label.trim() && channel.href.trim()),
         )
     : fallback.channels;
-  const friendLinks = Array.isArray(input.friendLinks)
-    ? input.friendLinks
-        .map<FriendLinkConfig | null>((link) =>
-          link && typeof link === 'object'
-            ? {
-                label: typeof link.label === 'string' ? link.label : '',
-                href: typeof link.href === 'string' ? link.href : '',
-                note: typeof link.note === 'string' ? link.note : '',
-                icon: typeof link.icon === 'string' ? link.icon : '',
-                iconSource: typeof link.iconSource === 'string' ? link.iconSource : '',
-                iconTarget: typeof link.iconTarget === 'string' ? link.iconTarget : '',
-                iconFetchedAt: typeof link.iconFetchedAt === 'string' ? link.iconFetchedAt : '',
-              }
-            : null,
-        )
-        .filter((link): link is FriendLinkConfig => Boolean(link?.label.trim() && link.href.trim()))
-    : fallback.friendLinks;
+  const friendLinks = normalizeSiteLinkList(input.friendLinks, fallback.friendLinks);
+  const toolLinks = normalizeSiteLinkList(input.toolLinks, fallback.toolLinks);
   const repositoryInput =
     input.repository && typeof input.repository === 'object'
       ? (input.repository as Partial<RepositoryConfig>)
@@ -1297,6 +1304,7 @@ function normalizeSiteConfig(value: unknown): SiteConfig {
     },
     channels,
     friendLinks,
+    toolLinks,
     repository,
     giscus,
     goatcounter,
@@ -1606,6 +1614,7 @@ export default function NotesWorkbench() {
   const [siteChannelsText, setSiteChannelsText] = useState(() => formatSiteChannels(DEFAULT_SITE_CONFIG.channels));
   const [isSiteConfigSaving, setIsSiteConfigSaving] = useState(false);
   const [friendIconLoadingIndex, setFriendIconLoadingIndex] = useState<number | null>(null);
+  const [toolIconLoadingIndex, setToolIconLoadingIndex] = useState<number | null>(null);
   const [isLocalizingImages, setIsLocalizingImages] = useState(false);
   const [imageLocalizationStatus, setImageLocalizationStatus] = useState<Record<string, ImageLocalizationStatus>>({});
   const [imageSettingsTab, setImageSettingsTab] = useState<SettingsImageTab>('external');
@@ -1652,6 +1661,7 @@ export default function NotesWorkbench() {
   const tagPickerRef = useRef<HTMLDivElement | null>(null);
   const tagInputRef = useRef<HTMLInputElement | null>(null);
   const friendIconAutoRequestedRef = useRef(new Set<string>());
+  const toolIconAutoRequestedRef = useRef(new Set<string>());
   const metadataDateInputRef = useRef<HTMLInputElement | null>(null);
   const brandAvatarInputRef = useRef<HTMLInputElement | null>(null);
   const createTitleInputRef = useRef<HTMLInputElement | null>(null);
@@ -3095,6 +3105,98 @@ export default function NotesWorkbench() {
     }
   };
 
+  const updateToolLinkDraft = (index: number, patch: Partial<FriendLinkConfig>) => {
+    setSiteConfigDraft((current) => ({
+      ...current,
+      toolLinks: (current.toolLinks ?? []).map((link, linkIndex) =>
+        linkIndex === index ? { ...link, ...patch } : link,
+      ),
+    }));
+  };
+
+  const addToolLinkDraft = () => {
+    setSiteConfigDraft((current) => ({
+      ...current,
+      toolLinks: [
+        ...(current.toolLinks ?? []),
+        { label: '', href: '', note: '' },
+      ],
+    }));
+  };
+
+  const removeToolLinkDraft = (index: number) => {
+    setSiteConfigDraft((current) => ({
+      ...current,
+      toolLinks: (current.toolLinks ?? []).filter((_, linkIndex) => linkIndex !== index),
+    }));
+  };
+
+  const moveToolLinkDraft = (index: number, direction: -1 | 1) => {
+    setSiteConfigDraft((current) => {
+      const links = [...(current.toolLinks ?? [])];
+      const targetIndex = index + direction;
+      if (targetIndex < 0 || targetIndex >= links.length) {
+        return current;
+      }
+
+      [links[index], links[targetIndex]] = [links[targetIndex], links[index]];
+      return { ...current, toolLinks: links };
+    });
+  };
+
+  const refreshToolLinkIcon = async (index: number) => {
+    if (toolIconLoadingIndex !== null) {
+      return;
+    }
+
+    const link = siteConfigDraft.toolLinks?.[index];
+    const target = link?.href.trim() ?? '';
+    if (!target || target === '#') {
+      setStatus('请先填写有效的工具网址。');
+      return;
+    }
+    if (!isTauri()) {
+      setStatus('站点图标需要在 Tauri 桌面端中抓取。');
+      return;
+    }
+
+    setToolIconLoadingIndex(index);
+    try {
+      const result = await fetchFriendLinkIcon(target);
+      setSiteConfigDraft((current) => ({
+        ...current,
+        toolLinks: (current.toolLinks ?? []).map((currentLink, linkIndex) =>
+          linkIndex === index && currentLink.href.trim() === target
+            ? {
+                ...currentLink,
+                icon: result.iconPath,
+                iconSource: result.sourceUrl,
+                iconTarget: target,
+                iconFetchedAt: new Date().toISOString(),
+              }
+            : currentLink,
+        ),
+      }));
+      setStatus(`已从 ${result.resolvedPageUrl} 更新站点图标。`);
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : typeof error === 'string' ? error : '';
+      setStatus(
+        detail
+          ? `未能获取站点图标：${detail}`
+          : '未能获取站点图标，将使用首字母。',
+      );
+    } finally {
+      setToolIconLoadingIndex((current) => (current === index ? null : current));
+    }
+  };
+
+  const refreshToolLinkIconIfNeeded = (index: number) => {
+    const link = siteConfigDraft.toolLinks?.[index];
+    if (link?.href.trim() && (!link.icon?.trim() || link.iconTarget !== link.href.trim())) {
+      void refreshToolLinkIcon(index);
+    }
+  };
+
   const updateRepositoryConfigDraft = (patch: Partial<RepositoryConfig>) => {
     setPublishConnectionMessage('仓库配置已修改，请重新测试连接。');
     setSiteConfigDraft((current) => ({
@@ -3437,17 +3539,29 @@ export default function NotesWorkbench() {
         const href = link.href.trim();
         return href && href !== '#' && !link.icon?.trim() && !friendIconAutoRequestedRef.current.has(href);
       });
-    if (missingIcons.length === 0) {
+    const missingToolIcons = (siteConfigDraft.toolLinks ?? [])
+      .map((link, index) => ({ link, index }))
+      .filter(({ link }) => {
+        const href = link.href.trim();
+        return href && href !== '#' && !link.icon?.trim() && !toolIconAutoRequestedRef.current.has(href);
+      });
+    if (missingIcons.length === 0 && missingToolIcons.length === 0) {
       return;
     }
 
     for (const { link } of missingIcons) {
       friendIconAutoRequestedRef.current.add(link.href.trim());
     }
+    for (const { link } of missingToolIcons) {
+      toolIconAutoRequestedRef.current.add(link.href.trim());
+    }
 
     const refreshMissingIcons = async () => {
       for (const { index } of missingIcons) {
         await refreshFriendLinkIcon(index);
+      }
+      for (const { index } of missingToolIcons) {
+        await refreshToolLinkIcon(index);
       }
     };
     void refreshMissingIcons();
@@ -5356,12 +5470,13 @@ export default function NotesWorkbench() {
           continue;
         }
 
-        await copyFileToPath(sourcePath, getUserGalleryUploadPath(libraryRoot, fileName));
+        const compressedSize = await compressGalleryImageFile(sourcePath, getUserGalleryUploadPath(libraryRoot, fileName));
         existingPaths.add(publicPath);
         nextImages.unshift({
           id: `${Date.now()}-${index}-${fileName}`,
           path: publicPath,
           name: getFileNameFromPath(sourcePath),
+          size: compressedSize,
           uploadedAt: now.toISOString(),
         });
       }
@@ -6893,14 +7008,6 @@ export default function NotesWorkbench() {
                                     placeholder="https://example.com"
                                     aria-label={`\u7b2c ${index + 1} \u4e2a\u53cb\u94fe\u7684\u7f51\u5740`}
                                   />
-                                  <input
-                                    className="wide"
-                                    value={link.note}
-                                    disabled={friendIconLoadingIndex === index}
-                                    onChange={(event) => updateFriendLinkDraft(index, { note: event.target.value })}
-                                    placeholder={'\u4e00\u53e5\u8bdd\u7b80\u4ecb'}
-                                    aria-label={`\u7b2c ${index + 1} \u4e2a\u53cb\u94fe\u7684\u7b80\u4ecb`}
-                                  />
                                 </div>
 
                                 <div className="notes-settings-friend-actions">
@@ -6953,6 +7060,107 @@ export default function NotesWorkbench() {
                             <button type="button" className="notes-settings-friend-empty" onClick={addFriendLinkDraft}>
                               <IconPlus aria-hidden="true" />
                               <span>{'\u6dfb\u52a0\u7b2c\u4e00\u4e2a\u53cb\u60c5\u94fe\u63a5'}</span>
+                            </button>
+                          )}
+                        </div>
+                      </div>
+
+                      <div className="notes-settings-friend-section notes-settings-site-only">
+                        <div className="notes-settings-friend-head">
+                          <span>{'\u5e38\u7528\u5de5\u5177'}</span>
+                          <button type="button" onClick={addToolLinkDraft}>
+                            <IconPlus aria-hidden="true" />
+                            {'\u65b0\u589e'}
+                          </button>
+                        </div>
+
+                        <div className="notes-settings-friend-list">
+                          {(siteConfigDraft.toolLinks ?? []).length > 0 ? (
+                            (siteConfigDraft.toolLinks ?? []).map((link, index, links) => (
+                              <div className="notes-settings-friend-row" key={index}>
+                                <FriendLinkAvatar
+                                  label={link.label}
+                                  icon={link.icon}
+                                  fetchedAt={link.iconFetchedAt}
+                                />
+
+                                <div className="notes-settings-friend-fields">
+                                  <input
+                                    value={link.label}
+                                    disabled={toolIconLoadingIndex === index}
+                                    onChange={(event) => updateToolLinkDraft(index, { label: event.target.value })}
+                                    placeholder={'\u5de5\u5177\u540d\u79f0'}
+                                    aria-label={`\u7b2c ${index + 1} \u4e2a\u5de5\u5177\u7684\u540d\u79f0`}
+                                  />
+                                  <input
+                                    type="url"
+                                    value={link.href}
+                                    disabled={toolIconLoadingIndex === index}
+                                    onChange={(event) =>
+                                      updateToolLinkDraft(index, {
+                                        href: event.target.value,
+                                        icon: '',
+                                        iconSource: '',
+                                        iconTarget: '',
+                                        iconFetchedAt: '',
+                                      })
+                                    }
+                                    onBlur={() => refreshToolLinkIconIfNeeded(index)}
+                                    placeholder="https://example.com"
+                                    aria-label={`\u7b2c ${index + 1} \u4e2a\u5de5\u5177\u7684\u7f51\u5740`}
+                                  />
+                                </div>
+
+                                <div className="notes-settings-friend-actions">
+                                  <button
+                                    type="button"
+                                    className={toolIconLoadingIndex === index ? 'loading' : ''}
+                                    onClick={() => void refreshToolLinkIcon(index)}
+                                    disabled={toolIconLoadingIndex !== null || !link.href.trim() || link.href.trim() === '#'}
+                                    title={'\u5237\u65b0\u7ad9\u70b9\u56fe\u6807'}
+                                    aria-label={`\u5237\u65b0 ${link.label || `\u7b2c ${index + 1} \u4e2a\u5de5\u5177`} \u7684\u7ad9\u70b9\u56fe\u6807`}
+                                  >
+                                    {toolIconLoadingIndex === index ? (
+                                      <IconLoader2 aria-hidden="true" />
+                                    ) : (
+                                      <IconRefresh aria-hidden="true" />
+                                    )}
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => moveToolLinkDraft(index, -1)}
+                                    disabled={toolIconLoadingIndex !== null || index === 0}
+                                    title={'\u4e0a\u79fb'}
+                                    aria-label={`\u4e0a\u79fb ${link.label || `\u7b2c ${index + 1} \u4e2a\u5de5\u5177`}`}
+                                  >
+                                    <IconArrowUp aria-hidden="true" />
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => moveToolLinkDraft(index, 1)}
+                                    disabled={toolIconLoadingIndex !== null || index === links.length - 1}
+                                    title={'\u4e0b\u79fb'}
+                                    aria-label={`\u4e0b\u79fb ${link.label || `\u7b2c ${index + 1} \u4e2a\u5de5\u5177`}`}
+                                  >
+                                    <IconArrowDown aria-hidden="true" />
+                                  </button>
+                                  <button
+                                    type="button"
+                                    className="danger"
+                                    onClick={() => removeToolLinkDraft(index)}
+                                    disabled={toolIconLoadingIndex !== null}
+                                    title={'\u5220\u9664'}
+                                    aria-label={`\u5220\u9664 ${link.label || `\u7b2c ${index + 1} \u4e2a\u5de5\u5177`}`}
+                                  >
+                                    <IconTrash aria-hidden="true" />
+                                  </button>
+                                </div>
+                              </div>
+                            ))
+                          ) : (
+                            <button type="button" className="notes-settings-friend-empty" onClick={addToolLinkDraft}>
+                              <IconPlus aria-hidden="true" />
+                              <span>{'\u6dfb\u52a0\u7b2c\u4e00\u4e2a\u5e38\u7528\u5de5\u5177'}</span>
                             </button>
                           )}
                         </div>

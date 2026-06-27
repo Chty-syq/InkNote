@@ -143,6 +143,9 @@ const VISIBLE_INKNOTES = contentIndex.inknotes.filter((note) => note.frontmatter
 const ACTIVE_FRIEND_LINKS = (contentIndex.siteConfig.friendLinks ?? []).filter(
   (link) => link.label.trim() && link.href.trim(),
 );
+const ACTIVE_TOOL_LINKS = (contentIndex.siteConfig.toolLinks ?? []).filter(
+  (link) => link.label.trim() && link.href.trim(),
+);
 
 function resolveCardImageConfig(config: typeof contentIndex.siteConfig.cardImages): ResolvedCardImageConfig | null {
   if (!config?.enabled) {
@@ -178,6 +181,26 @@ function FriendLinkAvatar({ label, icon }: { label: string; icon?: string }) {
         />
       ) : null}
     </span>
+  );
+}
+
+function SidebarLinkList({ id, links, navigate }: { id?: string; links: typeof ACTIVE_FRIEND_LINKS; navigate: (href: string) => void }) {
+  return (
+    <ul className="blog-link-list" id={id}>
+      {links.map((link) => (
+        <li key={`${link.label}-${link.href}`}>
+          <SmartLink href={link.href} navigate={navigate} className="blog-link-item">
+            <FriendLinkAvatar label={link.label} icon={link.icon} />
+            <span className="blog-link-content">
+              <strong>
+                <span>{link.label}</span>
+                <IconExternalLink aria-hidden="true" />
+              </strong>
+            </span>
+          </SmartLink>
+        </li>
+      ))}
+    </ul>
   );
 }
 
@@ -1324,6 +1347,10 @@ function Shell({
       return { ...tool, href: '/archive' };
     }
 
+    if (tool.label.toLowerCase() === 'rss' && tool.href === '#') {
+      return { ...tool, href: 'rss.xml' };
+    }
+
     return tool;
   });
   const headerStyle = {
@@ -1395,7 +1422,7 @@ function SearchForm({
           type="search"
           value={query}
           onChange={(event) => setQuery(event.target.value)}
-          placeholder="检索标题、标签或正文"
+          placeholder="多个关键词用空格分隔"
           autoComplete="off"
         />
       </label>
@@ -1421,7 +1448,6 @@ function SiteSidebar({
 
       <SidebarSection title="搜索">
         <SearchForm navigate={navigate} query={query} setQuery={setQuery} />
-        <p className="blog-sidebar-note">多个关键词用空格分隔，结果会按相关度排序。</p>
       </SidebarSection>
 
       <SidebarSection title="标签云">
@@ -1449,22 +1475,13 @@ function SiteSidebar({
 
       {ACTIVE_FRIEND_LINKS.length > 0 ? (
         <SidebarSection title="友情链接">
-          <ul className="blog-link-list" id="blog-links">
-            {ACTIVE_FRIEND_LINKS.map((link) => (
-              <li key={`${link.label}-${link.href}`}>
-                <SmartLink href={link.href} navigate={navigate} className="blog-link-item">
-                  <FriendLinkAvatar label={link.label} icon={link.icon} />
-                  <span className="blog-link-content">
-                    <strong>
-                      <span>{link.label}</span>
-                      <IconExternalLink aria-hidden="true" />
-                    </strong>
-                    {link.note?.trim() ? <span>{link.note}</span> : null}
-                  </span>
-                </SmartLink>
-              </li>
-            ))}
-          </ul>
+          <SidebarLinkList id="blog-links" links={ACTIVE_FRIEND_LINKS} navigate={navigate} />
+        </SidebarSection>
+      ) : null}
+
+      {ACTIVE_TOOL_LINKS.length > 0 ? (
+        <SidebarSection title="常用工具">
+          <SidebarLinkList links={ACTIVE_TOOL_LINKS} navigate={navigate} />
         </SidebarSection>
       ) : null}
     </aside>

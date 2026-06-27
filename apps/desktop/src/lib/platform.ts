@@ -140,6 +140,10 @@ export async function copyFileToPath(source: string, destination: string): Promi
   await invoke('copy_file_to_path', { source, destination });
 }
 
+export async function compressGalleryImageFile(source: string, destination: string): Promise<number> {
+  return invoke('compress_gallery_image_file', { source, destination });
+}
+
 export async function convertSlidesToPdf(source: string, destination: string): Promise<void> {
   await invoke('convert_slides_to_pdf', { source, destination });
 }

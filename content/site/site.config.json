@@ -65,6 +65,53 @@
       "iconFetchedAt": "2026-06-22T08:39:56.179Z"
     }
   ],
+  "toolLinks": [
+    {
+      "label": "图论作图",
+      "href": "https://csacademy.com/app/graph_editor/",
+      "note": "",
+      "icon": "/generated/friend-icons/630e132dc88ac12b044a5349.png",
+      "iconSource": "https://csacademy.com/static/favicon.png",
+      "iconTarget": "https://csacademy.com/app/graph_editor/",
+      "iconFetchedAt": "2026-06-27T16:21:31.879Z"
+    },
+    {
+      "label": "开源动画搜索引擎",
+      "href": "https://trace.moe/",
+      "note": "",
+      "icon": "/generated/friend-icons/4526c8080aa0b5fd4345490d.png",
+      "iconSource": "https://trace.moe/favicon128.png",
+      "iconTarget": "https://trace.moe/",
+      "iconFetchedAt": "2026-06-27T16:22:14.070Z"
+    },
+    {
+      "label": "欧拉计划",
+      "href": "https://pe-cn.github.io/",
+      "note": "",
+      "icon": "/generated/friend-icons/e451e580be744bd90b8a59b3.png",
+      "iconSource": "https://pe-cn.github.io/images/32x32.png",
+      "iconTarget": "https://pe-cn.github.io/",
+      "iconFetchedAt": "2026-06-27T16:26:00.624Z"
+    },
+    {
+      "label": "图片背景消除",
+      "href": "https://www.remove.bg/zh",
+      "note": "",
+      "icon": "/generated/friend-icons/46d143fadd96ae79f467b1e4.png",
+      "iconSource": "https://www.remove.bg/favicon-32x32.png?v=fc0bfce6e1310f1539afec9729716721",
+      "iconTarget": "https://www.remove.bg/zh",
+      "iconFetchedAt": "2026-06-27T16:26:43.540Z"
+    },
+    {
+      "label": "AoPS",
+      "href": "https://artofproblemsolving.com/community/c7_college_math",
+      "note": "",
+      "icon": "",
+      "iconSource": "",
+      "iconTarget": "",
+      "iconFetchedAt": ""
+    }
+  ],
   "repository": {
     "remote": "git@github.com:Chty-syq/inknote-web.git",
     "branch": "gh-page",

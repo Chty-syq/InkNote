@@ -3545,10 +3545,6 @@ input[type='range']::-moz-range-thumb {
   box-shadow: none;
 }
 
-.notes-settings-friend-fields input.wide {
-  grid-column: 1 / -1;
-}
-
 .notes-settings-friend-actions {
   display: flex;
   align-items: center;

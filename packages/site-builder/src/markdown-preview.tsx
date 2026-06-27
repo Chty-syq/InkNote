@@ -23,7 +23,19 @@ import 'react-pdf/dist/Page/AnnotationLayer.css';
 import 'react-pdf/dist/Page/TextLayer.css';
 import './code-highlight.css';
 
-pdfjs.GlobalWorkerOptions.workerSrc = pdfWorkerSrc;
+function resolvePdfWorkerSrc(src: string): string {
+  if (/^(?:https?:)?\/\//i.test(src) || /^(?:data|blob):/i.test(src)) {
+    return src;
+  }
+
+  if (typeof document === 'undefined') {
+    return src;
+  }
+
+  return new URL(src.replace(/^\/+/, ''), document.baseURI).toString();
+}
+
+pdfjs.GlobalWorkerOptions.workerSrc = resolvePdfWorkerSrc(pdfWorkerSrc);
 
 function escapeHtmlAttribute(value: string): string {
   return value

@@ -2,18 +2,20 @@
 
 mod favicon;
 
+use image::{codecs::jpeg::JpegEncoder, imageops::FilterType, GenericImageView};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
     fs,
-    net::{SocketAddr, TcpStream},
+    io::{Read, Write},
+    net::{SocketAddr, TcpListener, TcpStream},
     path::{Component, Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::{
         atomic::{AtomicU8, Ordering},
         Mutex, OnceLock,
     },
-    thread,
+    thread::{self, JoinHandle},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tauri::{Emitter, Manager};
@@ -194,6 +196,7 @@ struct BlogPreviewServerStatus {
 #[derive(Default)]
 struct BlogPreviewServer {
     child: Mutex<Option<Child>>,
+    static_server: Mutex<Option<JoinHandle<()>>>,
 }
 
 impl BlogPreviewServer {
@@ -216,6 +219,13 @@ impl BlogPreviewServer {
                 let _ = child.wait();
             }
         }
+    }
+
+    fn has_static_server(&self) -> bool {
+        self.static_server
+            .lock()
+            .ok()
+            .is_some_and(|server| server.is_some())
     }
 }
 
@@ -244,6 +254,73 @@ fn copy_file_to_path(source: String, destination: String) -> Result<(), String> 
     }
 
     copy_file_overwriting(&source_path, &PathBuf::from(&destination))
+}
+
+#[tauri::command]
+fn compress_gallery_image_file(source: String, destination: String) -> Result<u64, String> {
+    const TARGET_WIDTH: u32 = 480;
+    const TARGET_HEIGHT: u32 = 330;
+    const JPEG_QUALITY: u8 = 82;
+
+    let source_path = PathBuf::from(&source);
+    if !source_path.is_file() {
+        return Err(format!("source image does not exist: {source}"));
+    }
+
+    let decoded = image::open(&source_path)
+        .map_err(|error| format!("failed to decode gallery image: {error}"))?;
+    let (width, height) = decoded.dimensions();
+    if width == 0 || height == 0 {
+        return Err("gallery image has invalid dimensions".to_string());
+    }
+
+    let target_ratio = TARGET_WIDTH as f64 / TARGET_HEIGHT as f64;
+    let source_ratio = width as f64 / height as f64;
+    let (crop_x, crop_y, crop_width, crop_height) = if source_ratio > target_ratio {
+        let crop_width = ((height as f64 * target_ratio).round() as u32).clamp(1, width);
+        ((width - crop_width) / 2, 0, crop_width, height)
+    } else {
+        let crop_height = ((width as f64 / target_ratio).round() as u32).clamp(1, height);
+        (0, (height - crop_height) / 2, width, crop_height)
+    };
+
+    let resized = decoded
+        .crop_imm(crop_x, crop_y, crop_width, crop_height)
+        .resize_exact(TARGET_WIDTH, TARGET_HEIGHT, FilterType::Lanczos3)
+        .to_rgba8();
+
+    let mut flattened = image::RgbImage::new(TARGET_WIDTH, TARGET_HEIGHT);
+    for (x, y, pixel) in resized.enumerate_pixels() {
+        let [red, green, blue, alpha] = pixel.0;
+        let alpha = alpha as f32 / 255.0;
+        let background = [248.0_f32, 245.0_f32, 238.0_f32];
+        flattened.put_pixel(
+            x,
+            y,
+            image::Rgb([
+                (red as f32 * alpha + background[0] * (1.0 - alpha)).round() as u8,
+                (green as f32 * alpha + background[1] * (1.0 - alpha)).round() as u8,
+                (blue as f32 * alpha + background[2] * (1.0 - alpha)).round() as u8,
+            ]),
+        );
+    }
+
+    let destination_path = PathBuf::from(&destination);
+    ensure_parent_directory(&destination)?;
+    if destination_path.exists() {
+        clear_path(&destination_path)?;
+    }
+
+    let mut output = fs::File::create(&destination_path)
+        .map_err(|error| format!("failed to create compressed gallery image: {error}"))?;
+    let mut encoder = JpegEncoder::new_with_quality(&mut output, JPEG_QUALITY);
+    encoder
+        .encode_image(&image::DynamicImage::ImageRgb8(flattened))
+        .map_err(|error| format!("failed to encode compressed gallery image: {error}"))?;
+    make_path_writable(&destination_path)?;
+    fs::metadata(&destination_path)
+        .map(|metadata| metadata.len())
+        .map_err(|error| format!("failed to inspect compressed gallery image: {error}"))
 }
 
 #[tauri::command]
@@ -1106,7 +1183,11 @@ fn publish_built_site(
             },
             branch
         ),
-        if remote_matches_local { "success" } else { "warning" },
+        if remote_matches_local {
+            "success"
+        } else {
+            "warning"
+        },
     );
     Ok(GitCommandResult {
         success: push_result.success,
@@ -1242,7 +1323,8 @@ fn initialize_runtime_paths(app: &tauri::AppHandle) -> Result<(), String> {
             }
             copy_directory_contents(&bundled_content, &content)?;
         }
-        fs::create_dir_all(workspace.join("apps/web/public"))
+        let public_root = workspace.join("apps/web/public");
+        fs::create_dir_all(&public_root)
             .map_err(|error| format!("failed to create local public asset directory: {error}"))?;
         (workspace, content)
     };
@@ -1337,16 +1419,44 @@ fn ensure_blog_preview_server_state(
         }
     }
 
-    let child = spawn_blog_preview_server()?;
-    *child_guard = Some(child);
-    drop(child_guard);
+    if can_start_npm_preview_server() {
+        match spawn_blog_preview_server() {
+            Ok(child) => {
+                *child_guard = Some(child);
+                drop(child_guard);
+
+                let ready = wait_for_blog_preview_server(wait_for_ready);
+                if ready {
+                    return Ok(create_blog_preview_server_status(
+                        true,
+                        true,
+                        "Local blog preview server has started.",
+                    ));
+                }
+            }
+            Err(error) => {
+                eprintln!("failed to start npm blog preview server, using static preview: {error}");
+            }
+        }
+    } else {
+        drop(child_guard);
+    }
+
+    if !server.has_static_server() {
+        let static_server = spawn_static_blog_preview_server()?;
+        let mut static_guard = server
+            .static_server
+            .lock()
+            .map_err(|_| "failed to lock static local blog preview server state".to_string())?;
+        *static_guard = Some(static_server);
+    }
 
     let ready = wait_for_blog_preview_server(wait_for_ready);
     Ok(create_blog_preview_server_status(
         true,
         ready,
         if ready {
-            "Local blog preview server has started."
+            "Static local blog preview server has started."
         } else {
             "Local blog preview server is starting."
         },
@@ -1387,6 +1497,224 @@ fn spawn_blog_preview_server() -> Result<Child, String> {
     command.spawn().map_err(|error| {
         format!("failed to start local blog preview server with `npm run web:dev`: {error}")
     })
+}
+
+fn can_start_npm_preview_server() -> bool {
+    get_workspace_root().ok().is_some_and(|root| {
+        root.join("package.json").is_file()
+            && root.join("apps/web/package.json").is_file()
+            && root.join("apps/web/src").is_dir()
+    })
+}
+
+fn spawn_static_blog_preview_server() -> Result<JoinHandle<()>, String> {
+    let listener = TcpListener::bind(("127.0.0.1", BLOG_PREVIEW_PORT)).map_err(|error| {
+        format!(
+            "failed to start static local blog preview server on {BLOG_PREVIEW_ORIGIN}: {error}"
+        )
+    })?;
+
+    let handle = thread::spawn(move || {
+        for stream in listener.incoming() {
+            match stream {
+                Ok(stream) => handle_static_blog_preview_connection(stream),
+                Err(error) => eprintln!("failed to accept local blog preview request: {error}"),
+            }
+        }
+    });
+    Ok(handle)
+}
+
+fn handle_static_blog_preview_connection(mut stream: TcpStream) {
+    let mut buffer = [0_u8; 8192];
+    let bytes_read = match stream.read(&mut buffer) {
+        Ok(bytes_read) => bytes_read,
+        Err(error) => {
+            eprintln!("failed to read local blog preview request: {error}");
+            return;
+        }
+    };
+    if bytes_read == 0 {
+        return;
+    }
+
+    let request = String::from_utf8_lossy(&buffer[..bytes_read]);
+    let mut parts = request
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .split_whitespace();
+    let method = parts.next().unwrap_or_default();
+    let target = parts.next().unwrap_or("/");
+    if !matches!(method, "GET" | "HEAD") {
+        let _ = write_http_response(
+            &mut stream,
+            405,
+            "Method Not Allowed",
+            "text/plain; charset=utf-8",
+            b"Method Not Allowed",
+            method == "HEAD",
+        );
+        return;
+    }
+
+    match resolve_static_blog_preview_response(target) {
+        Ok((content_type, body)) => {
+            let _ = write_http_response(
+                &mut stream,
+                200,
+                "OK",
+                content_type,
+                &body,
+                method == "HEAD",
+            );
+        }
+        Err(status) => {
+            let (code, reason, body) = match status {
+                403 => (403, "Forbidden", "Forbidden"),
+                404 => (404, "Not Found", "Not Found"),
+                _ => (500, "Internal Server Error", "Internal Server Error"),
+            };
+            let _ = write_http_response(
+                &mut stream,
+                code,
+                reason,
+                "text/plain; charset=utf-8",
+                body.as_bytes(),
+                method == "HEAD",
+            );
+        }
+    }
+}
+
+fn resolve_static_blog_preview_response(target: &str) -> Result<(&'static str, Vec<u8>), u16> {
+    let path = normalize_preview_request_path(target).ok_or(403_u16)?;
+    if path == "/inknote-content.json" {
+        let payload = create_runtime_content_payload().map_err(|_| 500_u16)?;
+        let body = serde_json::to_vec(&payload).map_err(|_| 500_u16)?;
+        return Ok(("application/json; charset=utf-8", body));
+    }
+
+    if let Some(public_path) = resolve_preview_public_asset_path(&path).map_err(|_| 500_u16)? {
+        return fs::read(&public_path)
+            .map(|body| (content_type_for_path(&public_path), body))
+            .map_err(|_| 404);
+    }
+
+    let shell_root = get_web_shell_root().map_err(|_| 500_u16)?;
+    let shell_path = resolve_preview_shell_asset_path(&shell_root, &path).ok_or(403_u16)?;
+    let target_path = if shell_path.is_file() {
+        shell_path
+    } else if should_fallback_to_spa_index(&path) {
+        shell_root.join("index.html")
+    } else {
+        return Err(404);
+    };
+
+    fs::read(&target_path)
+        .map(|body| (content_type_for_path(&target_path), body))
+        .map_err(|_| 404)
+}
+
+fn normalize_preview_request_path(target: &str) -> Option<String> {
+    let raw_path = target.split(['?', '#']).next().unwrap_or("/");
+    let path = if raw_path.is_empty() { "/" } else { raw_path };
+    if path.as_bytes().contains(&0) || path.contains('\\') {
+        return None;
+    }
+    Some(format!("/{}", path.trim_start_matches('/')))
+}
+
+fn resolve_preview_public_asset_path(path: &str) -> Result<Option<PathBuf>, String> {
+    let public_roots = [
+        "/content-images/",
+        "/content-slides/",
+        "/card-images/",
+        "/generated/",
+    ];
+    let is_public_asset = public_roots.iter().any(|prefix| path.starts_with(prefix))
+        || matches!(path, "/blog-avatar.jpg" | "/blog-header-bg.png");
+    if !is_public_asset {
+        return Ok(None);
+    }
+
+    let public_root = get_workspace_root()?.join("apps/web/public");
+    let Some(resolved) = resolve_child_path(&public_root, path.trim_start_matches('/')) else {
+        return Err("invalid public asset path".to_string());
+    };
+    Ok(Some(resolved))
+}
+
+fn resolve_preview_shell_asset_path(shell_root: &Path, path: &str) -> Option<PathBuf> {
+    resolve_child_path(shell_root, path.trim_start_matches('/'))
+}
+
+fn resolve_child_path(root: &Path, relative_path: &str) -> Option<PathBuf> {
+    let mut resolved = root.to_path_buf();
+    for component in Path::new(relative_path).components() {
+        match component {
+            Component::Normal(value) => resolved.push(value),
+            Component::CurDir => {}
+            _ => return None,
+        }
+    }
+    Some(resolved)
+}
+
+fn should_fallback_to_spa_index(path: &str) -> bool {
+    path == "/"
+        || Path::new(path)
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_none()
+}
+
+fn content_type_for_path(path: &Path) -> &'static str {
+    match path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "html" => "text/html; charset=utf-8",
+        "js" | "mjs" => "text/javascript; charset=utf-8",
+        "css" => "text/css; charset=utf-8",
+        "json" => "application/json; charset=utf-8",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "webp" => "image/webp",
+        "gif" => "image/gif",
+        "svg" => "image/svg+xml",
+        "ico" => "image/x-icon",
+        "pdf" => "application/pdf",
+        "ppt" => "application/vnd.ms-powerpoint",
+        "pptx" => "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        "woff" => "font/woff",
+        "woff2" => "font/woff2",
+        "ttf" => "font/ttf",
+        "xml" => "application/xml; charset=utf-8",
+        _ => "application/octet-stream",
+    }
+}
+
+fn write_http_response(
+    stream: &mut TcpStream,
+    status: u16,
+    reason: &str,
+    content_type: &str,
+    body: &[u8],
+    head_only: bool,
+) -> std::io::Result<()> {
+    let headers = format!(
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    stream.write_all(headers.as_bytes())?;
+    if !head_only {
+        stream.write_all(body)?;
+    }
+    stream.flush()
 }
 
 fn wait_for_blog_preview_server(should_wait: bool) -> bool {
@@ -2272,6 +2600,7 @@ fn main() {
             write_text_file,
             write_binary_file,
             copy_file_to_path,
+            compress_gallery_image_file,
             delete_gallery_image_file,
             convert_slides_to_pdf,
             get_content_index,
