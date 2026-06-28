@@ -129,9 +129,12 @@ const DEFAULT_TOOL_LINKS = [
   { label: '搜索', href: '/search', description: '站内检索' },
   { label: '归档', href: '#', description: '文章归档' },
   { label: 'RSS', href: '#', description: '订阅更新' },
-  { label: '友链', href: '#blog-links', description: '友情链接' },
   { label: '关于', href: '/about', description: '关于这个博客' },
 ];
+
+function isStaticResourceHref(href: string): boolean {
+  return /\.(?:xml|json|pdf|png|jpe?g|gif|webp|svg|ico)(?:[?#]|$)/i.test(href);
+}
 
 const KNOWN_LABEL_FIXES: Record<string, string> = {
   '鏈哄櫒瀛︿範': '机器学习',
@@ -1273,7 +1276,7 @@ function SmartLink({
   className?: string;
   children: ReactNode;
 }) {
-  if (href.startsWith('/')) {
+  if (href.startsWith('/') && !isStaticResourceHref(href)) {
     return (
       <SiteLink href={href} navigate={navigate} className={className}>
         {children}
@@ -1347,8 +1350,8 @@ function Shell({
       return { ...tool, href: '/archive' };
     }
 
-    if (tool.label.toLowerCase() === 'rss' && tool.href === '#') {
-      return { ...tool, href: 'rss.xml' };
+    if (tool.label.toLowerCase() === 'rss' && (tool.href === '#' || tool.href === 'rss.xml' || tool.href === '/rss.xml')) {
+      return { ...tool, href: toAssetPath('/rss.xml') };
     }
 
     return tool;

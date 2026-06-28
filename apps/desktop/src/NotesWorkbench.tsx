@@ -49,9 +49,10 @@ import {
 } from '@tabler/icons-react';
 import { convertFileSrc, invoke } from '@tauri-apps/api/core';
 import { relaunch } from '@tauri-apps/plugin-process';
-import { check as checkTauriUpdate, Update } from '@tauri-apps/plugin-updater';
+import { Update } from '@tauri-apps/plugin-updater';
 import type { DownloadEvent } from '@tauri-apps/plugin-updater';
 import desktopPackage from '../package.json';
+import desktopIconUrl from '../src-tauri/icons/icon.png';
 import {
   createDefaultProject,
   deserializeProject,
@@ -579,7 +580,16 @@ function formatDesktopReleaseDate(value: string): string {
 }
 
 async function checkTauriDesktopUpdate(): Promise<Update | null> {
-  return checkTauriUpdate({ timeout: 30_000 });
+  const metadata = await invoke<{
+    rid: number;
+    available: boolean;
+    currentVersion: string;
+    version: string;
+    date?: string;
+    body?: string;
+  } | null>('plugin:updater|check', { timeout: 30_000 });
+
+  return metadata?.available ? new Update(metadata) : null;
 }
 
 function resolveDesktopContentImages(markdown: string, contentRoot: string | null): string {
@@ -965,11 +975,6 @@ const DEFAULT_SITE_CONFIG: SiteConfig = {
       label: 'RSS',
       href: '#',
       description: '\u8ba2\u9605\u66f4\u65b0',
-    },
-    {
-      label: '\u53cb\u94fe',
-      href: '#blog-links',
-      description: '\u53cb\u60c5\u94fe\u63a5',
     },
     {
       label: '\u5173\u4e8e',
@@ -1610,7 +1615,7 @@ export default function NotesWorkbench() {
   const [selectedCategorySlug, setSelectedCategorySlug] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [workspacePanel, setWorkspacePanel] = useState<WorkspacePanel>('write');
-  const [showPreview, setShowPreview] = useState(true);
+  const [showPreview, setShowPreview] = useState(false);
   const [showHistoryPanel, setShowHistoryPanel] = useState(false);
   const [previewRenderBody, setPreviewRenderBody] = useState('');
   const [isPreviewRenderPending, setIsPreviewRenderPending] = useState(false);
@@ -2191,7 +2196,12 @@ export default function NotesWorkbench() {
     const previewPane = previewPaneRef.current;
     const previewArticle = previewArticleRef.current;
 
-    if (!editor || !previewPane || !previewArticle) {
+    if (!previewPane || !previewArticle) {
+      return;
+    }
+
+    if (!editor) {
+      previewArticle.style.transform = 'translate3d(0, 0, 0)';
       return;
     }
 
@@ -4395,7 +4405,7 @@ export default function NotesWorkbench() {
     setIsCreateDialogOpen(false);
     setSelectedCategorySlug(createCategoryValue);
     setWorkspacePanel('write');
-    setShowPreview(true);
+    setShowPreview(false);
     activateDraft(nextDraft);
     setStatus(`已新建 "${normalizedTitle}"。`);
   };
@@ -4448,7 +4458,7 @@ export default function NotesWorkbench() {
     setSelectedCategorySlug(targetCategory.slug);
     setSearchQuery('');
     setWorkspacePanel(getWorkspacePanelForDraft(nextDraft));
-    setShowPreview(true);
+    setShowPreview(false);
     setStatus(`\u6b63\u5728\u4fdd\u5b58 "${normalizedTitle}"...`);
 
     try {
@@ -5852,6 +5862,7 @@ export default function NotesWorkbench() {
     );
   }, [items, searchQuery, selectedCategorySlug]);
   const activeWorkspacePanel = draft?.type === 'inknote' ? 'inknote' : workspacePanel;
+  const isPreviewOnly = Boolean(draft && showPreview);
   const canUndo =
     activeWorkspacePanel === 'inknote'
       ? linkedNotebookUndoStackRef.current.length > 0
@@ -6194,21 +6205,10 @@ export default function NotesWorkbench() {
                 <div className="notes-editor-actions">
                   <button
                     type="button"
-                    className={
-                      draft.type === 'inknote' || (activeWorkspacePanel === 'write' && showPreview)
-                        ? 'notes-icon-button active'
-                        : 'notes-icon-button'
-                    }
+                    className={isPreviewOnly ? 'notes-icon-button active' : 'notes-icon-button'}
                     onClick={() => {
-                      if (draft.type === 'inknote') {
-                        setWorkspacePanel('inknote');
-                        return;
-                      }
-
-                      if (activeWorkspacePanel !== 'write') {
+                      if (draft.type !== 'inknote' && activeWorkspacePanel !== 'write') {
                         setWorkspacePanel('write');
-                        setShowPreview(true);
-                        return;
                       }
 
                       setShowPreview((current) => !current);
@@ -6216,15 +6216,6 @@ export default function NotesWorkbench() {
                     title="Preview"
                   >
                     Preview
-                  </button>
-                  <button
-                    type="button"
-                    className="notes-icon-button"
-                    onClick={() => void saveDraft()}
-                    disabled={isBusy}
-                    title="Save"
-                  >
-                    Save
                   </button>
                   <button
                     type="button"
@@ -6262,35 +6253,31 @@ export default function NotesWorkbench() {
                   >
                     Delete
                   </button>
-                  <button
-                    type="button"
-                    className={showHistoryPanel ? 'notes-icon-button active' : 'notes-icon-button'}
-                    onClick={() => setShowHistoryPanel((current) => !current)}
-                    title="History"
-                  >
-                    History
-                  </button>
                 </div>
               </div>
 
-              <div className="notes-editor-titlebar">
-                <input
-                  className="notes-title-input"
-                  value={draft.title}
-                  onChange={(event) =>
-                    updateAutoSavedDraftMetadata({ title: event.target.value }, DRAFT_TITLE_AUTOSAVE_DELAY)
-                  }
-                  onBlur={() => void flushDraftMetadataSave()}
-                  placeholder="Enter title"
-                />
-              </div>
+              {!isPreviewOnly ? (
+                <>
+                  <div className="notes-editor-titlebar">
+                    <input
+                      className="notes-title-input"
+                      value={draft.title}
+                      onChange={(event) =>
+                        updateAutoSavedDraftMetadata({ title: event.target.value }, DRAFT_TITLE_AUTOSAVE_DELAY)
+                      }
+                      onBlur={() => void flushDraftMetadataSave()}
+                      placeholder="Enter title"
+                    />
+                  </div>
 
-              <div className="notes-editor-meta">
-                <span>Created: {draft.date}</span>
-                <span>Updated: {draft.updatedAt || draft.date}</span>
-              </div>
+                  <div className="notes-editor-meta">
+                    <span>Created: {draft.date}</span>
+                    <span>Updated: {draft.updatedAt || draft.date}</span>
+                  </div>
+                </>
+              ) : null}
 
-              {showHistoryPanel ? (
+              {!isPreviewOnly && showHistoryPanel ? (
                 <div className="notes-history-panel">
                   {historyEntries.length > 0 ? (
                     historyEntries.map((entry) => (
@@ -6306,7 +6293,31 @@ export default function NotesWorkbench() {
                 </div>
               ) : null}
 
-              {activeWorkspacePanel === 'write' ? (
+              {isPreviewOnly ? (
+                activeWorkspacePanel === 'inknote' ? (
+                  <div className="notes-editor-workbench notes-editor-workbench-preview-only notes-inknote-preview-only">
+                    <div className="notes-rendered-pane notes-inknote-rendered-pane preview-only">
+                      <InkNoteProjectPreviewPanel
+                        project={linkedNotebook}
+                        projectPath={linkedNotebookPath}
+                        status={linkedNotebookStatus}
+                        embedded
+                      />
+                    </div>
+                  </div>
+                ) : (
+                  <div className="notes-editor-workbench notes-editor-workbench-preview-only">
+                    <div ref={previewPaneRef} className="notes-rendered-pane preview-only">
+                      {isPreviewRenderPending ? (
+                        <span className="notes-rendered-pending">{'\u9884\u89c8\u66f4\u65b0\u4e2d'}</span>
+                      ) : null}
+                      <article ref={previewArticleRef} className="notes-rendered-article">
+                        {renderedPreview}
+                      </article>
+                    </div>
+                  </div>
+                )
+              ) : activeWorkspacePanel === 'write' ? (
                 <>
                   <div className="notes-editor-toolbar">
                     <button
@@ -6457,7 +6468,7 @@ export default function NotesWorkbench() {
                     </button>
                   </div>
 
-                  <div className={showPreview ? 'notes-editor-workbench split' : 'notes-editor-workbench'}>
+                  <div className="notes-editor-workbench">
                     <div className="notes-source-pane">
                       <textarea
                         ref={editorRef}
@@ -6484,16 +6495,6 @@ export default function NotesWorkbench() {
                       />
                     </div>
 
-                    {showPreview ? (
-                      <div ref={previewPaneRef} className="notes-rendered-pane" onWheel={handlePreviewWheel}>
-                        {isPreviewRenderPending ? (
-                          <span className="notes-rendered-pending">{'\u9884\u89c8\u66f4\u65b0\u4e2d'}</span>
-                        ) : null}
-                        <article ref={previewArticleRef} className="notes-rendered-article">
-                          {renderedPreview}
-                        </article>
-                      </div>
-                    ) : null}
                   </div>
                 </>
               ) : (
@@ -7797,15 +7798,12 @@ export default function NotesWorkbench() {
                   <section className="notes-settings-section notes-settings-about">
                     <article className="notes-about-hero">
                       <span className="notes-about-logo" aria-hidden="true">
-                        {brandAvatar ? <img src={brandAvatar} alt="" /> : <IconWriting />}
+                        <img src={desktopIconUrl} alt="" />
                       </span>
                       <div>
-                        <h3>InkNote</h3>
-                        <p>{'\u672c\u5730 Markdown / InkNote \u535a\u5ba2\u7f16\u8f91\u5668'}</p>
+                        <h3>逸仙笔记</h3>
                         <div className="notes-about-badges" aria-label={'\u5e94\u7528\u4fe1\u606f'}>
                           <span>{`v${desktopVersion}`}</span>
-                          <span>Tauri</span>
-                          <span>React</span>
                         </div>
                       </div>
                     </article>

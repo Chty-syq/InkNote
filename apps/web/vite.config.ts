@@ -9,6 +9,29 @@ const contentRoot = fileURLToPath(new URL('../../content', import.meta.url));
 const contentEntryPattern =
   /[\\/]content[\\/](?:markdown[\\/][^\\/]+[\\/]index\.md|inknotes[\\/][^\\/]+[\\/](?:index\.md|[^\\/]+\.inknote\.json))$/i;
 
+function getBasePath(base: string): string {
+  const trimmed = base.trim();
+  if (!trimmed || trimmed === '/') {
+    return '';
+  }
+
+  try {
+    const url = new URL(trimmed);
+    return getBasePath(url.pathname);
+  } catch {
+    return `/${trimmed.replace(/^\/+|\/+$/g, '')}`;
+  }
+}
+
+function getRssRequestPaths(base: string): Set<string> {
+  const basePath = getBasePath(base);
+  const paths = new Set(['/rss.xml']);
+  if (basePath) {
+    paths.add(`${basePath}/rss.xml`);
+  }
+  return paths;
+}
+
 interface FeedDocument {
   type: 'markdown' | 'inknote';
   title: string;
@@ -297,7 +320,8 @@ function rssFeedPlugin(): Plugin {
     },
     configureServer(server: ViteDevServer) {
       server.middlewares.use(async (request, response, next) => {
-        if (request.url?.split('?')[0] !== '/rss.xml') {
+        const requestPath = request.url?.split('?')[0] ?? '';
+        if (!getRssRequestPaths(server.config.base).has(requestPath)) {
           next();
           return;
         }
