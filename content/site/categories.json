@@ -1,20 +1,20 @@
 [
   {
-    "slug": "machine-learning",
     "label": "机器学习",
     "labelEn": "Machine Learning",
-    "order": 1
+    "order": 1,
+    "slug": "machine-learning"
   },
   {
-    "slug": "mathmatics",
     "label": "数学研究",
     "labelEn": "Mathematics",
-    "order": 2
+    "order": 2,
+    "slug": "mathmatics"
   },
   {
-    "slug": "classics",
     "label": "古典摘录",
     "labelEn": "Classics",
-    "order": 3
+    "order": 3,
+    "slug": "classics"
   }
 ]

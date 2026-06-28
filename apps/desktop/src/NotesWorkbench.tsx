@@ -13,9 +13,7 @@ import {
 } from 'react';
 import {
   IconArrowBackUp,
-  IconArrowDown,
   IconArrowForwardUp,
-  IconArrowUp,
   IconAlignCenter,
   IconBlockquote,
   IconBold,
@@ -42,6 +40,7 @@ import {
   IconPlus,
   IconRefresh,
   IconRocket,
+  IconSettings,
   IconTrash,
   IconUpload,
   IconWriting,
@@ -211,6 +210,7 @@ const LOCAL_PUBLIC_ASSET_PREFIXES = ['/content-images/', '/content-slides/', '/c
 const IMAGE_MANAGEMENT_PAGE_SIZE = 15;
 const GALLERY_IMAGE_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'webp', 'gif']);
 const SLIDES_FILE_EXTENSIONS = new Set(['ppt', 'pptx', 'pdf']);
+const DEFAULT_SYNC_MESSAGE = 'Update blog content';
 const TABLER_ICON_OVERRIDES = `
   .notes-settings-close::before,
   .notes-category-dialog-close::before,
@@ -225,8 +225,16 @@ const TABLER_ICON_OVERRIDES = `
   .notes-editor-toolbar { padding-left: calc(0.75rem - 0.44rem); }
 `;
 
-type SettingsSection = 'basic' | 'images' | 'site' | 'publish' | 'about';
+type SettingsSection = 'basic' | 'images' | 'publish' | 'about';
 type SettingsImageTab = 'external' | 'internal' | 'gallery';
+type SiteIntegrationPanel = 'repository' | 'goatcounter' | 'giscus';
+type SiteLinkDragKind = 'friend' | 'tool';
+
+interface SiteLinkDragState {
+  kind: SiteLinkDragKind;
+  index: number;
+}
+
 type DesktopUpdateState =
   | 'idle'
   | 'checking'
@@ -1621,7 +1629,7 @@ export default function NotesWorkbench() {
   const [isPreviewRenderPending, setIsPreviewRenderPending] = useState(false);
   const [historyEntries, setHistoryEntries] = useState<NoteHistoryEntry[]>([]);
   const [publishConnectionMessage, setPublishConnectionMessage] = useState('尚未测试远程仓库连接。');
-  const [publishMessage, setPublishMessage] = useState('Update blog content');
+  const [publishMessage, setPublishMessage] = useState(DEFAULT_SYNC_MESSAGE);
   const [isPublishingSite, setIsPublishingSite] = useState(false);
   const [isTestingRemote, setIsTestingRemote] = useState(false);
   const [isPublishDialogOpen, setIsPublishDialogOpen] = useState(false);
@@ -1662,11 +1670,13 @@ export default function NotesWorkbench() {
   const [imagePreview, setImagePreview] = useState<ImagePreviewState | null>(null);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [settingsSection, setSettingsSection] = useState<SettingsSection>('basic');
+  const [siteIntegrationPanel, setSiteIntegrationPanel] = useState<SiteIntegrationPanel | null>(null);
   const [categoryDialog, setCategoryDialog] = useState<CategoryDialogState | null>(null);
   const [categoryLabelValue, setCategoryLabelValue] = useState('');
   const [categoryLabelEnValue, setCategoryLabelEnValue] = useState('');
   const [categorySlugValue, setCategorySlugValue] = useState('');
   const [draggingCategorySlug, setDraggingCategorySlug] = useState<string | null>(null);
+  const [draggingSiteLink, setDraggingSiteLink] = useState<SiteLinkDragState | null>(null);
   const [draggingNotePath, setDraggingNotePath] = useState<string | null>(null);
   const [isCreateDialogOpen, setIsCreateDialogOpen] = useState(false);
   const [isMetadataDialogOpen, setIsMetadataDialogOpen] = useState(false);
@@ -1710,6 +1720,7 @@ export default function NotesWorkbench() {
   const categoryDragSourceRef = useRef<string | null>(null);
   const categoryDragOriginalOrderRef = useRef<ContentCategory[] | null>(null);
   const pendingCategoryOrderRef = useRef<ContentCategory[] | null>(null);
+  const siteLinkDragSourceRef = useRef<SiteLinkDragState | null>(null);
   const noteDragSourceRef = useRef<string | null>(null);
   const noteDragOriginalItemsRef = useRef<ContentLibraryItem[] | null>(null);
   const pendingNoteOrderRef = useRef<ContentLibraryItem[] | null>(null);
@@ -1965,11 +1976,17 @@ export default function NotesWorkbench() {
   useEffect(() => {
     if (!isSettingsOpen) {
       setCategoryDialog(null);
+      setSiteIntegrationPanel(null);
       return;
     }
 
     const handleKeyDown = (event: globalThis.KeyboardEvent) => {
       if (event.key === 'Escape') {
+        if (siteIntegrationPanel) {
+          setSiteIntegrationPanel(null);
+          return;
+        }
+
         setIsSettingsOpen(false);
       }
     };
@@ -1978,7 +1995,7 @@ export default function NotesWorkbench() {
     return () => {
       window.removeEventListener('keydown', handleKeyDown);
     };
-  }, [isSettingsOpen]);
+  }, [isSettingsOpen, siteIntegrationPanel]);
 
   useEffect(() => {
     if (!categoryDialog) {
@@ -2033,6 +2050,39 @@ export default function NotesWorkbench() {
       window.removeEventListener('pointercancel', handlePointerRelease);
     };
   }, [draggingCategorySlug]);
+
+  useEffect(() => {
+    if (!draggingSiteLink) {
+      return;
+    }
+
+    const handlePointerMove = (event: PointerEvent) => {
+      const targetElement = document.elementFromPoint(event.clientX, event.clientY);
+      const targetRow =
+        targetElement instanceof Element
+          ? targetElement.closest<HTMLElement>('[data-site-link-kind][data-site-link-index]')
+          : null;
+      const targetKind = targetRow?.dataset.siteLinkKind;
+      const targetIndex = Number(targetRow?.dataset.siteLinkIndex ?? Number.NaN);
+
+      if ((targetKind === 'friend' || targetKind === 'tool') && Number.isInteger(targetIndex)) {
+        reorderSiteLinkLocally(targetKind, targetIndex);
+      }
+    };
+
+    const handlePointerRelease = () => {
+      finishSiteLinkPointerDrag();
+    };
+
+    window.addEventListener('pointermove', handlePointerMove);
+    window.addEventListener('pointerup', handlePointerRelease);
+    window.addEventListener('pointercancel', handlePointerRelease);
+    return () => {
+      window.removeEventListener('pointermove', handlePointerMove);
+      window.removeEventListener('pointerup', handlePointerRelease);
+      window.removeEventListener('pointercancel', handlePointerRelease);
+    };
+  }, [draggingSiteLink]);
 
   useEffect(() => {
     if (!draggingNotePath) {
@@ -2997,6 +3047,234 @@ export default function NotesWorkbench() {
     }
   };
 
+  const syncSiteChanges = async () => {
+    if (isPublishingSite || isPullingContent) {
+      return;
+    }
+
+    if (!isTauri()) {
+      setStatus('站点同步需要在 Tauri 桌面端中执行。');
+      return;
+    }
+
+    const message = publishMessage.trim() || DEFAULT_SYNC_MESSAGE;
+
+    const configuredRepository = siteConfigDraft.repository;
+    const configuredRemote = configuredRepository?.remote.trim() ?? '';
+    const configuredBranch = configuredRepository?.branch.trim() ?? '';
+    if (!configuredRemote || !configuredBranch) {
+      setStatus('请先配置远程仓库和发布分支。');
+      setPublishLogs([]);
+      setPublishProgress(0);
+      setPublishRunState('error');
+      return;
+    }
+
+    const taskId = globalThis.crypto?.randomUUID?.() ?? `sync-${Date.now()}`;
+    const conflictLabel = pullConflictStrategy === 'remote' ? '远端优先' : '本地优先';
+    let currentProgress = 2;
+
+    const updateRunProgress = (
+      rawProgress: number,
+      options: { offset?: number; scale?: number; forceRunState?: PublishRunState; level?: PublishProgressEvent['level'] } = {},
+    ) => {
+      const normalizedProgress = Math.max(0, Math.min(100, rawProgress));
+      const mappedProgress = Math.max(
+        0,
+        Math.min(100, Math.round((options.offset ?? 0) + normalizedProgress * (options.scale ?? 1))),
+      );
+      currentProgress = mappedProgress;
+      setPublishProgress(mappedProgress);
+      setPublishRunState(
+        options.forceRunState ??
+          (options.level === 'error'
+            ? 'error'
+            : mappedProgress >= 100
+              ? 'success'
+              : 'running'),
+      );
+    };
+
+    const recordManualProgress = (
+      progress: number,
+      stage: string,
+      messageText: string,
+      detail: string,
+      level: PublishProgressEvent['level'] = 'info',
+    ) => {
+      updateRunProgress(progress, {
+        forceRunState: progress >= 100 && level !== 'error' ? 'success' : level === 'error' ? 'error' : 'running',
+        level,
+      });
+      setPublishLogs((current) => {
+        const receivedAt = new Date().toLocaleTimeString('zh-CN', { hour12: false });
+        const nextEntry: PublishLogEntry = {
+          taskId,
+          progress,
+          stage,
+          message: messageText,
+          detail,
+          level,
+          id: ++publishLogSequenceRef.current,
+          receivedAt,
+        };
+        const existingIndex = current.findIndex((entry) => entry.stage === stage);
+        if (existingIndex < 0) {
+          return [...current, nextEntry].slice(-8);
+        }
+
+        return current.map((entry, index) =>
+          index === existingIndex
+            ? {
+                ...nextEntry,
+                id: entry.id,
+                receivedAt: entry.receivedAt,
+              }
+            : entry,
+        );
+      });
+    };
+
+    setPublishLogs([]);
+    setPublishProgress(2);
+    setPublishRunState('running');
+    setIsPullingContent(true);
+    setIsPublishingSite(true);
+    let stopPullListening: (() => void) | null = null;
+    let stopPublishListening: (() => void) | null = null;
+
+    try {
+      stopPullListening = await listenToContentSyncProgress((event) => {
+        if (event.taskId === taskId) {
+          updateRunProgress(event.progress, {
+            offset: 14,
+            scale: 0.34,
+            forceRunState: event.level === 'error' ? 'error' : 'running',
+            level: event.level,
+          });
+        }
+      });
+      stopPublishListening = await listenToPublishProgress((event) => {
+        if (event.taskId === taskId) {
+          updateRunProgress(event.progress, {
+            offset: 50,
+            scale: 0.5,
+            level: event.level,
+          });
+        }
+      });
+
+      recordManualProgress(
+        2,
+        'prepare',
+        '准备本地内容',
+        `冲突策略：${conflictLabel}`,
+      );
+
+      if (draft && dirty) {
+        const savedItem = await saveDraft();
+        if (!savedItem) {
+          recordManualProgress(5, 'prepare', '当前文章保存失败', '同步已停止，请先修正文章保存错误。', 'error');
+          return;
+        }
+      }
+
+      const savedConfig = await saveSiteConfig();
+      if (!savedConfig) {
+        recordManualProgress(10, 'prepare', '站点设置保存失败', '同步已停止，请检查站点设置。', 'error');
+        return;
+      }
+      recordManualProgress(10, 'prepare', '本地内容已准备好', '文章与站点设置已保存。', 'success');
+
+      const repository = savedConfig.repository;
+      const remote = repository?.remote.trim() ?? '';
+      const branch = repository?.branch.trim() ?? '';
+      const basePath = inferGitHubPagesBasePath(remote);
+      const selectedSshKeyPath = sshKeyPath.trim();
+      if (!remote || !branch) {
+        recordManualProgress(10, 'prepare', '同步配置不完整', '请配置远程仓库地址和发布分支。', 'error');
+        return;
+      }
+
+      updateRunProgress(12);
+      const remoteStatus = await getPublishStatus(remote, branch, selectedSshKeyPath);
+      setPublishConnectionMessage(remoteStatus.shortStatus);
+
+      if (remoteStatus.branchExists) {
+        recordManualProgress(
+          14,
+          'merge',
+          '合并远端内容',
+          '远端独有和本地独有都会保留。',
+        );
+        await pullRemoteContent({
+          taskId,
+          remote,
+          branch,
+          sshKeyPath: selectedSshKeyPath,
+          conflictStrategy: pullConflictStrategy,
+        });
+
+        draftCacheRef.current.clear();
+        cleanDraftsRef.current = new WeakSet();
+        clearLinkedNotebookState();
+        await loadSiteConfig();
+        await loadLibrary(undefined, true);
+        if (isSettingsOpen && settingsSection === 'images') {
+          await loadUserGalleryManifest();
+        }
+        recordManualProgress(49, 'merge', '内容合并完成', '已得到本次同步的最终内容集合。', 'success');
+      } else {
+        recordManualProgress(
+          49,
+          'merge',
+          '远端分支不存在',
+          '将直接发布本地内容作为远端初始版本。',
+          'warning',
+        );
+      }
+
+      recordManualProgress(50, 'publish', '发布站点', '正在生成并推送静态博客。');
+      const result = await publishContentChanges({
+        taskId,
+        remote,
+        branch,
+        basePath,
+        sshKeyPath: selectedSshKeyPath,
+        message,
+      });
+
+      appendHistoryEntry('Synced site', message);
+      setStatus(result.stdout || '站点已同步到远程分支。');
+      recordManualProgress(100, 'publish', '同步完成', '远端站点已更新。', 'success');
+      try {
+        const nextStatus = await getPublishStatus(remote, branch, selectedSshKeyPath);
+        setPublishConnectionMessage(nextStatus.shortStatus);
+      } catch (error) {
+        setPublishConnectionMessage(
+          `站点已同步，但状态刷新失败：${
+            error instanceof Error ? error.message : typeof error === 'string' ? error : String(error)
+          }`,
+        );
+      }
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : typeof error === 'string' ? error : String(error);
+      setStatus(detail || '站点同步失败。');
+      recordManualProgress(
+        currentProgress,
+        'failed',
+        '站点同步失败',
+        detail || '没有收到可识别的错误信息。',
+        'error',
+      );
+    } finally {
+      stopPullListening?.();
+      stopPublishListening?.();
+      setIsPullingContent(false);
+      setIsPublishingSite(false);
+    }
+  };
+
   const handleBrandAvatarChange = (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     event.target.value = '';
@@ -3265,6 +3543,53 @@ export default function NotesWorkbench() {
       [links[index], links[targetIndex]] = [links[targetIndex], links[index]];
       return { ...current, toolLinks: links };
     });
+  };
+
+  const reorderSiteLinkLocally = (kind: SiteLinkDragKind, targetIndex: number) => {
+    const source = siteLinkDragSourceRef.current;
+    if (!source || source.kind !== kind || source.index === targetIndex || isBusy) {
+      return;
+    }
+
+    const field = kind === 'friend' ? 'friendLinks' : 'toolLinks';
+    const nextDragState = { kind, index: targetIndex };
+    siteLinkDragSourceRef.current = nextDragState;
+    setDraggingSiteLink(nextDragState);
+
+    setSiteConfigDraft((current) => {
+      const links = [...(current[field] ?? [])];
+      if (source.index < 0 || source.index >= links.length || targetIndex < 0 || targetIndex >= links.length) {
+        return current;
+      }
+
+      const [movedLink] = links.splice(source.index, 1);
+      links.splice(targetIndex, 0, movedLink);
+      return { ...current, [field]: links };
+    });
+  };
+
+  const beginSiteLinkPointerDrag = (
+    event: ReactPointerEvent<HTMLElement>,
+    kind: SiteLinkDragKind,
+    index: number,
+  ) => {
+    if (isBusy) {
+      return;
+    }
+
+    event.preventDefault();
+    const nextDragState = { kind, index };
+    siteLinkDragSourceRef.current = nextDragState;
+    setDraggingSiteLink(nextDragState);
+  };
+
+  const handleSiteLinkPointerEnter = (kind: SiteLinkDragKind, index: number) => {
+    reorderSiteLinkLocally(kind, index);
+  };
+
+  const finishSiteLinkPointerDrag = () => {
+    siteLinkDragSourceRef.current = null;
+    setDraggingSiteLink(null);
   };
 
   const refreshToolLinkIcon = async (index: number) => {
@@ -3652,7 +3977,7 @@ export default function NotesWorkbench() {
   }, [siteChannelsText, siteConfigDraft]);
 
   useEffect(() => {
-    if (!isSettingsOpen || settingsSection !== 'site' || !isTauri()) {
+    if (!isSettingsOpen || settingsSection !== 'basic' || !isTauri()) {
       return;
     }
 
@@ -6932,13 +7257,6 @@ export default function NotesWorkbench() {
                 </button>
                 <button
                   type="button"
-                  className={settingsSection === 'site' ? 'active' : ''}
-                  onClick={() => setSettingsSection('site')}
-                >
-                  <strong>{'\u7ad9\u70b9\u8bbe\u7f6e'}</strong>
-                </button>
-                <button
-                  type="button"
                   className={settingsSection === 'publish' ? 'active' : ''}
                   onClick={() => {
                     setSettingsSection('publish');
@@ -6958,8 +7276,17 @@ export default function NotesWorkbench() {
               <div className="notes-settings-content">
                 {settingsSection === 'basic' ? (
                   <section className="notes-settings-section notes-settings-basic-categories">
-                    <div className="notes-settings-inline-heading">
+                    <div className="notes-settings-inline-heading notes-settings-inline-heading-action">
                       <span>{'\u7c7b\u76ee'}</span>
+                      <button
+                        type="button"
+                        className="notes-settings-heading-button"
+                        onClick={openCreateCategoryDialog}
+                        disabled={isBusy}
+                      >
+                        <IconPlus aria-hidden="true" />
+                        {'\u65b0\u589e'}
+                      </button>
                     </div>
                     <div className="notes-settings-category-list">
                       {categoryCounts.length > 0 ? (
@@ -7033,25 +7360,12 @@ export default function NotesWorkbench() {
                           </div>
                         ))
                       ) : null}
-
-                      <button
-                        type="button"
-                        className="notes-settings-category-create"
-                        onClick={openCreateCategoryDialog}
-                        disabled={isBusy}
-                        aria-label={'\u65b0\u5efa\u7c7b\u76ee'}
-                        title={'\u65b0\u5efa\u7c7b\u76ee'}
-                      >
-                        <span className="notes-settings-category-create-plus" aria-hidden="true">
-                          <IconPlus />
-                        </span>
-                      </button>
                     </div>
                   </section>
                 ) : null}
 
-                {settingsSection === 'basic' || settingsSection === 'site' ? (
-                  <section className={`notes-settings-section notes-settings-profile notes-settings-mode-${settingsSection}`}>
+                {settingsSection === 'basic' ? (
+                  <section className="notes-settings-section notes-settings-profile">
                     <div className="notes-settings-blog-grid">
                       <div className="notes-settings-avatar-card notes-settings-basic-only">
                         <button
@@ -7089,207 +7403,253 @@ export default function NotesWorkbench() {
                           onChange={(event) => updateSiteConfigDraft({ tagline: event.target.value })}
                         />
                       </label>
+                    </div>
+                  </section>
+                ) : null}
 
-                      <div className="notes-settings-friend-section notes-settings-site-only">
-                        <div className="notes-settings-friend-head">
-                          <span>{'\u53cb\u60c5\u94fe\u63a5'}</span>
-                          <button type="button" onClick={addFriendLinkDraft}>
-                            <IconPlus aria-hidden="true" />
-                            {'\u65b0\u589e'}
-                          </button>
-                        </div>
-
-                        <div className="notes-settings-friend-list">
-                          {(siteConfigDraft.friendLinks ?? []).length > 0 ? (
-                            (siteConfigDraft.friendLinks ?? []).map((link, index, links) => (
-                              <div className="notes-settings-friend-row" key={index}>
-                                <FriendLinkAvatar
-                                  label={link.label}
-                                  icon={link.icon}
-                                  fetchedAt={link.iconFetchedAt}
-                                />
-
-                                <div className="notes-settings-friend-fields">
-                                  <input
-                                    value={link.label}
-                                    disabled={friendIconLoadingIndex === index}
-                                    onChange={(event) => updateFriendLinkDraft(index, { label: event.target.value })}
-                                    placeholder={'\u7ad9\u70b9\u540d\u79f0'}
-                                    aria-label={`\u7b2c ${index + 1} \u4e2a\u53cb\u94fe\u7684\u7ad9\u70b9\u540d\u79f0`}
-                                  />
-                                  <input
-                                    type="url"
-                                    value={link.href}
-                                    disabled={friendIconLoadingIndex === index}
-                                    onChange={(event) =>
-                                      updateFriendLinkDraft(index, {
-                                        href: event.target.value,
-                                        icon: '',
-                                        iconSource: '',
-                                        iconTarget: '',
-                                        iconFetchedAt: '',
-                                      })
-                                    }
-                                    onBlur={() => refreshFriendLinkIconIfNeeded(index)}
-                                    placeholder="https://example.com"
-                                    aria-label={`\u7b2c ${index + 1} \u4e2a\u53cb\u94fe\u7684\u7f51\u5740`}
-                                  />
-                                </div>
-
-                                <div className="notes-settings-friend-actions">
-                                  <button
-                                    type="button"
-                                    className={friendIconLoadingIndex === index ? 'loading' : ''}
-                                    onClick={() => void refreshFriendLinkIcon(index)}
-                                    disabled={friendIconLoadingIndex !== null || !link.href.trim() || link.href.trim() === '#'}
-                                    title={'\u5237\u65b0\u7ad9\u70b9\u56fe\u6807'}
-                                    aria-label={`\u5237\u65b0 ${link.label || `\u7b2c ${index + 1} \u4e2a\u53cb\u94fe`} \u7684\u7ad9\u70b9\u56fe\u6807`}
-                                  >
-                                    {friendIconLoadingIndex === index ? (
-                                      <IconLoader2 aria-hidden="true" />
-                                    ) : (
-                                      <IconRefresh aria-hidden="true" />
-                                    )}
-                                  </button>
-                                  <button
-                                    type="button"
-                                    onClick={() => moveFriendLinkDraft(index, -1)}
-                                    disabled={friendIconLoadingIndex !== null || index === 0}
-                                    title={'\u4e0a\u79fb'}
-                                    aria-label={`\u4e0a\u79fb ${link.label || `\u7b2c ${index + 1} \u4e2a\u53cb\u94fe`}`}
-                                  >
-                                    <IconArrowUp aria-hidden="true" />
-                                  </button>
-                                  <button
-                                    type="button"
-                                    onClick={() => moveFriendLinkDraft(index, 1)}
-                                    disabled={friendIconLoadingIndex !== null || index === links.length - 1}
-                                    title={'\u4e0b\u79fb'}
-                                    aria-label={`\u4e0b\u79fb ${link.label || `\u7b2c ${index + 1} \u4e2a\u53cb\u94fe`}`}
-                                  >
-                                    <IconArrowDown aria-hidden="true" />
-                                  </button>
-                                  <button
-                                    type="button"
-                                    className="danger"
-                                    onClick={() => removeFriendLinkDraft(index)}
-                                    disabled={friendIconLoadingIndex !== null}
-                                    title={'\u5220\u9664'}
-                                    aria-label={`\u5220\u9664 ${link.label || `\u7b2c ${index + 1} \u4e2a\u53cb\u94fe`}`}
-                                  >
-                                    <IconTrash aria-hidden="true" />
-                                  </button>
-                                </div>
-                              </div>
-                            ))
-                          ) : (
-                            <button type="button" className="notes-settings-friend-empty" onClick={addFriendLinkDraft}>
-                              <IconPlus aria-hidden="true" />
-                              <span>{'\u6dfb\u52a0\u7b2c\u4e00\u4e2a\u53cb\u60c5\u94fe\u63a5'}</span>
-                            </button>
-                          )}
-                        </div>
+                {settingsSection === 'basic' ? (
+                  <section className="notes-settings-section notes-settings-basic-links">
+                    <div className="notes-settings-friend-section">
+                      <div className="notes-settings-friend-head">
+                        <span>{'\u53cb\u60c5\u94fe\u63a5'}</span>
+                        <button type="button" onClick={addFriendLinkDraft}>
+                          <IconPlus aria-hidden="true" />
+                          {'\u65b0\u589e'}
+                        </button>
                       </div>
 
-                      <div className="notes-settings-friend-section notes-settings-site-only">
-                        <div className="notes-settings-friend-head">
-                          <span>{'\u5e38\u7528\u5de5\u5177'}</span>
-                          <button type="button" onClick={addToolLinkDraft}>
-                            <IconPlus aria-hidden="true" />
-                            {'\u65b0\u589e'}
-                          </button>
-                        </div>
+                      <div className="notes-settings-friend-list">
+                        {(siteConfigDraft.friendLinks ?? []).length > 0 ? (
+                          (siteConfigDraft.friendLinks ?? []).map((link, index, links) => (
+                            <div
+                              className={[
+                                'notes-settings-friend-row',
+                                draggingSiteLink?.kind === 'friend' && draggingSiteLink.index === index ? 'dragging' : '',
+                              ]
+                                .filter(Boolean)
+                                .join(' ')}
+                              key={index}
+                              data-site-link-kind="friend"
+                              data-site-link-index={index}
+                              onPointerEnter={() => handleSiteLinkPointerEnter('friend', index)}
+                            >
+                              <span
+                                className="notes-settings-icon-button tone-handle notes-settings-friend-handle"
+                                role="button"
+                                tabIndex={friendIconLoadingIndex !== null || isBusy ? -1 : 0}
+                                aria-disabled={friendIconLoadingIndex !== null || isBusy}
+                                onPointerDown={(event) => {
+                                  if (friendIconLoadingIndex === null) {
+                                    beginSiteLinkPointerDrag(event, 'friend', index);
+                                  }
+                                }}
+                                onKeyDown={(event) => {
+                                  if (friendIconLoadingIndex !== null || isBusy) {
+                                    return;
+                                  }
 
-                        <div className="notes-settings-friend-list">
-                          {(siteConfigDraft.toolLinks ?? []).length > 0 ? (
-                            (siteConfigDraft.toolLinks ?? []).map((link, index, links) => (
-                              <div className="notes-settings-friend-row" key={index}>
-                                <FriendLinkAvatar
-                                  label={link.label}
-                                  icon={link.icon}
-                                  fetchedAt={link.iconFetchedAt}
+                                  if (event.key === 'ArrowUp' && index > 0) {
+                                    event.preventDefault();
+                                    moveFriendLinkDraft(index, -1);
+                                  }
+
+                                  if (event.key === 'ArrowDown' && index < links.length - 1) {
+                                    event.preventDefault();
+                                    moveFriendLinkDraft(index, 1);
+                                  }
+                                }}
+                                title={'\u62d6\u52a8\u6392\u5e8f'}
+                                aria-label={`\u62d6\u52a8\u6392\u5e8f ${link.label || `\u7b2c ${index + 1} \u4e2a\u53cb\u94fe`}`}
+                              >
+                                <IconGripVertical aria-hidden="true" />
+                              </span>
+                              <FriendLinkAvatar label={link.label} icon={link.icon} fetchedAt={link.iconFetchedAt} />
+
+                              <div className="notes-settings-friend-fields">
+                                <input
+                                  value={link.label}
+                                  disabled={friendIconLoadingIndex === index}
+                                  onChange={(event) => updateFriendLinkDraft(index, { label: event.target.value })}
+                                  placeholder={'\u7ad9\u70b9\u540d\u79f0'}
+                                  aria-label={`\u7b2c ${index + 1} \u4e2a\u53cb\u94fe\u7684\u7ad9\u70b9\u540d\u79f0`}
                                 />
-
-                                <div className="notes-settings-friend-fields">
-                                  <input
-                                    value={link.label}
-                                    disabled={toolIconLoadingIndex === index}
-                                    onChange={(event) => updateToolLinkDraft(index, { label: event.target.value })}
-                                    placeholder={'\u5de5\u5177\u540d\u79f0'}
-                                    aria-label={`\u7b2c ${index + 1} \u4e2a\u5de5\u5177\u7684\u540d\u79f0`}
-                                  />
-                                  <input
-                                    type="url"
-                                    value={link.href}
-                                    disabled={toolIconLoadingIndex === index}
-                                    onChange={(event) =>
-                                      updateToolLinkDraft(index, {
-                                        href: event.target.value,
-                                        icon: '',
-                                        iconSource: '',
-                                        iconTarget: '',
-                                        iconFetchedAt: '',
-                                      })
-                                    }
-                                    onBlur={() => refreshToolLinkIconIfNeeded(index)}
-                                    placeholder="https://example.com"
-                                    aria-label={`\u7b2c ${index + 1} \u4e2a\u5de5\u5177\u7684\u7f51\u5740`}
-                                  />
-                                </div>
-
-                                <div className="notes-settings-friend-actions">
-                                  <button
-                                    type="button"
-                                    className={toolIconLoadingIndex === index ? 'loading' : ''}
-                                    onClick={() => void refreshToolLinkIcon(index)}
-                                    disabled={toolIconLoadingIndex !== null || !link.href.trim() || link.href.trim() === '#'}
-                                    title={'\u5237\u65b0\u7ad9\u70b9\u56fe\u6807'}
-                                    aria-label={`\u5237\u65b0 ${link.label || `\u7b2c ${index + 1} \u4e2a\u5de5\u5177`} \u7684\u7ad9\u70b9\u56fe\u6807`}
-                                  >
-                                    {toolIconLoadingIndex === index ? (
-                                      <IconLoader2 aria-hidden="true" />
-                                    ) : (
-                                      <IconRefresh aria-hidden="true" />
-                                    )}
-                                  </button>
-                                  <button
-                                    type="button"
-                                    onClick={() => moveToolLinkDraft(index, -1)}
-                                    disabled={toolIconLoadingIndex !== null || index === 0}
-                                    title={'\u4e0a\u79fb'}
-                                    aria-label={`\u4e0a\u79fb ${link.label || `\u7b2c ${index + 1} \u4e2a\u5de5\u5177`}`}
-                                  >
-                                    <IconArrowUp aria-hidden="true" />
-                                  </button>
-                                  <button
-                                    type="button"
-                                    onClick={() => moveToolLinkDraft(index, 1)}
-                                    disabled={toolIconLoadingIndex !== null || index === links.length - 1}
-                                    title={'\u4e0b\u79fb'}
-                                    aria-label={`\u4e0b\u79fb ${link.label || `\u7b2c ${index + 1} \u4e2a\u5de5\u5177`}`}
-                                  >
-                                    <IconArrowDown aria-hidden="true" />
-                                  </button>
-                                  <button
-                                    type="button"
-                                    className="danger"
-                                    onClick={() => removeToolLinkDraft(index)}
-                                    disabled={toolIconLoadingIndex !== null}
-                                    title={'\u5220\u9664'}
-                                    aria-label={`\u5220\u9664 ${link.label || `\u7b2c ${index + 1} \u4e2a\u5de5\u5177`}`}
-                                  >
-                                    <IconTrash aria-hidden="true" />
-                                  </button>
-                                </div>
+                                <input
+                                  type="url"
+                                  value={link.href}
+                                  disabled={friendIconLoadingIndex === index}
+                                  onChange={(event) =>
+                                    updateFriendLinkDraft(index, {
+                                      href: event.target.value,
+                                      icon: '',
+                                      iconSource: '',
+                                      iconTarget: '',
+                                      iconFetchedAt: '',
+                                    })
+                                  }
+                                  onBlur={() => refreshFriendLinkIconIfNeeded(index)}
+                                  placeholder="https://example.com"
+                                  aria-label={`\u7b2c ${index + 1} \u4e2a\u53cb\u94fe\u7684\u7f51\u5740`}
+                                />
                               </div>
-                            ))
-                          ) : (
-                            <button type="button" className="notes-settings-friend-empty" onClick={addToolLinkDraft}>
-                              <IconPlus aria-hidden="true" />
-                              <span>{'\u6dfb\u52a0\u7b2c\u4e00\u4e2a\u5e38\u7528\u5de5\u5177'}</span>
-                            </button>
-                          )}
-                        </div>
+
+                              <div className="notes-settings-friend-actions">
+                                <button
+                                  type="button"
+                                  className={friendIconLoadingIndex === index ? 'loading' : ''}
+                                  onClick={() => void refreshFriendLinkIcon(index)}
+                                  disabled={friendIconLoadingIndex !== null || !link.href.trim() || link.href.trim() === '#'}
+                                  title={'\u5237\u65b0\u7ad9\u70b9\u56fe\u6807'}
+                                  aria-label={`\u5237\u65b0 ${link.label || `\u7b2c ${index + 1} \u4e2a\u53cb\u94fe`} \u7684\u7ad9\u70b9\u56fe\u6807`}
+                                >
+                                  {friendIconLoadingIndex === index ? (
+                                    <IconLoader2 aria-hidden="true" />
+                                  ) : (
+                                    <IconRefresh aria-hidden="true" />
+                                  )}
+                                </button>
+                                <button
+                                  type="button"
+                                  className="danger"
+                                  onClick={() => removeFriendLinkDraft(index)}
+                                  disabled={friendIconLoadingIndex !== null}
+                                  title={'\u5220\u9664'}
+                                  aria-label={`\u5220\u9664 ${link.label || `\u7b2c ${index + 1} \u4e2a\u53cb\u94fe`}`}
+                                >
+                                  <IconTrash aria-hidden="true" />
+                                </button>
+                              </div>
+                            </div>
+                          ))
+                        ) : (
+                          <button type="button" className="notes-settings-friend-empty" onClick={addFriendLinkDraft}>
+                            <IconPlus aria-hidden="true" />
+                            <span>{'\u6dfb\u52a0\u7b2c\u4e00\u4e2a\u53cb\u60c5\u94fe\u63a5'}</span>
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  </section>
+                ) : null}
+
+                {settingsSection === 'basic' ? (
+                  <section className="notes-settings-section notes-settings-basic-tools">
+                    <div className="notes-settings-friend-section">
+                      <div className="notes-settings-friend-head">
+                        <span>{'\u5e38\u7528\u5de5\u5177'}</span>
+                        <button type="button" onClick={addToolLinkDraft}>
+                          <IconPlus aria-hidden="true" />
+                          {'\u65b0\u589e'}
+                        </button>
+                      </div>
+
+                      <div className="notes-settings-friend-list">
+                        {(siteConfigDraft.toolLinks ?? []).length > 0 ? (
+                          (siteConfigDraft.toolLinks ?? []).map((link, index, links) => (
+                            <div
+                              className={[
+                                'notes-settings-friend-row',
+                                draggingSiteLink?.kind === 'tool' && draggingSiteLink.index === index ? 'dragging' : '',
+                              ]
+                                .filter(Boolean)
+                                .join(' ')}
+                              key={index}
+                              data-site-link-kind="tool"
+                              data-site-link-index={index}
+                              onPointerEnter={() => handleSiteLinkPointerEnter('tool', index)}
+                            >
+                              <span
+                                className="notes-settings-icon-button tone-handle notes-settings-friend-handle"
+                                role="button"
+                                tabIndex={toolIconLoadingIndex !== null || isBusy ? -1 : 0}
+                                aria-disabled={toolIconLoadingIndex !== null || isBusy}
+                                onPointerDown={(event) => {
+                                  if (toolIconLoadingIndex === null) {
+                                    beginSiteLinkPointerDrag(event, 'tool', index);
+                                  }
+                                }}
+                                onKeyDown={(event) => {
+                                  if (toolIconLoadingIndex !== null || isBusy) {
+                                    return;
+                                  }
+
+                                  if (event.key === 'ArrowUp' && index > 0) {
+                                    event.preventDefault();
+                                    moveToolLinkDraft(index, -1);
+                                  }
+
+                                  if (event.key === 'ArrowDown' && index < links.length - 1) {
+                                    event.preventDefault();
+                                    moveToolLinkDraft(index, 1);
+                                  }
+                                }}
+                                title={'\u62d6\u52a8\u6392\u5e8f'}
+                                aria-label={`\u62d6\u52a8\u6392\u5e8f ${link.label || `\u7b2c ${index + 1} \u4e2a\u5de5\u5177`}`}
+                              >
+                                <IconGripVertical aria-hidden="true" />
+                              </span>
+                              <FriendLinkAvatar label={link.label} icon={link.icon} fetchedAt={link.iconFetchedAt} />
+
+                              <div className="notes-settings-friend-fields">
+                                <input
+                                  value={link.label}
+                                  disabled={toolIconLoadingIndex === index}
+                                  onChange={(event) => updateToolLinkDraft(index, { label: event.target.value })}
+                                  placeholder={'\u5de5\u5177\u540d\u79f0'}
+                                  aria-label={`\u7b2c ${index + 1} \u4e2a\u5de5\u5177\u7684\u540d\u79f0`}
+                                />
+                                <input
+                                  type="url"
+                                  value={link.href}
+                                  disabled={toolIconLoadingIndex === index}
+                                  onChange={(event) =>
+                                    updateToolLinkDraft(index, {
+                                      href: event.target.value,
+                                      icon: '',
+                                      iconSource: '',
+                                      iconTarget: '',
+                                      iconFetchedAt: '',
+                                    })
+                                  }
+                                  onBlur={() => refreshToolLinkIconIfNeeded(index)}
+                                  placeholder="https://example.com"
+                                  aria-label={`\u7b2c ${index + 1} \u4e2a\u5de5\u5177\u7684\u7f51\u5740`}
+                                />
+                              </div>
+
+                              <div className="notes-settings-friend-actions">
+                                <button
+                                  type="button"
+                                  className={toolIconLoadingIndex === index ? 'loading' : ''}
+                                  onClick={() => void refreshToolLinkIcon(index)}
+                                  disabled={toolIconLoadingIndex !== null || !link.href.trim() || link.href.trim() === '#'}
+                                  title={'\u5237\u65b0\u7ad9\u70b9\u56fe\u6807'}
+                                  aria-label={`\u5237\u65b0 ${link.label || `\u7b2c ${index + 1} \u4e2a\u5de5\u5177`} \u7684\u7ad9\u70b9\u56fe\u6807`}
+                                >
+                                  {toolIconLoadingIndex === index ? (
+                                    <IconLoader2 aria-hidden="true" />
+                                  ) : (
+                                    <IconRefresh aria-hidden="true" />
+                                  )}
+                                </button>
+                                <button
+                                  type="button"
+                                  className="danger"
+                                  onClick={() => removeToolLinkDraft(index)}
+                                  disabled={toolIconLoadingIndex !== null}
+                                  title={'\u5220\u9664'}
+                                  aria-label={`\u5220\u9664 ${link.label || `\u7b2c ${index + 1} \u4e2a\u5de5\u5177`}`}
+                                >
+                                  <IconTrash aria-hidden="true" />
+                                </button>
+                              </div>
+                            </div>
+                          ))
+                        ) : (
+                          <button type="button" className="notes-settings-friend-empty" onClick={addToolLinkDraft}>
+                            <IconPlus aria-hidden="true" />
+                            <span>{'\u6dfb\u52a0\u7b2c\u4e00\u4e2a\u5e38\u7528\u5de5\u5177'}</span>
+                          </button>
+                        )}
                       </div>
                     </div>
                   </section>
@@ -7575,56 +7935,49 @@ export default function NotesWorkbench() {
                   </section>
                 ) : null}
 
-                {settingsSection === 'site' || settingsSection === 'publish' ? (
-                  <section className={`notes-settings-section notes-settings-services notes-settings-mode-${settingsSection}`}>
-                    <div className="notes-settings-blog-grid">
-                      <label className="notes-settings-field wide notes-settings-publish-only">
-                        <span>{'\u4ed3\u5e93\u5730\u5740'}</span>
-                        <input
-                          type="text"
-                          value={siteConfigDraft.repository?.remote ?? ''}
-                          onChange={(event) => updateRepositoryConfigDraft({ remote: event.target.value })}
-                          placeholder="https://github.com/user/repo.git"
-                        />
-                      </label>
+                {settingsSection === 'basic' ? (
+                  <section className="notes-settings-section notes-settings-services notes-settings-basic-site">
+                    <div className="notes-settings-inline-heading">
+                      <span>{'\u7ad9\u70b9\u8bbe\u7f6e'}</span>
+                    </div>
+                    <div className="notes-settings-service-grid">
+                      <section className="notes-settings-integration-card">
+                        <header className="notes-settings-integration-head">
+                          <div>
+                            <strong>文章卡片配图</strong>
+                            <span>从图库中为文章列表稳定随机展示一张图片</span>
+                          </div>
+                          <button
+                            type="button"
+                            className={`notes-settings-switch ${siteConfigDraft.cardImages?.enabled ? 'on' : ''}`}
+                            role="switch"
+                            aria-checked={Boolean(siteConfigDraft.cardImages?.enabled)}
+                            aria-label="开启文章卡片配图"
+                            onClick={() =>
+                              updateCardImageConfigDraft({ enabled: !siteConfigDraft.cardImages?.enabled })
+                            }
+                          >
+                            <span />
+                          </button>
+                        </header>
+                      </section>
 
-                      <label className="notes-settings-field notes-settings-publish-only">
-                        <span>{'\u53d1\u5e03\u5206\u652f'}</span>
-                        <input
-                          value={siteConfigDraft.repository?.branch ?? 'gh-pages'}
-                          onChange={(event) => updateRepositoryConfigDraft({ branch: event.target.value })}
-                          placeholder="gh-pages"
-                        />
-                      </label>
-
-                      <div className="notes-settings-site-only notes-settings-service-grid">
-                        <section className="notes-settings-integration-card">
-                          <header className="notes-settings-integration-head">
-                            <div>
-                              <strong>文章卡片配图</strong>
-                              <span>从图库中为文章列表稳定随机展示一张图片</span>
-                            </div>
+                      <section className="notes-settings-integration-card">
+                        <header className="notes-settings-integration-head">
+                          <div>
+                            <strong>阅读统计</strong>
+                            <span>使用 GoatCounter 统计文章详情页访问量</span>
+                          </div>
+                          <div className="notes-settings-integration-actions">
                             <button
                               type="button"
-                              className={`notes-settings-switch ${siteConfigDraft.cardImages?.enabled ? 'on' : ''}`}
-                              role="switch"
-                              aria-checked={Boolean(siteConfigDraft.cardImages?.enabled)}
-                              aria-label="开启文章卡片配图"
-                              onClick={() =>
-                                updateCardImageConfigDraft({ enabled: !siteConfigDraft.cardImages?.enabled })
-                              }
+                              className="notes-settings-icon-button notes-settings-integration-config"
+                              onClick={() => setSiteIntegrationPanel('goatcounter')}
+                              title="配置阅读统计"
+                              aria-label="配置阅读统计"
                             >
-                              <span />
+                              <IconSettings aria-hidden="true" />
                             </button>
-                          </header>
-                        </section>
-
-                        <section className="notes-settings-integration-card">
-                          <header className="notes-settings-integration-head">
-                            <div>
-                              <strong>阅读统计</strong>
-                              <span>使用 GoatCounter 统计文章详情页访问量</span>
-                            </div>
                             <button
                               type="button"
                               className={`notes-settings-switch ${siteConfigDraft.goatcounter?.enabled ? 'on' : ''}`}
@@ -7637,35 +7990,26 @@ export default function NotesWorkbench() {
                             >
                               <span />
                             </button>
-                          </header>
-                          {siteConfigDraft.goatcounter?.enabled ? (
-                            <div className="notes-settings-integration-fields">
-                              <label className="notes-settings-field wide">
-                                <span>GoatCounter Endpoint</span>
-                                <input
-                                  value={siteConfigDraft.goatcounter?.endpoint ?? ''}
-                                  onChange={(event) => updateGoatCounterConfigDraft({ endpoint: event.target.value })}
-                                  placeholder="https://your-code.goatcounter.com/count"
-                                />
-                              </label>
-                              <label className="notes-settings-field wide">
-                                <span>统计脚本</span>
-                                <input
-                                  value={siteConfigDraft.goatcounter?.scriptUrl ?? 'https://gc.zgo.at/count.js'}
-                                  onChange={(event) => updateGoatCounterConfigDraft({ scriptUrl: event.target.value })}
-                                  placeholder="https://gc.zgo.at/count.js"
-                                />
-                              </label>
-                            </div>
-                          ) : null}
-                        </section>
+                          </div>
+                        </header>
+                      </section>
 
-                        <section className="notes-settings-integration-card">
-                          <header className="notes-settings-integration-head">
-                            <div>
-                              <strong>评论系统</strong>
-                              <span>使用 Giscus 将 GitHub Discussions 接入文章页</span>
-                            </div>
+                      <section className="notes-settings-integration-card">
+                        <header className="notes-settings-integration-head">
+                          <div>
+                            <strong>评论系统</strong>
+                            <span>使用 Giscus 将 GitHub Discussions 接入文章页</span>
+                          </div>
+                          <div className="notes-settings-integration-actions">
+                            <button
+                              type="button"
+                              className="notes-settings-icon-button notes-settings-integration-config"
+                              onClick={() => setSiteIntegrationPanel('giscus')}
+                              title="配置评论系统"
+                              aria-label="配置评论系统"
+                            >
+                              <IconSettings aria-hidden="true" />
+                            </button>
                             <button
                               type="button"
                               className={`notes-settings-switch ${siteConfigDraft.giscus?.enabled ? 'on' : ''}`}
@@ -7676,119 +8020,149 @@ export default function NotesWorkbench() {
                             >
                               <span />
                             </button>
-                          </header>
-                          {siteConfigDraft.giscus?.enabled ? (
-                            <div className="notes-settings-integration-fields two-column">
-                              <label className="notes-settings-field wide">
-                                <span>Giscus 仓库</span>
-                                <input
-                                  value={siteConfigDraft.giscus?.repo ?? ''}
-                                  onChange={(event) => updateGiscusConfigDraft({ repo: event.target.value })}
-                                  placeholder="owner/repo"
-                                />
-                              </label>
-                              <label className="notes-settings-field">
-                                <span>Repo ID</span>
-                                <input
-                                  value={siteConfigDraft.giscus?.repoId ?? ''}
-                                  onChange={(event) => updateGiscusConfigDraft({ repoId: event.target.value })}
-                                />
-                              </label>
-                              <label className="notes-settings-field">
-                                <span>分类名称</span>
-                                <input
-                                  value={siteConfigDraft.giscus?.category ?? 'Announcements'}
-                                  onChange={(event) => updateGiscusConfigDraft({ category: event.target.value })}
-                                  placeholder="Announcements"
-                                />
-                              </label>
-                              <label className="notes-settings-field wide">
-                                <span>Category ID</span>
-                                <input
-                                  value={siteConfigDraft.giscus?.categoryId ?? ''}
-                                  onChange={(event) => updateGiscusConfigDraft({ categoryId: event.target.value })}
-                                />
-                              </label>
-                              <label className="notes-settings-field">
-                                <span>语言</span>
-                                <input
-                                  value={siteConfigDraft.giscus?.lang ?? 'zh-CN'}
-                                  onChange={(event) => updateGiscusConfigDraft({ lang: event.target.value })}
-                                  placeholder="zh-CN"
-                                />
-                              </label>
-                              <label className="notes-settings-field">
-                                <span>主题</span>
-                                <input
-                                  value={siteConfigDraft.giscus?.theme ?? 'preferred_color_scheme'}
-                                  onChange={(event) => updateGiscusConfigDraft({ theme: event.target.value })}
-                                  placeholder="preferred_color_scheme"
-                                />
-                              </label>
-                            </div>
-                          ) : null}
-                        </section>
-                      </div>
+                          </div>
+                        </header>
+                      </section>
+                    </div>
+                  </section>
+                ) : null}
 
-                      <div className="notes-settings-connection notes-settings-publish-only">
+                {settingsSection === 'publish' ? (
+                  <section className="notes-settings-section notes-settings-sync-section">
+                    <article className="notes-settings-sync-card">
+                      <header className="notes-settings-sync-header">
                         <div>
-                          <strong>远程仓库连接</strong>
-                          <span>{publishConnectionMessage}</span>
+                          <strong>同步站点</strong>
+                          <span>
+                            {siteConfigDraft.repository?.remote.trim() || '尚未配置远程仓库'}
+                            {siteConfigDraft.repository?.branch.trim()
+                              ? ` · ${siteConfigDraft.repository.branch.trim()}`
+                              : ''}
+                          </span>
                         </div>
                         <button
                           type="button"
-                          onClick={() => void refreshPublishStatus()}
-                          disabled={isTestingRemote || !siteConfigDraft.repository?.remote.trim()}
+                          className="notes-settings-icon-button notes-settings-integration-config"
+                          onClick={() => setSiteIntegrationPanel('repository')}
+                          title="配置仓库"
+                          aria-label="配置仓库"
                         >
-                          {isTestingRemote ? (
-                            <>
-                              <IconLoader2 className="spinning" aria-hidden="true" />
-                              连接中
-                            </>
-                          ) : (
-                            <>
-                              <IconRefresh aria-hidden="true" />
-                              测试连接
-                            </>
-                          )}
+                          <IconSettings aria-hidden="true" />
                         </button>
+                      </header>
+
+                      <div className="notes-settings-sync-body">
+                        <div className="notes-pull-conflict-strategy notes-settings-sync-conflict" aria-label="冲突处理方式">
+                          <span>冲突处理</span>
+                          <div>
+                            <button
+                              type="button"
+                              className={pullConflictStrategy === 'remote' ? 'active' : ''}
+                              onClick={() => setPullConflictStrategy('remote')}
+                              disabled={isPullingContent || isPublishingSite}
+                            >
+                              远端优先
+                            </button>
+                            <button
+                              type="button"
+                              className={pullConflictStrategy === 'local' ? 'active' : ''}
+                              onClick={() => setPullConflictStrategy('local')}
+                              disabled={isPullingContent || isPublishingSite}
+                            >
+                              本地优先
+                            </button>
+                          </div>
+                          <small>
+                            {pullConflictStrategy === 'remote'
+                              ? '远端独有与本地独有都会保留，同一路径冲突时使用远端版本。'
+                              : '远端独有与本地独有都会保留，同一路径冲突时保留本地版本。'}
+                          </small>
+                        </div>
+
+                        {publishLogs.length > 0 ? (
+                          <section
+                            className={`notes-sync-flow ${publishRunState}`}
+                            aria-live="polite"
+                            aria-label="站点同步进度"
+                          >
+                            <header className="notes-sync-flow-head">
+                              <strong>
+                                {publishRunState === 'success'
+                                  ? '同步完成'
+                                  : publishRunState === 'error'
+                                    ? '同步失败'
+                                    : '正在同步'}
+                              </strong>
+                              <span>{publishProgress}%</span>
+                            </header>
+                            <div
+                              className="notes-sync-flow-track"
+                              role="progressbar"
+                              aria-valuemin={0}
+                              aria-valuemax={100}
+                              aria-valuenow={publishProgress}
+                            >
+                              <span style={{ width: `${publishProgress}%` }} />
+                            </div>
+                            <div className="notes-sync-flow-list" ref={publishLogViewRef}>
+                              {publishLogs.map((entry) => (
+                                <article className={`notes-sync-flow-step ${entry.level}`} key={entry.id}>
+                                  <span className="notes-sync-flow-dot" aria-hidden="true" />
+                                  <div>
+                                    <strong>{entry.message}</strong>
+                                    {entry.detail ? <small>{entry.detail}</small> : null}
+                                  </div>
+                                </article>
+                              ))}
+                            </div>
+                          </section>
+                        ) : (
+                          <div className="notes-publish-dialog-pending notes-settings-sync-pending">
+                            <IconRefresh aria-hidden="true" />
+                            <span>点击同步后，会先合并远端与本地内容，再发布最终结果。</span>
+                          </div>
+                        )}
                       </div>
 
-                      <div className="notes-settings-publish-actions notes-settings-publish-only">
+                      <footer className="notes-settings-sync-actions">
                         <button
                           type="button"
                           className="notes-settings-secondary"
-                          onClick={openPullRemoteContentDialog}
-                          disabled={
-                            isPullingContent ||
-                            isPublishingSite ||
-                            !siteConfigDraft.repository?.remote.trim() ||
-                            !siteConfigDraft.repository?.branch.trim()
-                          }
+                          onClick={() => void refreshPublishStatus()}
+                          disabled={isTestingRemote || isPullingContent || isPublishingSite || !siteConfigDraft.repository?.remote.trim()}
                         >
-                          {isPullingContent ? (
+                          {isTestingRemote ? (
                             <IconLoader2 className="spinning" aria-hidden="true" />
                           ) : (
-                            <IconDownload aria-hidden="true" />
+                            <IconRefresh aria-hidden="true" />
                           )}
-                          拉取远端内容
+                          测试连接
                         </button>
                         <button
                           type="button"
                           className="notes-settings-primary"
-                          onClick={openSitePublishDialog}
-                          disabled={isPublishingSite || isPullingContent || isBusy}
+                          onClick={() => void syncSiteChanges()}
+                          disabled={
+                            isPublishingSite ||
+                            isPullingContent ||
+                            isBusy ||
+                            !siteConfigDraft.repository?.remote.trim() ||
+                            !siteConfigDraft.repository?.branch.trim()
+                          }
                         >
-                          {isPublishingSite ? (
+                          {isPublishingSite || isPullingContent ? (
                             <IconLoader2 className="spinning" aria-hidden="true" />
                           ) : (
                             <IconUpload aria-hidden="true" />
                           )}
-                          发布站点
+                          {isPublishingSite || isPullingContent
+                            ? '同步中...'
+                            : publishRunState === 'idle'
+                              ? '开始同步'
+                              : '重新同步'}
                         </button>
-                      </div>
-
-                    </div>
+                      </footer>
+                    </article>
                   </section>
                 ) : null}
 
@@ -7925,6 +8299,157 @@ export default function NotesWorkbench() {
                 ) : null}
               </div>
             </div>
+          </section>
+        </div>
+      ) : null}
+
+      {isSettingsOpen && siteIntegrationPanel ? (
+        <div
+          className="notes-dialog-overlay notes-site-integration-dialog-overlay"
+          onClick={() => setSiteIntegrationPanel(null)}
+        >
+          <section
+            className="notes-site-integration-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="notes-site-integration-dialog-title"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <header className="notes-site-integration-dialog-header">
+              <div>
+                <h2 id="notes-site-integration-dialog-title">
+                  {siteIntegrationPanel === 'repository'
+                    ? '仓库设置'
+                    : siteIntegrationPanel === 'goatcounter'
+                      ? '阅读统计设置'
+                      : '评论系统设置'}
+                </h2>
+                <span>
+                  {siteIntegrationPanel === 'repository'
+                    ? 'Repository'
+                    : siteIntegrationPanel === 'goatcounter'
+                      ? 'GoatCounter'
+                      : 'Giscus'}
+                </span>
+              </div>
+              <button
+                type="button"
+                className="notes-site-integration-dialog-close"
+                onClick={() => setSiteIntegrationPanel(null)}
+                aria-label="关闭配置"
+              >
+                <IconX aria-hidden="true" />
+              </button>
+            </header>
+
+            {siteIntegrationPanel === 'repository' ? (
+              <div className="notes-site-integration-dialog-body">
+                <label className="notes-settings-field wide">
+                  <span>仓库地址</span>
+                  <input
+                    type="text"
+                    value={siteConfigDraft.repository?.remote ?? ''}
+                    onChange={(event) => updateRepositoryConfigDraft({ remote: event.target.value })}
+                    placeholder="https://github.com/user/repo.git"
+                  />
+                </label>
+                <label className="notes-settings-field wide">
+                  <span>发布分支</span>
+                  <input
+                    value={siteConfigDraft.repository?.branch ?? 'gh-pages'}
+                    onChange={(event) => updateRepositoryConfigDraft({ branch: event.target.value })}
+                    placeholder="gh-pages"
+                  />
+                </label>
+                <div className="notes-site-integration-dialog-actions">
+                  <span>{publishConnectionMessage}</span>
+                  <button
+                    type="button"
+                    onClick={() => void refreshPublishStatus()}
+                    disabled={isTestingRemote || !siteConfigDraft.repository?.remote.trim()}
+                  >
+                    {isTestingRemote ? (
+                      <IconLoader2 className="spinning" aria-hidden="true" />
+                    ) : (
+                      <IconRefresh aria-hidden="true" />
+                    )}
+                    测试连接
+                  </button>
+                </div>
+              </div>
+            ) : null}
+
+            {siteIntegrationPanel === 'goatcounter' ? (
+              <div className="notes-site-integration-dialog-body">
+                <label className="notes-settings-field wide">
+                  <span>GoatCounter Endpoint</span>
+                  <input
+                    value={siteConfigDraft.goatcounter?.endpoint ?? ''}
+                    onChange={(event) => updateGoatCounterConfigDraft({ endpoint: event.target.value })}
+                    placeholder="https://your-code.goatcounter.com/count"
+                  />
+                </label>
+                <label className="notes-settings-field wide">
+                  <span>统计脚本</span>
+                  <input
+                    value={siteConfigDraft.goatcounter?.scriptUrl ?? 'https://gc.zgo.at/count.js'}
+                    onChange={(event) => updateGoatCounterConfigDraft({ scriptUrl: event.target.value })}
+                    placeholder="https://gc.zgo.at/count.js"
+                  />
+                </label>
+              </div>
+            ) : null}
+
+            {siteIntegrationPanel === 'giscus' ? (
+              <div className="notes-site-integration-dialog-body two-column">
+                <label className="notes-settings-field wide">
+                  <span>Giscus 仓库</span>
+                  <input
+                    value={siteConfigDraft.giscus?.repo ?? ''}
+                    onChange={(event) => updateGiscusConfigDraft({ repo: event.target.value })}
+                    placeholder="owner/repo"
+                  />
+                </label>
+                <label className="notes-settings-field">
+                  <span>Repo ID</span>
+                  <input
+                    value={siteConfigDraft.giscus?.repoId ?? ''}
+                    onChange={(event) => updateGiscusConfigDraft({ repoId: event.target.value })}
+                  />
+                </label>
+                <label className="notes-settings-field">
+                  <span>分类名称</span>
+                  <input
+                    value={siteConfigDraft.giscus?.category ?? 'Announcements'}
+                    onChange={(event) => updateGiscusConfigDraft({ category: event.target.value })}
+                    placeholder="Announcements"
+                  />
+                </label>
+                <label className="notes-settings-field wide">
+                  <span>Category ID</span>
+                  <input
+                    value={siteConfigDraft.giscus?.categoryId ?? ''}
+                    onChange={(event) => updateGiscusConfigDraft({ categoryId: event.target.value })}
+                  />
+                </label>
+                <label className="notes-settings-field">
+                  <span>语言</span>
+                  <input
+                    value={siteConfigDraft.giscus?.lang ?? 'zh-CN'}
+                    onChange={(event) => updateGiscusConfigDraft({ lang: event.target.value })}
+                    placeholder="zh-CN"
+                  />
+                </label>
+                <label className="notes-settings-field">
+                  <span>主题</span>
+                  <input
+                    value={siteConfigDraft.giscus?.theme ?? 'preferred_color_scheme'}
+                    onChange={(event) => updateGiscusConfigDraft({ theme: event.target.value })}
+                    placeholder="preferred_color_scheme"
+                  />
+                </label>
+              </div>
+            ) : null}
           </section>
         </div>
       ) : null}
