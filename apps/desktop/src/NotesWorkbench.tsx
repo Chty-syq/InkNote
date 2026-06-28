@@ -2166,11 +2166,6 @@ export default function NotesWorkbench() {
   );
 
   useEffect(() => {
-    if (!showPreview) {
-      setIsPreviewRenderPending(false);
-      return;
-    }
-
     if (previewBody === previewRenderBody) {
       setIsPreviewRenderPending(false);
       return;
@@ -2187,7 +2182,7 @@ export default function NotesWorkbench() {
     }, delay);
 
     return () => window.clearTimeout(timeout);
-  }, [previewBody, previewRenderBody, showPreview]);
+  }, [previewBody, previewRenderBody]);
 
   const syncPreviewPosition = () => {
     previewSyncFrameRef.current = null;
@@ -2242,18 +2237,10 @@ export default function NotesWorkbench() {
   };
 
   useEffect(() => {
-    if (!showPreview) {
-      return;
-    }
-
     schedulePreviewPositionSync();
   }, [showPreview, deferredPreviewBody]);
 
   useEffect(() => {
-    if (!showPreview) {
-      return;
-    }
-
     const previewPane = previewPaneRef.current;
     const previewArticle = previewArticleRef.current;
     const editor = editorRef.current;
@@ -6256,7 +6243,7 @@ export default function NotesWorkbench() {
                 </div>
               </div>
 
-              {!isPreviewOnly ? (
+              {draft ? (
                 <>
                   <div className="notes-editor-titlebar">
                     <input
@@ -6293,31 +6280,7 @@ export default function NotesWorkbench() {
                 </div>
               ) : null}
 
-              {isPreviewOnly ? (
-                activeWorkspacePanel === 'inknote' ? (
-                  <div className="notes-editor-workbench notes-editor-workbench-preview-only notes-inknote-preview-only">
-                    <div className="notes-rendered-pane notes-inknote-rendered-pane preview-only">
-                      <InkNoteProjectPreviewPanel
-                        project={linkedNotebook}
-                        projectPath={linkedNotebookPath}
-                        status={linkedNotebookStatus}
-                        embedded
-                      />
-                    </div>
-                  </div>
-                ) : (
-                  <div className="notes-editor-workbench notes-editor-workbench-preview-only">
-                    <div ref={previewPaneRef} className="notes-rendered-pane preview-only">
-                      {isPreviewRenderPending ? (
-                        <span className="notes-rendered-pending">{'\u9884\u89c8\u66f4\u65b0\u4e2d'}</span>
-                      ) : null}
-                      <article ref={previewArticleRef} className="notes-rendered-article">
-                        {renderedPreview}
-                      </article>
-                    </div>
-                  </div>
-                )
-              ) : activeWorkspacePanel === 'write' ? (
+              {activeWorkspacePanel === 'write' ? (
                 <>
                   <div className="notes-editor-toolbar">
                     <button
@@ -6468,8 +6431,15 @@ export default function NotesWorkbench() {
                     </button>
                   </div>
 
-                  <div className="notes-editor-workbench">
-                    <div className="notes-source-pane">
+                  <div
+                    className={
+                      isPreviewOnly
+                        ? 'notes-editor-workbench notes-editor-workbench-preview-only'
+                        : 'notes-editor-workbench split'
+                    }
+                  >
+                    {!isPreviewOnly ? (
+                      <div className="notes-source-pane">
                       <textarea
                         ref={editorRef}
                         className="notes-markdown-editor"
@@ -6493,8 +6463,21 @@ export default function NotesWorkbench() {
                         placeholder="Write Markdown content here..."
                         spellCheck={false}
                       />
-                    </div>
+                      </div>
+                    ) : null}
 
+                    <div
+                      ref={previewPaneRef}
+                      className={isPreviewOnly ? 'notes-rendered-pane preview-only' : 'notes-rendered-pane'}
+                      onWheel={isPreviewOnly ? undefined : handlePreviewWheel}
+                    >
+                      {isPreviewRenderPending ? (
+                        <span className="notes-rendered-pending">{'\u9884\u89c8\u66f4\u65b0\u4e2d'}</span>
+                      ) : null}
+                      <article ref={previewArticleRef} className="notes-rendered-article">
+                        {renderedPreview}
+                      </article>
+                    </div>
                   </div>
                 </>
               ) : (
@@ -6689,8 +6672,15 @@ export default function NotesWorkbench() {
                     </button>
                   </div>
 
-                  <div className="notes-editor-workbench split notes-inknote-editor-workbench">
-                    <div className="notes-source-pane">
+                  <div
+                    className={
+                      isPreviewOnly
+                        ? 'notes-editor-workbench notes-editor-workbench-preview-only notes-inknote-preview-only'
+                        : 'notes-editor-workbench split notes-inknote-editor-workbench'
+                    }
+                  >
+                    {!isPreviewOnly ? (
+                      <div className="notes-source-pane">
                       <textarea
                         ref={editorRef}
                         className="notes-markdown-editor"
@@ -6717,14 +6707,22 @@ export default function NotesWorkbench() {
                         spellCheck={false}
                         disabled={!linkedNotebook}
                       />
-                    </div>
+                      </div>
+                    ) : null}
 
-                    <div className="notes-rendered-pane notes-inknote-rendered-pane">
+                    <div
+                      className={
+                        isPreviewOnly
+                          ? 'notes-rendered-pane notes-inknote-rendered-pane preview-only'
+                          : 'notes-rendered-pane notes-inknote-rendered-pane'
+                      }
+                    >
                       <InkNoteProjectPreviewPanel
                         project={linkedNotebook}
                         projectPath={linkedNotebookPath}
                         status={linkedNotebookStatus}
                         embedded
+                        spreadMode={isPreviewOnly ? 'double' : 'single'}
                       />
                     </div>
                   </div>

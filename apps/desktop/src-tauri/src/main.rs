@@ -194,6 +194,16 @@ struct RuntimeContentPayload {
     inknote_projects: BTreeMap<String, String>,
 }
 
+struct RuntimeFeedDocument {
+    title: String,
+    href: String,
+    date: String,
+    updated_at: String,
+    summary: String,
+    body: String,
+    tags: Vec<String>,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct PublishStatus {
@@ -1803,6 +1813,10 @@ fn resolve_static_blog_preview_response(target: &str) -> Result<(&'static str, V
         let body = serde_json::to_vec(&payload).map_err(|_| 500_u16)?;
         return Ok(("application/json; charset=utf-8", body));
     }
+    if path == "/rss.xml" {
+        let feed = create_runtime_rss_feed().map_err(|_| 500_u16)?;
+        return Ok(("application/rss+xml; charset=utf-8", feed.into_bytes()));
+    }
 
     if let Some(public_path) = resolve_preview_public_asset_path(&path).map_err(|_| 500_u16)? {
         return fs::read(&public_path)
@@ -1851,7 +1865,7 @@ fn normalize_preview_asset_request_path(path: &str) -> Option<String> {
     if asset_roots.iter().any(|prefix| path.starts_with(prefix))
         || matches!(
             path,
-            "/inknote-content.json" | "/blog-avatar.jpg" | "/blog-header-bg.png"
+            "/inknote-content.json" | "/rss.xml" | "/blog-avatar.jpg" | "/blog-header-bg.png"
         )
     {
         return None;
@@ -1865,6 +1879,7 @@ fn normalize_preview_asset_request_path(path: &str) -> Option<String> {
         "card-images/",
         "generated/",
         "inknote-content.json",
+        "rss.xml",
         "blog-avatar.jpg",
         "blog-header-bg.png",
     ];
@@ -2181,6 +2196,400 @@ fn create_runtime_content_payload() -> Result<RuntimeContentPayload, String> {
         inknotes: read_markdown_collection(&content, "inknotes")?,
         inknote_projects: read_inknote_project_collection(&content)?,
     })
+}
+
+fn create_runtime_rss_feed() -> Result<String, String> {
+    let payload = create_runtime_content_payload()?;
+    Ok(generate_runtime_rss_feed(&payload))
+}
+
+fn generate_runtime_rss_feed(payload: &RuntimeContentPayload) -> String {
+    let title =
+        json_string(&payload.site_config, "title").unwrap_or_else(|| "Chty's Blog".to_string());
+    let description = json_string(&payload.site_config, "description")
+        .or_else(|| json_string(&payload.site_config, "tagline"))
+        .unwrap_or_else(|| title.clone());
+    let language =
+        json_string(&payload.site_config, "language").unwrap_or_else(|| "zh-CN".to_string());
+    let author = json_string(&payload.site_config, "author").unwrap_or_default();
+    let repository = payload
+        .site_config
+        .get("repository")
+        .and_then(serde_json::Value::as_object);
+    let site_url = normalize_rss_site_url(
+        json_string(&payload.site_config, "baseUrl")
+            .or_else(|| repository.and_then(|value| json_object_string(value, "pagesUrl")))
+            .unwrap_or_default(),
+    );
+
+    let mut documents = Vec::new();
+    documents.extend(
+        payload
+            .markdown
+            .iter()
+            .filter_map(|(id, raw)| parse_runtime_feed_document("markdown", id, raw)),
+    );
+    documents.extend(
+        payload
+            .inknotes
+            .iter()
+            .filter_map(|(id, raw)| parse_runtime_feed_document("inknote", id, raw)),
+    );
+    documents.sort_by(|left, right| {
+        runtime_feed_sort_key(right)
+            .cmp(&runtime_feed_sort_key(left))
+            .then_with(|| right.title.cmp(&left.title))
+    });
+
+    let mut items = String::new();
+    for document in documents.into_iter().take(50) {
+        let link = join_rss_url(&site_url, &document.href);
+        let description_text = if document.summary.trim().is_empty() {
+            truncate_chars(&strip_markdown_for_rss(&document.body), 240)
+        } else {
+            document.summary.clone()
+        };
+
+        items.push_str("    <item>\n");
+        items.push_str(&format!(
+            "      <title>{}</title>\n",
+            escape_xml(&document.title)
+        ));
+        items.push_str(&format!("      <link>{}</link>\n", escape_xml(&link)));
+        items.push_str(&format!(
+            "      <guid isPermaLink=\"true\">{}</guid>\n",
+            escape_xml(&link)
+        ));
+        if let Some(date) =
+            non_empty_string(document.updated_at).or_else(|| non_empty_string(document.date))
+        {
+            items.push_str(&format!("      <pubDate>{}</pubDate>\n", escape_xml(&date)));
+        }
+        items.push_str(&format!(
+            "      <description>{}</description>\n",
+            escape_xml(&description_text)
+        ));
+        for tag in document.tags {
+            items.push_str(&format!(
+                "      <category>{}</category>\n",
+                escape_xml(&tag)
+            ));
+        }
+        items.push_str("    </item>\n");
+    }
+
+    [
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>".to_string(),
+        "<rss version=\"2.0\" xmlns:atom=\"http://www.w3.org/2005/Atom\">".to_string(),
+        "  <channel>".to_string(),
+        format!("    <title>{}</title>", escape_xml(&title)),
+        format!(
+            "    <link>{}</link>",
+            escape_xml(if site_url.is_empty() { "/" } else { &site_url })
+        ),
+        format!(
+            "    <description>{}</description>",
+            escape_xml(&description)
+        ),
+        format!("    <language>{}</language>", escape_xml(&language)),
+        if author.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "    <managingEditor>{}</managingEditor>",
+                escape_xml(&author)
+            )
+        },
+        format!(
+            "    <atom:link href=\"{}\" rel=\"self\" type=\"application/rss+xml\" />",
+            escape_xml(&join_rss_url(&site_url, "/rss.xml"))
+        ),
+        items.trim_end().to_string(),
+        "  </channel>".to_string(),
+        "</rss>".to_string(),
+        String::new(),
+    ]
+    .into_iter()
+    .filter(|line| !line.is_empty())
+    .collect::<Vec<_>>()
+    .join("\n")
+}
+
+fn parse_runtime_feed_document(
+    collection_type: &str,
+    id: &str,
+    raw: &str,
+) -> Option<RuntimeFeedDocument> {
+    let (frontmatter, body) = parse_markdown_frontmatter(raw);
+    let document_type = frontmatter_string(&frontmatter, "type")?;
+    if document_type != collection_type {
+        return None;
+    }
+    if !frontmatter_bool(&frontmatter, "published") {
+        return None;
+    }
+
+    let folder = content_entry_folder(id).unwrap_or_else(|| collection_type.to_string());
+    let slug = frontmatter_string(&frontmatter, "slug").unwrap_or(folder);
+    let permalink = frontmatter_string(&frontmatter, "permalink").unwrap_or_default();
+    let href = if collection_type == "markdown" {
+        if permalink.trim().is_empty() {
+            format!("/notes/{slug}")
+        } else if permalink.starts_with('/') {
+            permalink
+        } else {
+            format!("/{permalink}")
+        }
+    } else {
+        format!("/inknote/{slug}")
+    };
+
+    Some(RuntimeFeedDocument {
+        title: frontmatter_string(&frontmatter, "title").unwrap_or_else(|| slug.clone()),
+        href,
+        date: frontmatter_string(&frontmatter, "date").unwrap_or_default(),
+        updated_at: frontmatter_string(&frontmatter, "updatedAt").unwrap_or_default(),
+        summary: frontmatter_string(&frontmatter, "summary").unwrap_or_default(),
+        body,
+        tags: frontmatter_string_array(&frontmatter, "tags"),
+    })
+}
+
+fn parse_markdown_frontmatter(raw: &str) -> (BTreeMap<String, serde_json::Value>, String) {
+    let normalized = raw.trim_start_matches('\u{feff}');
+    let mut frontmatter = BTreeMap::new();
+    let mut lines = normalized.lines();
+    if lines.next().map(str::trim) != Some("---") {
+        return (frontmatter, normalized.trim().to_string());
+    }
+
+    let mut frontmatter_lines = Vec::new();
+    let mut body_lines = Vec::new();
+    let mut in_frontmatter = true;
+    for line in lines {
+        if in_frontmatter && line.trim() == "---" {
+            in_frontmatter = false;
+            continue;
+        }
+
+        if in_frontmatter {
+            frontmatter_lines.push(line.to_string());
+        } else {
+            body_lines.push(line.to_string());
+        }
+    }
+
+    let mut index = 0_usize;
+    while index < frontmatter_lines.len() {
+        let line = frontmatter_lines[index].trim_end();
+        let Some((key, rest)) = line.split_once(':') else {
+            index += 1;
+            continue;
+        };
+        let key = key.trim();
+        if key.is_empty()
+            || !key
+                .chars()
+                .next()
+                .is_some_and(|value| value.is_ascii_alphabetic())
+        {
+            index += 1;
+            continue;
+        }
+
+        let inline_value = rest.trim();
+        if inline_value.is_empty() {
+            let mut values = Vec::new();
+            while index + 1 < frontmatter_lines.len() {
+                let next = frontmatter_lines[index + 1].trim_start();
+                let Some(value) = next.strip_prefix("- ") else {
+                    break;
+                };
+                values.push(serde_json::Value::String(
+                    parse_frontmatter_scalar(value).to_string_value(),
+                ));
+                index += 1;
+            }
+            frontmatter.insert(key.to_string(), serde_json::Value::Array(values));
+        } else {
+            frontmatter.insert(key.to_string(), parse_frontmatter_scalar(inline_value));
+        }
+        index += 1;
+    }
+
+    (frontmatter, body_lines.join("\n").trim().to_string())
+}
+
+fn parse_frontmatter_scalar(value: &str) -> serde_json::Value {
+    let trimmed = value.trim();
+    if trimmed == "true" {
+        return serde_json::Value::Bool(true);
+    }
+    if trimmed == "false" {
+        return serde_json::Value::Bool(false);
+    }
+    if (trimmed.starts_with('"') && trimmed.ends_with('"'))
+        || (trimmed.starts_with('\'') && trimmed.ends_with('\''))
+    {
+        return serde_json::Value::String(trimmed[1..trimmed.len().saturating_sub(1)].to_string());
+    }
+    serde_json::Value::String(trimmed.to_string())
+}
+
+trait FrontmatterScalarExt {
+    fn to_string_value(&self) -> String;
+}
+
+impl FrontmatterScalarExt for serde_json::Value {
+    fn to_string_value(&self) -> String {
+        match self {
+            serde_json::Value::Bool(value) => value.to_string(),
+            serde_json::Value::String(value) => value.clone(),
+            _ => String::new(),
+        }
+    }
+}
+
+fn frontmatter_string(
+    frontmatter: &BTreeMap<String, serde_json::Value>,
+    key: &str,
+) -> Option<String> {
+    match frontmatter.get(key) {
+        Some(serde_json::Value::String(value)) if !value.trim().is_empty() => {
+            Some(value.trim().to_string())
+        }
+        Some(serde_json::Value::Bool(value)) => Some(value.to_string()),
+        _ => None,
+    }
+}
+
+fn frontmatter_bool(frontmatter: &BTreeMap<String, serde_json::Value>, key: &str) -> bool {
+    match frontmatter.get(key) {
+        Some(serde_json::Value::Bool(value)) => *value,
+        Some(serde_json::Value::String(value)) => value.trim() == "true",
+        _ => false,
+    }
+}
+
+fn frontmatter_string_array(
+    frontmatter: &BTreeMap<String, serde_json::Value>,
+    key: &str,
+) -> Vec<String> {
+    frontmatter
+        .get(key)
+        .and_then(serde_json::Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn json_string(value: &serde_json::Value, key: &str) -> Option<String> {
+    value
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+}
+
+fn json_object_string(
+    object: &serde_json::Map<String, serde_json::Value>,
+    key: &str,
+) -> Option<String> {
+    object
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+}
+
+fn content_entry_folder(id: &str) -> Option<String> {
+    id.replace('\\', "/")
+        .split('/')
+        .rev()
+        .nth(1)
+        .map(ToString::to_string)
+        .filter(|value| !value.is_empty())
+}
+
+fn runtime_feed_sort_key(document: &RuntimeFeedDocument) -> String {
+    if !document.updated_at.trim().is_empty() {
+        document.updated_at.clone()
+    } else {
+        document.date.clone()
+    }
+}
+
+fn normalize_rss_site_url(value: String) -> String {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || trimmed.contains("example.github.io") {
+        return String::new();
+    }
+    trimmed.trim_end_matches('/').to_string()
+}
+
+fn join_rss_url(base_url: &str, href: &str) -> String {
+    if base_url.trim().is_empty() {
+        return href.to_string();
+    }
+    if href.starts_with('/') {
+        format!("{base_url}{href}")
+    } else {
+        format!("{base_url}/{href}")
+    }
+}
+
+fn escape_xml(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
+}
+
+fn strip_markdown_for_rss(value: &str) -> String {
+    let mut output = String::new();
+    let mut in_tag = false;
+    for character in value.chars() {
+        match character {
+            '<' => {
+                in_tag = true;
+                output.push(' ');
+            }
+            '>' => {
+                in_tag = false;
+                output.push(' ');
+            }
+            _ if in_tag => {}
+            '#' | '*' | '_' | '-' | '~' | '[' | ']' | '(' | ')' | '`' | '!' | '|' => {
+                output.push(' ')
+            }
+            '\n' | '\r' | '\t' => output.push(' '),
+            _ => output.push(character),
+        }
+    }
+    output.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn truncate_chars(value: &str, limit: usize) -> String {
+    value.chars().take(limit).collect()
+}
+
+fn non_empty_string(value: String) -> Option<String> {
+    if value.trim().is_empty() {
+        None
+    } else {
+        Some(value)
+    }
 }
 
 fn summarize_runtime_manifest(artifact_root: &Path) -> Result<String, String> {

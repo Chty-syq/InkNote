@@ -899,89 +899,6 @@ input[type='range']::-moz-range-thumb {
   padding: 0.72rem;
 }
 
-.linked-inknote-preview-badge {
-  position: absolute;
-  top: 0.7rem;
-  right: 0.82rem;
-  z-index: 2;
-  display: inline-flex;
-  align-items: center;
-  min-height: 24px;
-  padding: 0.12rem 0.46rem;
-  border: 1px solid rgba(94, 111, 129, 0.16);
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.86);
-  color: #5e7184;
-  font-size: 0.72rem;
-  font-weight: 800;
-  box-shadow: 0 8px 18px rgba(31, 47, 64, 0.08);
-}
-
-.linked-inknote-spread-shell {
-  display: grid;
-  grid-template-columns: 1fr auto auto 1fr;
-  grid-template-rows: minmax(0, 1fr) auto;
-  gap: 0.7rem;
-  align-items: center;
-  width: 100%;
-  height: 100%;
-  min-height: 0;
-}
-
-.linked-inknote-spread-shell .spread-nav {
-  grid-row: 2;
-  min-width: 78px;
-  min-height: 30px;
-  padding: 0.34rem 0.78rem;
-  border-radius: 999px;
-  font-size: 0.78rem;
-  font-weight: 800;
-  writing-mode: horizontal-tb;
-}
-
-.linked-inknote-spread-shell .spread-nav:first-of-type {
-  grid-column: 2;
-}
-
-.linked-inknote-spread-shell .spread-nav:last-of-type {
-  grid-column: 3;
-}
-
-.linked-inknote-spread-stage {
-  grid-column: 1 / -1;
-  grid-row: 1;
-  grid-template-columns: minmax(0, 1fr);
-  min-height: 0;
-  height: 100%;
-  padding: 0.42rem;
-  border: 1px solid rgba(122, 90, 60, 0.12);
-  border-radius: 22px;
-  background: rgba(238, 228, 214, 0.36);
-  cursor: ew-resize;
-}
-
-.linked-inknote-spread-stage .spread-page:not(.spread-page-empty) + .spread-page-empty {
-  display: none;
-}
-
-.linked-inknote-spread-stage .spread-page {
-  min-height: 0;
-  height: 100%;
-  justify-content: center;
-}
-
-.linked-inknote-spread-stage:focus {
-  outline: none;
-  box-shadow: 0 0 0 3px rgba(123, 74, 45, 0.12);
-}
-
-.linked-inknote-spread-stage .spread-page img {
-  width: auto;
-  max-width: 100%;
-  max-height: min(calc(100% - 2rem), calc(100vh - 190px));
-  object-fit: contain;
-}
-
 .notes-app-shell {
   width: 100%;
   max-width: none;
@@ -1644,7 +1561,7 @@ input[type='range']::-moz-range-thumb {
   background: rgba(255, 252, 247, 0.58);
 }
 
-/* Keep the embedded InkNote preview single-page. These rules intentionally
+/* Keep the embedded InkNote preview as a compact two-page spread. These rules
    come after the generic reader spread styles so they win the cascade. */
 .linked-inknote-spread-shell {
   display: grid;
@@ -1679,11 +1596,20 @@ input[type='range']::-moz-range-thumb {
 .linked-inknote-spread-stage.spread-stage {
   grid-column: 1 / -1;
   grid-row: 1;
-  grid-template-columns: minmax(0, 1fr);
-  gap: 0;
   min-height: 0;
   height: 100%;
+}
+
+.linked-inknote-spread-stage.spread-stage.is-single-page {
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0;
   padding: 0.36rem;
+}
+
+.linked-inknote-spread-stage.spread-stage.is-double-page {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: clamp(0.65rem, 1.4vw, 1.15rem);
+  padding: 0.52rem;
 }
 
 .linked-inknote-spread-stage.spread-stage .spread-page {
@@ -1693,12 +1619,21 @@ input[type='range']::-moz-range-thumb {
   gap: 0;
 }
 
-.linked-inknote-spread-stage.spread-stage .spread-page:not(.spread-page-empty) + .spread-page-empty {
+.linked-inknote-spread-stage.spread-stage.is-single-page .spread-page:not(.spread-page-empty) + .spread-page-empty {
   display: none;
+}
+
+.linked-inknote-spread-stage.spread-stage.is-double-page .spread-page:not(.spread-page-empty) + .spread-page-empty {
+  display: flex;
 }
 
 .linked-inknote-spread-stage.spread-stage .spread-page:not(.spread-page-empty) > span {
   display: none;
+}
+
+.linked-inknote-spread-stage.spread-stage:focus {
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(123, 74, 45, 0.12);
 }
 
 .linked-inknote-spread-stage.spread-stage .spread-page img {

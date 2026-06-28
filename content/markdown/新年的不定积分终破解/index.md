@@ -1,9 +1,9 @@
 ---
 type: markdown
 title: 新年的不定积分
-slug: 8043157
+slug: "8043157"
 date: 2026-06-15
-updatedAt: 2026-06-21 21:36:53
+updatedAt: 2026-06-28 21:39:16
 tags:
   - 微积分
 published: true
@@ -30,7 +30,7 @@ $(5)\int \frac{x^2+2x+3+4\sin{x}\cos{x}}{(\cos{x}+2\sin{x}+3x\cos{x}+4x\sin{x})^
 
 ---
 
-## 2. Solve (1),(2) by Prof.JJhen
+## 2. Solve (1),(2) by Prof.JJchen
 
 前两个积分的破解方法 **JJchen** 老师已经给出：
 

@@ -23,17 +23,23 @@ interface PreviewPage {
 }
 
 const NOTEBOOK_PREVIEW_SCALE = 0.92;
+type InkNotePreviewSpreadMode = 'single' | 'double';
 
 function getProjectPathLabel(projectPath: string | null): string {
   return projectPath ? `content/${projectPath}` : 'No linked notebook file yet.';
 }
 
-function getLastSpreadStart(pageCount: number): number {
-  return Math.max(0, pageCount - 1);
+function getSpreadStart(value: number, pagesPerSpread: number): number {
+  if (pagesPerSpread <= 1) {
+    return Math.max(0, value);
+  }
+
+  return Math.max(0, Math.floor(value / pagesPerSpread) * pagesPerSpread);
 }
 
-function clampSpreadStart(value: number, pageCount: number): number {
-  return Math.max(0, Math.min(getLastSpreadStart(pageCount), value));
+function clampSpreadStart(value: number, pageCount: number, pagesPerSpread: number): number {
+  const lastSpreadStart = getSpreadStart(Math.max(0, pageCount - 1), pagesPerSpread);
+  return Math.max(0, Math.min(lastSpreadStart, getSpreadStart(value, pagesPerSpread)));
 }
 
 export function InkNoteProjectPreviewPanel({
@@ -41,16 +47,24 @@ export function InkNoteProjectPreviewPanel({
   projectPath,
   status,
   embedded = false,
-}: Pick<InkNoteProjectPanelProps, 'project' | 'projectPath' | 'status'> & { embedded?: boolean }) {
+  spreadMode = 'single',
+}: Pick<InkNoteProjectPanelProps, 'project' | 'projectPath' | 'status'> & {
+  embedded?: boolean;
+  spreadMode?: InkNotePreviewSpreadMode;
+}) {
   const [previewPages, setPreviewPages] = useState<PreviewPage[]>([]);
   const [renderError, setRenderError] = useState<string | null>(null);
   const [isRenderPending, setIsRenderPending] = useState(false);
   const [previewSpreadStart, setPreviewSpreadStart] = useState(0);
   const wheelTurnLockRef = useRef(0);
   const deferredProject = useDeferredValue(project);
-  const currentSpreadPages = previewPages.slice(previewSpreadStart, previewSpreadStart + 1);
+  const pagesPerSpread = spreadMode === 'double' ? 2 : 1;
+  const currentSpreadPages = previewPages.slice(previewSpreadStart, previewSpreadStart + pagesPerSpread);
   const canGoPrevSpread = previewSpreadStart > 0;
-  const canGoNextSpread = previewSpreadStart < getLastSpreadStart(previewPages.length);
+  const canGoNextSpread = previewSpreadStart + pagesPerSpread < previewPages.length;
+  const spreadStageClassName = `spread-stage linked-inknote-spread-stage ${
+    pagesPerSpread === 2 ? 'is-double-page' : 'is-single-page'
+  }`;
 
   useEffect(() => {
     if (!deferredProject) {
@@ -101,15 +115,15 @@ export function InkNoteProjectPreviewPanel({
   }, [deferredProject]);
 
   useEffect(() => {
-    setPreviewSpreadStart((current) => clampSpreadStart(current, previewPages.length));
-  }, [previewPages.length]);
+    setPreviewSpreadStart((current) => clampSpreadStart(current, previewPages.length, pagesPerSpread));
+  }, [previewPages.length, pagesPerSpread]);
 
   const goToPrevSpread = () => {
-    setPreviewSpreadStart((current) => clampSpreadStart(current - 1, previewPages.length));
+    setPreviewSpreadStart((current) => clampSpreadStart(current - pagesPerSpread, previewPages.length, pagesPerSpread));
   };
 
   const goToNextSpread = () => {
-    setPreviewSpreadStart((current) => clampSpreadStart(current + 1, previewPages.length));
+    setPreviewSpreadStart((current) => clampSpreadStart(current + pagesPerSpread, previewPages.length, pagesPerSpread));
   };
 
   const handlePreviewWheel = (event: ReactWheelEvent<HTMLDivElement>) => {
@@ -189,7 +203,6 @@ export function InkNoteProjectPreviewPanel({
   if (embedded) {
     return (
       <div className="linked-inknote-preview-embedded">
-        <span className="linked-inknote-preview-badge">{statusText}</span>
         {renderError ? (
           <div className="content-empty">
             <p>{renderError}</p>
@@ -201,7 +214,7 @@ export function InkNoteProjectPreviewPanel({
             </button>
 
             <div
-              className="spread-stage linked-inknote-spread-stage"
+              className={spreadStageClassName}
               onWheel={handlePreviewWheel}
               onClick={handlePreviewStageClick}
               onKeyDown={handlePreviewKeyDown}
@@ -245,13 +258,7 @@ export function InkNoteProjectPreviewPanel({
           <h3>Notebook Preview</h3>
           <p>{getProjectPathLabel(projectPath)}</p>
         </div>
-        <span>
-          {isRenderPending
-              ? 'Rendering...'
-              : renderError
-                ? 'Preview error'
-                : `第 ${currentSpreadPages[0]?.pageNumber ?? 1} / ${previewPages.length || 1} 页`}
-        </span>
+        <span>{statusText}</span>
       </div>
 
       {renderError ? (
@@ -265,7 +272,7 @@ export function InkNoteProjectPreviewPanel({
           </button>
 
           <div
-            className="spread-stage linked-inknote-spread-stage"
+            className={spreadStageClassName}
             onWheel={handlePreviewWheel}
             onClick={handlePreviewStageClick}
             onKeyDown={handlePreviewKeyDown}

@@ -1,7 +1,7 @@
 ---
 type: markdown
 title: 强化学习重学系列(15) Maximum Entropy IRL
-slug: 15-maximum-entropy-irl
+slug: 4488563
 order: 1
 date: 2026-04-09
 updatedAt: 2026-06-16 21:27:19
