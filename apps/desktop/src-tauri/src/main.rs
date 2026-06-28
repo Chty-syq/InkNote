@@ -1621,6 +1621,8 @@ fn handle_static_blog_preview_connection(mut stream: TcpStream) {
 
 fn resolve_static_blog_preview_response(target: &str) -> Result<(&'static str, Vec<u8>), u16> {
     let path = normalize_preview_request_path(target).ok_or(403_u16)?;
+    let asset_path = normalize_preview_asset_request_path(&path);
+    let path = asset_path.as_deref().unwrap_or(&path);
     if path == "/inknote-content.json" {
         let payload = create_runtime_content_payload().map_err(|_| 500_u16)?;
         let body = serde_json::to_vec(&payload).map_err(|_| 500_u16)?;
@@ -1655,6 +1657,42 @@ fn normalize_preview_request_path(target: &str) -> Option<String> {
         return None;
     }
     Some(format!("/{}", path.trim_start_matches('/')))
+}
+
+fn normalize_preview_asset_request_path(path: &str) -> Option<String> {
+    let asset_roots = [
+        "/assets/",
+        "/content-images/",
+        "/content-slides/",
+        "/card-images/",
+        "/generated/",
+    ];
+    if asset_roots.iter().any(|prefix| path.starts_with(prefix))
+        || matches!(
+            path,
+            "/inknote-content.json" | "/blog-avatar.jpg" | "/blog-header-bg.png"
+        )
+    {
+        return None;
+    }
+
+    let trimmed = path.trim_start_matches('/');
+    let nested_roots = [
+        "assets/",
+        "content-images/",
+        "content-slides/",
+        "card-images/",
+        "generated/",
+        "inknote-content.json",
+        "blog-avatar.jpg",
+        "blog-header-bg.png",
+    ];
+    trimmed.split_once('/').and_then(|(_, rest)| {
+        nested_roots
+            .iter()
+            .any(|prefix| rest.starts_with(prefix))
+            .then(|| format!("/{rest}"))
+    })
 }
 
 fn resolve_preview_public_asset_path(path: &str) -> Result<Option<PathBuf>, String> {
