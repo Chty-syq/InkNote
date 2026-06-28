@@ -1812,9 +1812,15 @@ fn resolve_static_blog_preview_response(target: &str) -> Result<(&'static str, V
         return Err(404);
     };
 
-    fs::read(&target_path)
-        .map(|body| (content_type_for_path(&target_path), body))
-        .map_err(|_| 404)
+    let content_type = content_type_for_path(&target_path);
+    let body = fs::read(&target_path).map_err(|_| 404_u16)?;
+    if content_type.starts_with("text/html") {
+        let html = String::from_utf8(body).map_err(|_| 500_u16)?;
+        let html = rewrite_spa_entry_html(&html, "/").map_err(|_| 500_u16)?;
+        return Ok((content_type, html.into_bytes()));
+    }
+
+    Ok((content_type, body))
 }
 
 fn normalize_preview_request_path(target: &str) -> Option<String> {
@@ -1854,12 +1860,14 @@ fn normalize_preview_asset_request_path(path: &str) -> Option<String> {
         "blog-avatar.jpg",
         "blog-header-bg.png",
     ];
-    trimmed.split_once('/').and_then(|(_, rest)| {
-        nested_roots
-            .iter()
-            .any(|prefix| rest.starts_with(prefix))
-            .then(|| format!("/{rest}"))
-    })
+    for (index, _) in trimmed.match_indices('/') {
+        let rest = &trimmed[index + 1..];
+        if nested_roots.iter().any(|prefix| rest.starts_with(prefix)) {
+            return Some(format!("/{rest}"));
+        }
+    }
+
+    None
 }
 
 fn resolve_preview_public_asset_path(path: &str) -> Result<Option<PathBuf>, String> {
@@ -2491,6 +2499,16 @@ fn prepare_spa_artifact(dist: &Path, base_path: &str) -> Result<(), String> {
     let index_path = dist.join("index.html");
     let index = fs::read_to_string(&index_path)
         .map_err(|error| format!("failed to read static site entry: {error}"))?;
+    let index = rewrite_spa_entry_html(&index, base_path)?;
+    fs::write(&index_path, &index)
+        .map_err(|error| format!("failed to configure static site base path: {error}"))?;
+    fs::write(dist.join("404.html"), index)
+        .map_err(|error| format!("failed to create SPA fallback: {error}"))?;
+    fs::write(dist.join(".nojekyll"), b"")
+        .map_err(|error| format!("failed to create .nojekyll: {error}"))
+}
+
+fn rewrite_spa_entry_html(index: &str, base_path: &str) -> Result<String, String> {
     let base_tag = format!("<base href=\"{base_path}\" />");
     let index = if let Some(base_start) = index.find("<base ") {
         let base_end = index[base_start..]
@@ -2505,14 +2523,17 @@ fn prepare_spa_artifact(dist: &Path, base_path: &str) -> Result<(), String> {
     let index = index
         .replace("src=\"/assets/", &format!("src=\"{asset_prefix}"))
         .replace("href=\"/assets/", &format!("href=\"{asset_prefix}"))
+        .replace("src=\"./assets/", &format!("src=\"{asset_prefix}"))
+        .replace("href=\"./assets/", &format!("href=\"{asset_prefix}"))
+        .replace("src=\"assets/", &format!("src=\"{asset_prefix}"))
+        .replace("href=\"assets/", &format!("href=\"{asset_prefix}"))
         .replace("src='/assets/", &format!("src='{asset_prefix}"))
-        .replace("href='/assets/", &format!("href='{asset_prefix}"));
-    fs::write(&index_path, &index)
-        .map_err(|error| format!("failed to configure static site base path: {error}"))?;
-    fs::write(dist.join("404.html"), index)
-        .map_err(|error| format!("failed to create SPA fallback: {error}"))?;
-    fs::write(dist.join(".nojekyll"), b"")
-        .map_err(|error| format!("failed to create .nojekyll: {error}"))
+        .replace("href='/assets/", &format!("href='{asset_prefix}"))
+        .replace("src='./assets/", &format!("src='{asset_prefix}"))
+        .replace("href='./assets/", &format!("href='{asset_prefix}"))
+        .replace("src='assets/", &format!("src='{asset_prefix}"))
+        .replace("href='assets/", &format!("href='{asset_prefix}"));
+    Ok(index)
 }
 
 fn mirror_deployment_artifact(source: &Path, target: &Path) -> Result<(), String> {
@@ -2774,6 +2795,41 @@ mod tests {
         assert!(index.contains("<base href=\"/inknote-web/\" />"));
         assert!(index.contains("src=\"/inknote-web/assets/index.js\""));
         assert!(index.contains("href=\"/inknote-web/assets/index.css\""));
+    }
+
+    #[test]
+    fn rewrites_relative_asset_urls_for_project_pages() {
+        let directory = TemporaryPublishDirectory::create().unwrap();
+        fs::write(
+            directory.path().join("index.html"),
+            concat!(
+                "<html><head>",
+                "<base href=\"./\" />",
+                "<script type=\"module\" src=\"./assets/index.js\"></script>",
+                "<link rel=\"stylesheet\" href=\"assets/index.css\">",
+                "</head><body></body></html>"
+            ),
+        )
+        .unwrap();
+
+        prepare_spa_artifact(directory.path(), "/inknote-web/").unwrap();
+        let index = fs::read_to_string(directory.path().join("index.html")).unwrap();
+        assert!(index.contains("<base href=\"/inknote-web/\" />"));
+        assert!(index.contains("src=\"/inknote-web/assets/index.js\""));
+        assert!(index.contains("href=\"/inknote-web/assets/index.css\""));
+    }
+
+    #[test]
+    fn normalizes_deep_preview_asset_urls() {
+        assert_eq!(
+            normalize_preview_asset_request_path("/inknote/category/assets/index.js"),
+            Some("/assets/index.js".to_string())
+        );
+        assert_eq!(
+            normalize_preview_asset_request_path("/inknote/5369007/content-images/a.png"),
+            Some("/content-images/a.png".to_string())
+        );
+        assert_eq!(normalize_preview_asset_request_path("/assets/index.js"), None);
     }
 
     #[test]
