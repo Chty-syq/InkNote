@@ -116,6 +116,14 @@ function pushScalar(lines: string[], key: string, value: string | number | boole
   lines.push(`${key}: ${value}`);
 }
 
+function pushQuotedScalar(lines: string[], key: string, value: string | undefined | null) {
+  if (!value) {
+    return;
+  }
+
+  lines.push(`${key}: "${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`);
+}
+
 function pushList(lines: string[], key: string, values: string[]) {
   if (values.length === 0) {
     return;
@@ -275,7 +283,7 @@ export function serializeContentDraft(draft: Omit<ContentDraft, 'savedSnapshot'>
 
   pushScalar(lines, 'type', draft.type);
   pushScalar(lines, 'title', draft.title);
-  pushScalar(lines, 'slug', draft.slug);
+  pushQuotedScalar(lines, 'slug', draft.slug);
   pushScalar(lines, 'order', draft.order);
   pushScalar(lines, 'date', draft.date);
   pushScalar(lines, 'updatedAt', draft.updatedAt);

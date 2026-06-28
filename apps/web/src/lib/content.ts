@@ -81,6 +81,49 @@ function normalizeRawModuleMap(modules: Record<string, string> | undefined): Rec
   return Object.fromEntries(Object.entries(modules).map(([id, raw]) => [toContentRelativeId(id), raw]));
 }
 
+function toSlugString(value: unknown): string {
+  return String(value ?? '').trim();
+}
+
+function normalizeFrontmatterSlug<TFrontmatter extends ContentFrontmatter>(
+  frontmatter: TFrontmatter,
+): TFrontmatter {
+  return {
+    ...frontmatter,
+    slug: toSlugString((frontmatter as { slug?: unknown }).slug),
+  };
+}
+
+function safeDecodeSlug(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
+function getDocumentFolderSlug(id: string): string {
+  const normalized = toContentRelativeId(id);
+  const segments = normalized.split('/');
+  if (segments.length >= 3 && segments[segments.length - 1] === 'index.md') {
+    return toSlugString(segments[segments.length - 2]);
+  }
+
+  return '';
+}
+
+function matchesDocumentRouteSlug<TFrontmatter extends ContentFrontmatter>(
+  document: RoutedDocument<TFrontmatter>,
+  slug: string,
+): boolean {
+  const normalizedSlug = toSlugString(slug);
+  const slugCandidates = new Set([normalizedSlug, safeDecodeSlug(normalizedSlug)].filter(Boolean));
+  const frontmatterSlug = toSlugString((document.frontmatter as { slug?: unknown }).slug);
+  const folderSlug = getDocumentFolderSlug(document.id);
+
+  return slugCandidates.has(frontmatterSlug) || slugCandidates.has(folderSlug);
+}
+
 function slugifyCategoryLabel(value: string): string {
   return value
     .trim()
@@ -119,20 +162,22 @@ function toMarkdownHref(frontmatter: MarkdownFrontmatter): string {
     return permalink.startsWith('/') ? permalink : `/${permalink}`;
   }
 
-  return `/notes/${frontmatter.slug}`;
+  return `/notes/${toSlugString(frontmatter.slug)}`;
 }
 
 function parseMarkdownCollection(modules: Record<string, string>): RoutedDocument<MarkdownFrontmatter>[] {
   const documents = Object.entries(modules).map(([id, raw]) => {
     const document = parseMarkdownDocument<MarkdownFrontmatter>(raw, id);
+    const frontmatter = normalizeFrontmatterSlug(document.frontmatter);
 
-    if (document.frontmatter.type !== 'markdown') {
-      throw new Error(`Expected markdown content in ${id}, got ${document.frontmatter.type}`);
+    if (frontmatter.type !== 'markdown') {
+      throw new Error(`Expected markdown content in ${id}, got ${frontmatter.type}`);
     }
 
     return {
       ...document,
-      href: toMarkdownHref(document.frontmatter),
+      frontmatter,
+      href: toMarkdownHref(frontmatter),
     };
   });
 
@@ -142,14 +187,16 @@ function parseMarkdownCollection(modules: Record<string, string>): RoutedDocumen
 function parseInkNoteCollection(modules: Record<string, string>): RoutedDocument<InkNoteFrontmatter>[] {
   const documents = Object.entries(modules).map(([id, raw]) => {
     const document = parseMarkdownDocument<InkNoteFrontmatter>(raw, id);
+    const frontmatter = normalizeFrontmatterSlug(document.frontmatter);
 
-    if (document.frontmatter.type !== 'inknote') {
-      throw new Error(`Expected inknote content in ${id}, got ${document.frontmatter.type}`);
+    if (frontmatter.type !== 'inknote') {
+      throw new Error(`Expected inknote content in ${id}, got ${frontmatter.type}`);
     }
 
     return {
       ...document,
-      href: `/inknote/${document.frontmatter.slug}`,
+      frontmatter,
+      href: `/inknote/${toSlugString(frontmatter.slug)}`,
     };
   });
 
@@ -236,15 +283,15 @@ export function findCategory(slug: string): ContentCategory | null {
 }
 
 export function findMarkdownNote(slug: string): RoutedDocument<MarkdownFrontmatter> | null {
-  return contentIndex.notes.find((note) => note.frontmatter.slug === slug) ?? null;
+  return contentIndex.notes.find((note) => matchesDocumentRouteSlug(note, slug)) ?? null;
 }
 
 export function findPage(slug: string): RoutedDocument<MarkdownFrontmatter> | null {
-  return contentIndex.pages.find((page) => page.frontmatter.slug === slug) ?? null;
+  return contentIndex.pages.find((page) => matchesDocumentRouteSlug(page, slug)) ?? null;
 }
 
 export function findInkNote(slug: string): RoutedDocument<InkNoteFrontmatter> | null {
-  return contentIndex.inknotes.find((note) => note.frontmatter.slug === slug) ?? null;
+  return contentIndex.inknotes.find((note) => matchesDocumentRouteSlug(note, slug)) ?? null;
 }
 
 export function findInkNoteProject(note: RoutedDocument<InkNoteFrontmatter>): string | null {
