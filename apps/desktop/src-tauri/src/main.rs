@@ -1286,7 +1286,14 @@ async fn download_and_run_desktop_installer(
         .filter(|segment| !segment.trim().is_empty())
         .ok_or_else(|| "installer URL does not contain a file name".to_string())?
         .to_string();
-    let target_path = std::env::temp_dir().join(format!("inknote-update-{file_name}"));
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| format!("failed to create update temp file name: {error}"))?
+        .as_millis();
+    let target_path = std::env::temp_dir().join(format!(
+        "inknote-update-{}-{nonce}-{file_name}",
+        std::process::id()
+    ));
 
     emit_desktop_update_progress(
         &app,
@@ -1370,6 +1377,7 @@ async fn download_and_run_desktop_installer(
     }
     file.flush()
         .map_err(|error| format!("failed to flush installer file: {error}"))?;
+    drop(file);
 
     emit_desktop_update_progress(
         &app,
@@ -2829,7 +2837,10 @@ mod tests {
             normalize_preview_asset_request_path("/inknote/5369007/content-images/a.png"),
             Some("/content-images/a.png".to_string())
         );
-        assert_eq!(normalize_preview_asset_request_path("/assets/index.js"), None);
+        assert_eq!(
+            normalize_preview_asset_request_path("/assets/index.js"),
+            None
+        );
     }
 
     #[test]
