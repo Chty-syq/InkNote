@@ -23,7 +23,15 @@
       }
     ],
     "security": {
-      "csp": null
+      "csp": null,
+      "assetProtocol": {
+        "enable": true,
+        "scope": [
+          "$APPDATA/workspace/apps/web/public/**",
+          "$APPDATA/workspace/content/**",
+          "$RESOURCE/**"
+        ]
+      }
     }
   },
   "bundle": {

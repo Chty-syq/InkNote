@@ -49,7 +49,7 @@ import {
 } from '@tabler/icons-react';
 import { convertFileSrc, invoke } from '@tauri-apps/api/core';
 import { relaunch } from '@tauri-apps/plugin-process';
-import { Update } from '@tauri-apps/plugin-updater';
+import { check as checkTauriUpdate, Update } from '@tauri-apps/plugin-updater';
 import type { DownloadEvent } from '@tauri-apps/plugin-updater';
 import desktopPackage from '../package.json';
 import {
@@ -239,15 +239,6 @@ interface DesktopReleaseInfo {
   name: string;
   url: string;
   publishedAt: string;
-}
-
-interface TauriUpdateMetadata {
-  rid: number;
-  available: boolean;
-  currentVersion: string;
-  version: string;
-  date?: string;
-  body?: string;
 }
 
 type ImageReferenceLocation = 'body' | 'cover' | 'previewImage';
@@ -585,12 +576,7 @@ function formatDesktopReleaseDate(value: string): string {
 }
 
 async function checkTauriDesktopUpdate(): Promise<Update | null> {
-  const metadata = await invoke<TauriUpdateMetadata | null>('plugin:updater|check');
-  if (!metadata?.available) {
-    return null;
-  }
-
-  return new Update(metadata);
+  return checkTauriUpdate({ timeout: 30_000 });
 }
 
 function resolveDesktopContentImages(markdown: string, contentRoot: string | null): string {
@@ -7765,6 +7751,7 @@ export default function NotesWorkbench() {
                           </span>
                           <div>
                             <strong>{desktopUpdateMessage}</strong>
+                            {desktopUpdateDetail ? <small>{desktopUpdateDetail}</small> : null}
                           </div>
                           {desktopUpdateState === 'available' &&
                           latestDesktopRelease &&
