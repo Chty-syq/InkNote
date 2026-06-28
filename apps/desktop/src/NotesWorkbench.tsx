@@ -107,6 +107,7 @@ import {
   copyFileToPath,
   deleteContentFile,
   deleteGalleryImageFile,
+  downloadAndRunDesktopInstaller,
   ensureBlogPreviewServer,
   ensureExtension,
   fetchFriendLinkIcon,
@@ -115,6 +116,7 @@ import {
   getPublishStatus,
   isTauri,
   listenToContentSyncProgress,
+  listenToDesktopUpdateProgress,
   listenToPublishProgress,
   openExternalUrl,
   publishContentChanges,
@@ -238,6 +240,7 @@ interface DesktopReleaseInfo {
   version: string;
   name: string;
   url: string;
+  installerUrl?: string;
   publishedAt: string;
 }
 
@@ -1756,6 +1759,47 @@ export default function NotesWorkbench() {
   }, []);
 
   useEffect(() => {
+    if (!isTauri()) {
+      return;
+    }
+
+    let cancelled = false;
+    let stopListening: (() => void) | null = null;
+
+    listenToDesktopUpdateProgress((event) => {
+      if (cancelled) {
+        return;
+      }
+
+      setDesktopUpdateProgress(clampNumber(event.progress, 0, 100));
+      if (event.stage === 'install') {
+        setDesktopUpdateState('installing');
+      } else {
+        setDesktopUpdateState('downloading');
+      }
+      if (event.message) {
+        setDesktopUpdateMessage(event.message);
+      }
+      setDesktopUpdateDetail(event.detail);
+    })
+      .then((unlisten) => {
+        if (cancelled) {
+          unlisten();
+          return;
+        }
+        stopListening = unlisten;
+      })
+      .catch(() => {
+        // The update fallback still works without progress events.
+      });
+
+    return () => {
+      cancelled = true;
+      stopListening?.();
+    };
+  }, []);
+
+  useEffect(() => {
     draftRef.current = draft;
   }, [draft]);
 
@@ -2297,11 +2341,28 @@ export default function NotesWorkbench() {
     const releaseHeaders = {
       Accept: 'application/vnd.github+json',
     };
+    const findInstallerUrl = (
+      assets: Array<Partial<{ name: string; browser_download_url: string }>> | undefined,
+    ): string | undefined => {
+      const candidates = (assets ?? [])
+        .map((asset) => ({
+          name: asset.name?.trim() ?? '',
+          url: asset.browser_download_url?.trim() ?? '',
+        }))
+        .filter((asset) => asset.name.toLocaleLowerCase().endsWith('.exe') && asset.url);
+
+      return (
+        candidates.find((asset) => /x64.*setup/i.test(asset.name)) ??
+        candidates.find((asset) => /setup/i.test(asset.name)) ??
+        candidates[0]
+      )?.url;
+    };
     const parseRelease = (data: Partial<{
       tag_name: string;
       name: string;
       html_url: string;
       published_at: string;
+      assets: Array<Partial<{ name: string; browser_download_url: string }>>;
     }>): DesktopReleaseInfo => {
       const latestVersion = normalizeDesktopVersion(data.tag_name ?? data.name ?? '');
 
@@ -2313,6 +2374,7 @@ export default function NotesWorkbench() {
         version: latestVersion,
         name: data.name?.trim() || `v${latestVersion}`,
         url: data.html_url?.trim() || DESKTOP_RELEASES_URL,
+        installerUrl: findInstallerUrl(data.assets),
         publishedAt: data.published_at?.trim() || '',
       };
     };
@@ -2390,7 +2452,12 @@ export default function NotesWorkbench() {
     if (compareDesktopVersions(releaseInfo.version, desktopVersion) > 0) {
       setDesktopUpdateState('available');
       setDesktopUpdateMessage(`\u53d1\u73b0\u65b0\u7248\u672c v${releaseInfo.version}`);
-      setDesktopUpdateDetail(fallbackDetail || '\u81ea\u52a8\u66f4\u65b0\u4e0d\u53ef\u7528\uff0c\u53ef\u6253\u5f00\u53d1\u5e03\u9875\u624b\u52a8\u4e0b\u8f7d\u3002');
+      setDesktopUpdateDetail(
+        fallbackDetail ||
+          (releaseInfo.installerUrl
+            ? '\u5b98\u65b9\u81ea\u52a8\u66f4\u65b0\u672a\u8fd4\u56de\u53ef\u5b89\u88c5\u5305\uff0c\u5df2\u63d0\u4f9b\u5b89\u88c5\u5305\u4e0b\u8f7d\u3002'
+            : '\u81ea\u52a8\u66f4\u65b0\u4e0d\u53ef\u7528\uff0c\u53ef\u6253\u5f00\u53d1\u5e03\u9875\u624b\u52a8\u4e0b\u8f7d\u3002'),
+      );
       return;
     }
 
@@ -2427,11 +2494,17 @@ export default function NotesWorkbench() {
             return;
           }
 
-          await checkGitHubReleaseUpdates();
+          await checkGitHubReleaseUpdates(
+            '\u5b98\u65b9\u81ea\u52a8\u66f4\u65b0\u672a\u8fd4\u56de\u53ef\u5b89\u88c5\u5305\uff0c\u5df2\u5207\u6362\u5230\u5b89\u88c5\u5305\u4e0b\u8f7d\u3002',
+          );
           return;
         } catch (error) {
           const detail = error instanceof Error ? error.message : String(error);
-          await checkGitHubReleaseUpdates(detail ? `\u81ea\u52a8\u66f4\u65b0\u4e0d\u53ef\u7528\uff1a${detail}` : '');
+          await checkGitHubReleaseUpdates(
+            detail
+              ? `\u81ea\u52a8\u66f4\u65b0\u4e0d\u53ef\u7528\uff1a${detail}\uff1b\u5df2\u5207\u6362\u5230\u5b89\u88c5\u5305\u4e0b\u8f7d\u3002`
+              : '',
+          );
           return;
         }
       }
@@ -2500,6 +2573,35 @@ export default function NotesWorkbench() {
       const detail = error instanceof Error ? error.message : String(error);
       setDesktopUpdateState('error');
       setDesktopUpdateMessage(`\u66f4\u65b0\u5931\u8d25\uff1a${detail}`);
+      setDesktopUpdateDetail('\u53ef\u6253\u5f00\u53d1\u5e03\u9875\u624b\u52a8\u4e0b\u8f7d\u6700\u65b0\u7248\u672c\u3002');
+    }
+  };
+
+  const installDesktopReleaseInstaller = async () => {
+    const installerUrl = latestDesktopRelease?.installerUrl;
+    if (!installerUrl) {
+      setDesktopUpdateState('error');
+      setDesktopUpdateMessage('\u672a\u627e\u5230 Windows \u5b89\u88c5\u5305');
+      setDesktopUpdateDetail('\u8bf7\u6253\u5f00\u53d1\u5e03\u9875\u624b\u52a8\u4e0b\u8f7d\u3002');
+      return;
+    }
+
+    setDesktopUpdateState('downloading');
+    setDesktopUpdateProgress(15);
+    setDesktopUpdateMessage(`\u6b63\u5728\u4e0b\u8f7d v${latestDesktopRelease.version} \u5b89\u88c5\u5305...`);
+    setDesktopUpdateDetail('\u5b98\u65b9\u81ea\u52a8\u66f4\u65b0\u4e0d\u53ef\u7528\uff0c\u6b63\u5728\u4f7f\u7528 GitHub Release \u5b89\u88c5\u5305\u5347\u7ea7\u3002');
+
+    try {
+      const installerPath = await downloadAndRunDesktopInstaller(installerUrl);
+      setDesktopUpdateProgress(100);
+      setDesktopUpdateState('installing');
+      setDesktopUpdateMessage('\u5b89\u88c5\u5305\u5df2\u542f\u52a8');
+      setDesktopUpdateDetail(`\u8bf7\u6309\u5b89\u88c5\u5668\u63d0\u793a\u5b8c\u6210\u66f4\u65b0\uff1a${installerPath}`);
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      setDesktopUpdateState('error');
+      setDesktopUpdateProgress(0);
+      setDesktopUpdateMessage(`\u4e0b\u8f7d\u5b89\u88c5\u5305\u5931\u8d25\uff1a${detail}`);
       setDesktopUpdateDetail('\u53ef\u6253\u5f00\u53d1\u5e03\u9875\u624b\u52a8\u4e0b\u8f7d\u6700\u65b0\u7248\u672c\u3002');
     }
   };
@@ -7762,6 +7864,15 @@ export default function NotesWorkbench() {
                               onClick={() => void installDesktopUpdate()}
                             >
                               {'\u7acb\u5373\u5347\u7ea7'}
+                            </button>
+                          ) : desktopUpdateState === 'available' &&
+                          latestDesktopRelease?.installerUrl &&
+                          isTauri() ? (
+                            <button
+                              type="button"
+                              onClick={() => void installDesktopReleaseInstaller()}
+                            >
+                              {'\u4e0b\u8f7d\u5b89\u88c5'}
                             </button>
                           ) : desktopUpdateState === 'available' && latestDesktopRelease ? (
                             <button

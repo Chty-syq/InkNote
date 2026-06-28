@@ -208,6 +208,12 @@ export async function listenToContentSyncProgress(
   return listen<PublishProgressEvent>('content-sync-progress', (event) => handler(event.payload));
 }
 
+export async function listenToDesktopUpdateProgress(
+  handler: (event: PublishProgressEvent) => void,
+): Promise<UnlistenFn> {
+  return listen<PublishProgressEvent>('desktop-update-progress', (event) => handler(event.payload));
+}
+
 export async function ensureBlogPreviewServer(): Promise<BlogPreviewServerResponse> {
   if (!isTauri()) {
     return {
@@ -221,6 +227,14 @@ export async function ensureBlogPreviewServer(): Promise<BlogPreviewServerRespon
   }
 
   return invoke('ensure_blog_preview_server');
+}
+
+export async function downloadAndRunDesktopInstaller(url: string): Promise<string> {
+  if (!isTauri()) {
+    throw new Error('Desktop installer updates require the Tauri desktop app.');
+  }
+
+  return invoke('download_and_run_desktop_installer', { url });
 }
 
 export async function openExternalUrl(url: string): Promise<void> {

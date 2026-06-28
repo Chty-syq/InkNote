@@ -159,6 +159,27 @@ impl PublishProgressReporter {
     }
 }
 
+fn emit_desktop_update_progress(
+    app: &tauri::AppHandle,
+    progress: u8,
+    stage: &str,
+    message: &str,
+    detail: impl Into<String>,
+    level: &str,
+) {
+    let _ = app.emit(
+        "desktop-update-progress",
+        PublishProgressEvent {
+            task_id: "desktop-update".to_string(),
+            progress,
+            stage: stage.to_string(),
+            message: message.to_string(),
+            detail: detail.into(),
+            level: level.to_string(),
+        },
+    );
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RuntimeContentPayload {
@@ -1251,6 +1272,152 @@ fn open_external_url(url: String) -> Result<(), String> {
         .spawn()
         .map(|_| ())
         .map_err(|error| format!("failed to open local blog preview: {error}"))
+}
+
+#[tauri::command]
+async fn download_and_run_desktop_installer(
+    app: tauri::AppHandle,
+    url: String,
+) -> Result<String, String> {
+    let installer_url = validate_desktop_installer_url(url.trim())?;
+    let file_name = installer_url
+        .path_segments()
+        .and_then(|mut segments| segments.next_back())
+        .filter(|segment| !segment.trim().is_empty())
+        .ok_or_else(|| "installer URL does not contain a file name".to_string())?
+        .to_string();
+    let target_path = std::env::temp_dir().join(format!("inknote-update-{file_name}"));
+
+    emit_desktop_update_progress(
+        &app,
+        5,
+        "download",
+        "正在连接 GitHub Release...",
+        installer_url.to_string(),
+        "info",
+    );
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(180))
+        .user_agent("InkNote-Updater-Fallback/1.0")
+        .build()
+        .map_err(|error| format!("failed to create update downloader: {error}"))?;
+    let mut response = client
+        .get(installer_url.clone())
+        .send()
+        .await
+        .map_err(|error| format!("failed to download installer: {error}"))?
+        .error_for_status()
+        .map_err(|error| format!("installer download failed: {error}"))?;
+
+    let content_length = response.content_length().unwrap_or(0);
+    if content_length > 0 {
+        const MAX_INSTALLER_BYTES: u64 = 350 * 1024 * 1024;
+        if content_length > MAX_INSTALLER_BYTES {
+            return Err(format!(
+                "installer is too large: {} MB",
+                content_length / 1024 / 1024
+            ));
+        }
+    }
+
+    emit_desktop_update_progress(
+        &app,
+        10,
+        "download",
+        "正在下载安装包...",
+        if content_length > 0 {
+            format!("0 / {} MB", content_length / 1024 / 1024)
+        } else {
+            "等待服务器返回文件大小。".to_string()
+        },
+        "info",
+    );
+
+    let mut file = fs::File::create(&target_path)
+        .map_err(|error| format!("failed to create installer file: {error}"))?;
+    let mut downloaded: u64 = 0;
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|error| format!("failed to read installer response: {error}"))?
+    {
+        file.write_all(&chunk)
+            .map_err(|error| format!("failed to write installer file: {error}"))?;
+        downloaded += chunk.len() as u64;
+
+        let progress = if content_length > 0 {
+            10 + (((downloaded.min(content_length) * 78) / content_length) as u8)
+        } else {
+            35
+        };
+        emit_desktop_update_progress(
+            &app,
+            progress.min(88),
+            "download",
+            "正在下载安装包...",
+            if content_length > 0 {
+                format!(
+                    "{} / {} MB",
+                    downloaded / 1024 / 1024,
+                    content_length / 1024 / 1024
+                )
+            } else {
+                format!("已下载 {} MB", downloaded / 1024 / 1024)
+            },
+            "info",
+        );
+    }
+    file.flush()
+        .map_err(|error| format!("failed to flush installer file: {error}"))?;
+
+    emit_desktop_update_progress(
+        &app,
+        92,
+        "install",
+        "正在启动安装包...",
+        target_path.to_string_lossy().to_string(),
+        "info",
+    );
+
+    let mut command = Command::new(&target_path);
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+
+    #[cfg(target_os = "windows")]
+    command.creation_flags(CREATE_NO_WINDOW);
+
+    command
+        .spawn()
+        .map_err(|error| format!("failed to start installer: {error}"))?;
+
+    emit_desktop_update_progress(
+        &app,
+        100,
+        "install",
+        "安装包已启动",
+        target_path.to_string_lossy().to_string(),
+        "success",
+    );
+
+    Ok(target_path.to_string_lossy().to_string())
+}
+
+fn validate_desktop_installer_url(value: &str) -> Result<url::Url, String> {
+    let parsed = url::Url::parse(value).map_err(|_| "invalid installer URL".to_string())?;
+    if parsed.scheme() != "https"
+        || parsed.host_str() != Some("github.com")
+        || !parsed
+            .path()
+            .starts_with("/Chty-syq/InkNote/releases/download/")
+        || !parsed.path().to_ascii_lowercase().ends_with(".exe")
+    {
+        return Err("only InkNote GitHub release installers are allowed".to_string());
+    }
+
+    Ok(parsed)
 }
 
 #[tauri::command]
@@ -2707,6 +2874,7 @@ fn main() {
             publish_content_changes,
             pull_remote_content,
             open_external_url,
+            download_and_run_desktop_installer,
             ensure_blog_preview_server
         ])
         .build(tauri::generate_context!())
