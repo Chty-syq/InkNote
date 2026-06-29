@@ -1666,6 +1666,8 @@ export default function NotesWorkbench() {
   const [isGalleryMultiSelectMode, setIsGalleryMultiSelectMode] = useState(false);
   const [isGalleryLoading, setIsGalleryLoading] = useState(false);
   const [isUploadingGalleryImages, setIsUploadingGalleryImages] = useState(false);
+  const [galleryUploadProgress, setGalleryUploadProgress] = useState(0);
+  const [galleryUploadTotal, setGalleryUploadTotal] = useState(0);
   const [isDeletingGalleryImages, setIsDeletingGalleryImages] = useState(false);
   const [imagePreview, setImagePreview] = useState<ImagePreviewState | null>(null);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
@@ -5901,6 +5903,8 @@ export default function NotesWorkbench() {
     }
 
     setIsUploadingGalleryImages(true);
+    setGalleryUploadProgress(0);
+    setGalleryUploadTotal(selectedFiles.length);
     setIsBusy(true);
     try {
       const manifest = await readUserGalleryManifest();
@@ -5909,25 +5913,29 @@ export default function NotesWorkbench() {
       const now = new Date();
 
       for (const [index, sourcePath] of selectedFiles.entries()) {
-        if (!getImageFileExtension(sourcePath)) {
-          continue;
-        }
+        try {
+          if (!getImageFileExtension(sourcePath)) {
+            continue;
+          }
 
-        const fileName = createGalleryImageFileName(sourcePath, now, index);
-        const publicPath = `${USER_GALLERY_UPLOADS_PUBLIC_PREFIX}${fileName}`;
-        if (existingPaths.has(publicPath)) {
-          continue;
-        }
+          const fileName = createGalleryImageFileName(sourcePath, now, index);
+          const publicPath = `${USER_GALLERY_UPLOADS_PUBLIC_PREFIX}${fileName}`;
+          if (existingPaths.has(publicPath)) {
+            continue;
+          }
 
-        const compressedSize = await compressGalleryImageFile(sourcePath, getUserGalleryUploadPath(libraryRoot, fileName));
-        existingPaths.add(publicPath);
-        nextImages.unshift({
-          id: `${Date.now()}-${index}-${fileName}`,
-          path: publicPath,
-          name: getFileNameFromPath(sourcePath),
-          size: compressedSize,
-          uploadedAt: now.toISOString(),
-        });
+          const compressedSize = await compressGalleryImageFile(sourcePath, getUserGalleryUploadPath(libraryRoot, fileName));
+          existingPaths.add(publicPath);
+          nextImages.unshift({
+            id: `${Date.now()}-${index}-${fileName}`,
+            path: publicPath,
+            name: getFileNameFromPath(sourcePath),
+            size: compressedSize,
+            uploadedAt: now.toISOString(),
+          });
+        } finally {
+          setGalleryUploadProgress(index + 1);
+        }
       }
 
       await writeUserGalleryManifest(nextImages);
@@ -5937,6 +5945,10 @@ export default function NotesWorkbench() {
       setStatus(error instanceof Error ? error.message : '图库图片上传失败。');
     } finally {
       setIsUploadingGalleryImages(false);
+      window.setTimeout(() => {
+        setGalleryUploadProgress(0);
+        setGalleryUploadTotal(0);
+      }, 650);
       setIsBusy(false);
     }
   };
@@ -7840,6 +7852,27 @@ export default function NotesWorkbench() {
                                 <IconX aria-hidden="true" />
                                 <span>取消</span>
                               </button>
+                            </div>
+                          ) : null}
+
+                          {isUploadingGalleryImages && galleryUploadTotal > 0 ? (
+                            <div className="notes-settings-gallery-upload-progress" role="status" aria-live="polite">
+                              <div>
+                                <span>正在上传图库</span>
+                                <strong>
+                                  {galleryUploadProgress} / {galleryUploadTotal}
+                                </strong>
+                              </div>
+                              <div
+                                className="notes-settings-gallery-upload-track"
+                                aria-label={`图库上传进度 ${Math.round((galleryUploadProgress / galleryUploadTotal) * 100)}%`}
+                              >
+                                <span
+                                  style={{
+                                    width: `${Math.round((galleryUploadProgress / galleryUploadTotal) * 100)}%`,
+                                  }}
+                                />
+                              </div>
                             </div>
                           ) : null}
 
