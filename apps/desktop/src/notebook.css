@@ -3891,6 +3891,11 @@ input[type='range']::-moz-range-thumb {
   padding-top: 0.2rem;
 }
 
+.notes-site-integration-dialog-actions.compact {
+  justify-content: flex-start;
+  padding-top: 0;
+}
+
 .notes-site-integration-dialog-actions > span {
   min-width: 0;
   color: #708397;
@@ -4220,6 +4225,7 @@ input[type='range']::-moz-range-thumb {
   color: #718497;
   font-size: 0.7rem;
   line-height: 1.5;
+  white-space: pre-wrap;
 }
 
 .notes-settings-publish-card {

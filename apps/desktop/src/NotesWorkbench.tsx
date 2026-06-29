@@ -127,6 +127,7 @@ import {
   writeContentFile,
   writeTextFile,
   type PublishProgressEvent,
+  type PublishStatusResponse,
 } from './lib/platform';
 
 type WorkspacePanel = 'write' | 'inknote';
@@ -1756,6 +1757,67 @@ export default function NotesWorkbench() {
     }
   }, [pullLogs.length]);
 
+  const formatPublishLatency = (latencyMs: number): string => `${Math.max(0, Math.round(latencyMs))} ms`;
+
+  const formatPublishStatusDetail = (statusResponse: PublishStatusResponse): string => {
+    const version = statusResponse.branchExists
+      ? `远端版本：${statusResponse.remoteCommit ? statusResponse.remoteCommit.slice(0, 7) : '未知'}`
+      : '远端分支：尚未创建';
+    return [
+      `远程仓库：${statusResponse.remote}`,
+      `发布分支：${statusResponse.branch}`,
+      `网络延迟：${formatPublishLatency(statusResponse.latencyMs)}`,
+      statusResponse.proxySummary,
+      version,
+    ].join('\n');
+  };
+
+  const upsertPublishFlowEntry = (event: PublishProgressEvent) => {
+    const normalizedProgress = clampNumber(event.progress, 0, 100);
+    setPublishProgress(normalizedProgress);
+    setPublishRunState(
+      event.level === 'error'
+        ? 'error'
+        : normalizedProgress >= 100
+          ? 'success'
+          : 'running',
+    );
+    setPublishLogs((current) => {
+      const receivedAt = new Date().toLocaleTimeString('zh-CN', { hour12: false });
+      const nextEntry: PublishLogEntry = {
+        ...event,
+        progress: normalizedProgress,
+        id: ++publishLogSequenceRef.current,
+        receivedAt,
+      };
+      const existingIndex = current.findIndex((entry) => entry.stage === event.stage);
+      if (existingIndex < 0) {
+        return [...current, nextEntry].slice(-8);
+      }
+      return current.map((entry, index) =>
+        index === existingIndex
+          ? {
+              ...nextEntry,
+              id: entry.id,
+              receivedAt: entry.receivedAt,
+            }
+          : entry,
+      );
+    });
+  };
+
+  const publishFlowTitle = (() => {
+    const connectionOnly = publishLogs.length > 0 && publishLogs.every((entry) => entry.stage === 'connection');
+    if (connectionOnly) {
+      if (publishRunState === 'error') return '连接失败';
+      if (publishRunState === 'running') return '正在测试连接';
+      return '连接正常';
+    }
+    if (publishRunState === 'success') return '同步完成';
+    if (publishRunState === 'error') return '同步失败';
+    return '正在同步';
+  })();
+
   useEffect(() => {
     let cancelled = false;
 
@@ -2667,21 +2729,50 @@ export default function NotesWorkbench() {
     const selectedSshKeyPath = sshKeyPath.trim();
     if (!remote || !branch) {
       setPublishConnectionMessage('请先填写远程仓库和发布分支。');
-      setStatus('\u8bf7先填写远程仓库和发布分支。');
+      setStatus('请先填写远程仓库和发布分支。');
+      setPublishLogs([]);
+      setPublishProgress(0);
+      setPublishRunState('error');
       return;
     }
 
     setIsTestingRemote(true);
     setPublishConnectionMessage('正在连接远程仓库...');
+    setPublishLogs([]);
+    upsertPublishFlowEntry({
+      taskId: `connection-${Date.now()}`,
+      progress: 15,
+      stage: 'connection',
+      message: '正在测试远程连接',
+      detail: `远程仓库：${remote}\n发布分支：${branch}`,
+      level: 'info',
+    });
 
     try {
       const nextStatus = await getPublishStatus(remote, branch, selectedSshKeyPath);
       setPublishConnectionMessage(nextStatus.shortStatus);
       setStatus(nextStatus.shortStatus);
+      upsertPublishFlowEntry({
+        taskId: `connection-${Date.now()}`,
+        progress: 100,
+        stage: 'connection',
+        message: '连接测试通过',
+        detail: formatPublishStatusDetail(nextStatus),
+        level: 'success',
+      });
     } catch (error) {
       const detail = error instanceof Error ? error.message : typeof error === 'string' ? error : String(error);
-      setPublishConnectionMessage(`连接失败：${detail || '未知错误'}`);
+      const message = `连接失败：${detail || '未知错误'}`;
+      setPublishConnectionMessage(message);
       setStatus(detail || 'Failed to read publish status.');
+      upsertPublishFlowEntry({
+        taskId: `connection-${Date.now()}`,
+        progress: 100,
+        stage: 'connection',
+        message: '连接测试失败',
+        detail: `${remote}\n${detail || '没有收到可识别的错误信息。'}`,
+        level: 'error',
+      });
     } finally {
       setIsTestingRemote(false);
     }
@@ -3074,6 +3165,7 @@ export default function NotesWorkbench() {
 
     const taskId = globalThis.crypto?.randomUUID?.() ?? `sync-${Date.now()}`;
     const conflictLabel = pullConflictStrategy === 'remote' ? '远端优先' : '本地优先';
+    const selectedSshKeyPath = sshKeyPath.trim();
     let currentProgress = 2;
 
     const updateRunProgress = (
@@ -3168,6 +3260,38 @@ export default function NotesWorkbench() {
 
       recordManualProgress(
         2,
+        'connection',
+        '测试远程连接',
+        `远程仓库：${configuredRemote}\n发布分支：${configuredBranch}`,
+      );
+      let remoteStatus: PublishStatusResponse;
+      try {
+        remoteStatus = await getPublishStatus(configuredRemote, configuredBranch, selectedSshKeyPath);
+        setPublishConnectionMessage(remoteStatus.shortStatus);
+        recordManualProgress(
+          8,
+          'connection',
+          '连接测试通过',
+          formatPublishStatusDetail(remoteStatus),
+          'success',
+        );
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : typeof error === 'string' ? error : String(error);
+        const messageText = `连接失败：${detail || '未知错误'}`;
+        setPublishConnectionMessage(messageText);
+        setStatus(detail || 'Failed to read publish status.');
+        recordManualProgress(
+          8,
+          'connection',
+          '连接测试失败',
+          `${configuredRemote}\n${detail || '没有收到可识别的错误信息。'}`,
+          'error',
+        );
+        return;
+      }
+
+      recordManualProgress(
+        10,
         'prepare',
         '准备本地内容',
         `冲突策略：${conflictLabel}`,
@@ -3176,31 +3300,26 @@ export default function NotesWorkbench() {
       if (draft && dirty) {
         const savedItem = await saveDraft();
         if (!savedItem) {
-          recordManualProgress(5, 'prepare', '当前文章保存失败', '同步已停止，请先修正文章保存错误。', 'error');
+          recordManualProgress(12, 'prepare', '当前文章保存失败', '同步已停止，请先修正文章保存错误。', 'error');
           return;
         }
       }
 
       const savedConfig = await saveSiteConfig();
       if (!savedConfig) {
-        recordManualProgress(10, 'prepare', '站点设置保存失败', '同步已停止，请检查站点设置。', 'error');
+        recordManualProgress(12, 'prepare', '站点设置保存失败', '同步已停止，请检查站点设置。', 'error');
         return;
       }
-      recordManualProgress(10, 'prepare', '本地内容已准备好', '文章与站点设置已保存。', 'success');
+      recordManualProgress(12, 'prepare', '本地内容已准备好', '文章与站点设置已保存。', 'success');
 
       const repository = savedConfig.repository;
       const remote = repository?.remote.trim() ?? '';
       const branch = repository?.branch.trim() ?? '';
       const basePath = inferGitHubPagesBasePath(remote);
-      const selectedSshKeyPath = sshKeyPath.trim();
       if (!remote || !branch) {
         recordManualProgress(10, 'prepare', '同步配置不完整', '请配置远程仓库地址和发布分支。', 'error');
         return;
       }
-
-      updateRunProgress(12);
-      const remoteStatus = await getPublishStatus(remote, branch, selectedSshKeyPath);
-      setPublishConnectionMessage(remoteStatus.shortStatus);
 
       if (remoteStatus.branchExists) {
         recordManualProgress(
@@ -8119,13 +8238,7 @@ export default function NotesWorkbench() {
                             aria-label="站点同步进度"
                           >
                             <header className="notes-sync-flow-head">
-                              <strong>
-                                {publishRunState === 'success'
-                                  ? '同步完成'
-                                  : publishRunState === 'error'
-                                    ? '同步失败'
-                                    : '正在同步'}
-                              </strong>
+                              <strong>{publishFlowTitle}</strong>
                               <span>{publishProgress}%</span>
                             </header>
                             <div
@@ -8162,7 +8275,13 @@ export default function NotesWorkbench() {
                           type="button"
                           className="notes-settings-secondary"
                           onClick={() => void refreshPublishStatus()}
-                          disabled={isTestingRemote || isPullingContent || isPublishingSite || !siteConfigDraft.repository?.remote.trim()}
+                          disabled={
+                            isTestingRemote ||
+                            isPullingContent ||
+                            isPublishingSite ||
+                            !siteConfigDraft.repository?.remote.trim() ||
+                            !siteConfigDraft.repository?.branch.trim()
+                          }
                         >
                           {isTestingRemote ? (
                             <IconLoader2 className="spinning" aria-hidden="true" />
@@ -8394,20 +8513,8 @@ export default function NotesWorkbench() {
                     placeholder="gh-pages"
                   />
                 </label>
-                <div className="notes-site-integration-dialog-actions">
+                <div className="notes-site-integration-dialog-actions compact">
                   <span>{publishConnectionMessage}</span>
-                  <button
-                    type="button"
-                    onClick={() => void refreshPublishStatus()}
-                    disabled={isTestingRemote || !siteConfigDraft.repository?.remote.trim()}
-                  >
-                    {isTestingRemote ? (
-                      <IconLoader2 className="spinning" aria-hidden="true" />
-                    ) : (
-                      <IconRefresh aria-hidden="true" />
-                    )}
-                    测试连接
-                  </button>
                 </div>
               </div>
             ) : null}

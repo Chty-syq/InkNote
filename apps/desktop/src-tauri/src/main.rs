@@ -55,6 +55,15 @@ struct GitCommandResult {
     stderr: String,
 }
 
+#[cfg(target_os = "windows")]
+#[derive(Clone, Debug, Default)]
+struct GitProxyEnv {
+    http_proxy: Option<String>,
+    https_proxy: Option<String>,
+    all_proxy: Option<String>,
+    no_proxy: Option<String>,
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct PublishSiteRequest {
@@ -212,6 +221,8 @@ struct PublishStatus {
     branch_exists: bool,
     remote_commit: String,
     short_status: String,
+    latency_ms: u64,
+    proxy_summary: String,
 }
 
 #[derive(Serialize)]
@@ -631,6 +642,7 @@ fn get_publish_status_with_ssh(
     let ssh_command = create_git_ssh_command(ssh_key_path)?;
     let remote_ref = format!("refs/heads/{branch}");
     let command_directory = std::env::temp_dir();
+    let started_at = Instant::now();
     let result = ensure_git_success(
         run_git_in_with_ssh(
             &command_directory,
@@ -639,6 +651,7 @@ fn get_publish_status_with_ssh(
         )?,
         "read remote deployment branch",
     )?;
+    let latency_ms = started_at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
     let remote_commit = result
         .stdout
         .split_whitespace()
@@ -656,11 +669,13 @@ fn get_publish_status_with_ssh(
     };
 
     Ok(PublishStatus {
+        proxy_summary: describe_git_system_proxy(&remote),
         remote,
         branch,
         branch_exists,
         remote_commit,
         short_status,
+        latency_ms,
     })
 }
 
@@ -3131,6 +3146,7 @@ fn run_git_in_with_ssh(
         .current_dir(directory)
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GCM_INTERACTIVE", "Never");
+    apply_git_system_proxy_env(&mut command);
     if let Some(ssh_command) = ssh_command {
         command.env("GIT_SSH_COMMAND", ssh_command);
     }
@@ -3147,6 +3163,242 @@ fn run_git_in_with_ssh(
         stdout: String::from_utf8_lossy(&output.stdout).trim().to_string(),
         stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
     })
+}
+
+#[cfg(target_os = "windows")]
+fn apply_git_system_proxy_env(command: &mut Command) {
+    let Some(proxy_env) = read_windows_system_proxy_env() else {
+        return;
+    };
+
+    if let Some(value) = proxy_env.http_proxy.as_ref() {
+        command.env("HTTP_PROXY", value).env("http_proxy", value);
+    }
+    if let Some(value) = proxy_env.https_proxy.as_ref() {
+        command.env("HTTPS_PROXY", value).env("https_proxy", value);
+    }
+    if let Some(value) = proxy_env.all_proxy.as_ref() {
+        command.env("ALL_PROXY", value).env("all_proxy", value);
+    }
+    if let Some(value) = proxy_env.no_proxy.as_ref() {
+        command.env("NO_PROXY", value).env("no_proxy", value);
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn apply_git_system_proxy_env(_command: &mut Command) {}
+
+#[cfg(target_os = "windows")]
+fn describe_git_system_proxy(remote: &str) -> String {
+    let mut lines: Vec<String> = Vec::new();
+    match read_windows_system_proxy_env() {
+        Some(proxy_env) => {
+            lines.push("系统代理：已读取并注入给 Git".to_string());
+            if let Some(value) = proxy_env.http_proxy.as_ref() {
+                lines.push(format!("HTTP：{value}"));
+            }
+            if let Some(value) = proxy_env.https_proxy.as_ref() {
+                lines.push(format!("HTTPS：{value}"));
+            }
+            if let Some(value) = proxy_env.all_proxy.as_ref() {
+                lines.push(format!("ALL：{value}"));
+            }
+            if let Some(value) = proxy_env.no_proxy.as_ref() {
+                lines.push(format!("忽略：{value}"));
+            }
+        }
+        None => {
+            lines.push("系统代理：未启用或未读取到，Git 将使用自身配置/进程环境变量。".to_string());
+        }
+    }
+
+    if is_ssh_remote(remote) {
+        lines.push("远程类型：SSH，HTTP/HTTPS 系统代理不会直接代理 SSH。".to_string());
+    } else if remote.starts_with("http://") || remote.starts_with("https://") {
+        lines.push("远程类型：HTTPS/HTTP，Git 会使用上述代理环境。".to_string());
+    } else {
+        lines.push("远程类型：本地路径或其它协议。".to_string());
+    }
+
+    lines.join("\n")
+}
+
+#[cfg(not(target_os = "windows"))]
+fn describe_git_system_proxy(remote: &str) -> String {
+    if is_ssh_remote(remote) {
+        "系统代理：当前平台未自动读取系统代理；远程类型：SSH。".to_string()
+    } else {
+        "系统代理：当前平台未自动读取系统代理，Git 将使用自身配置/进程环境变量。".to_string()
+    }
+}
+
+fn is_ssh_remote(remote: &str) -> bool {
+    let trimmed = remote.trim();
+    trimmed.starts_with("ssh://")
+        || trimmed.starts_with("git@")
+        || (trimmed.contains('@') && trimmed.contains(':') && !trimmed.contains("://"))
+}
+
+#[cfg(target_os = "windows")]
+fn read_windows_system_proxy_env() -> Option<GitProxyEnv> {
+    let proxy_enabled = query_windows_internet_setting("ProxyEnable")
+        .map(|value| parse_windows_proxy_enabled(&value))
+        .unwrap_or(false);
+    if !proxy_enabled {
+        return None;
+    }
+
+    let proxy_server = query_windows_internet_setting("ProxyServer")?;
+    let mut proxy_env = parse_windows_proxy_server(&proxy_server);
+    proxy_env.no_proxy = normalize_windows_proxy_override(
+        &query_windows_internet_setting("ProxyOverride").unwrap_or_default(),
+    );
+
+    if proxy_env.http_proxy.is_none()
+        && proxy_env.https_proxy.is_none()
+        && proxy_env.all_proxy.is_none()
+    {
+        None
+    } else {
+        Some(proxy_env)
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn query_windows_internet_setting(value_name: &str) -> Option<String> {
+    let mut command = Command::new("reg");
+    command
+        .args([
+            "query",
+            r"HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings",
+            "/v",
+            value_name,
+        ])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null());
+
+    command.creation_flags(CREATE_NO_WINDOW);
+
+    let output = command.output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    parse_reg_query_value(&stdout, value_name)
+}
+
+#[cfg(target_os = "windows")]
+fn parse_reg_query_value(output: &str, value_name: &str) -> Option<String> {
+    for line in output.lines() {
+        let mut parts = line.split_whitespace();
+        if parts.next() != Some(value_name) {
+            continue;
+        }
+        parts.next()?;
+        let value = parts.collect::<Vec<_>>().join(" ");
+        if value.trim().is_empty() {
+            return None;
+        }
+        return Some(value.trim().to_string());
+    }
+    None
+}
+
+#[cfg(target_os = "windows")]
+fn parse_windows_proxy_enabled(value: &str) -> bool {
+    let trimmed = value.trim();
+    if let Some(hex) = trimmed
+        .strip_prefix("0x")
+        .or_else(|| trimmed.strip_prefix("0X"))
+    {
+        return u32::from_str_radix(hex, 16).unwrap_or(0) != 0;
+    }
+    trimmed.parse::<u32>().unwrap_or(0) != 0
+}
+
+#[cfg(target_os = "windows")]
+fn parse_windows_proxy_server(value: &str) -> GitProxyEnv {
+    let mut proxy_env = GitProxyEnv::default();
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return proxy_env;
+    }
+
+    if trimmed.contains('=') {
+        for part in trimmed.split(';') {
+            let Some((kind, address)) = part.split_once('=') else {
+                continue;
+            };
+            match kind.trim().to_ascii_lowercase().as_str() {
+                "http" => proxy_env.http_proxy = normalize_proxy_address(address, "http"),
+                "https" => proxy_env.https_proxy = normalize_proxy_address(address, "http"),
+                "socks" | "socks4" | "socks5" => {
+                    proxy_env.all_proxy = normalize_proxy_address(address, "socks5h")
+                }
+                _ => {}
+            }
+        }
+    } else if let Some(proxy) = normalize_proxy_address(trimmed, "http") {
+        proxy_env.http_proxy = Some(proxy.clone());
+        proxy_env.https_proxy = Some(proxy.clone());
+        proxy_env.all_proxy = Some(proxy);
+    }
+
+    if proxy_env.https_proxy.is_none() {
+        proxy_env.https_proxy = proxy_env.http_proxy.clone();
+    }
+    if proxy_env.http_proxy.is_none() {
+        proxy_env.http_proxy = proxy_env.https_proxy.clone();
+    }
+
+    proxy_env
+}
+
+#[cfg(target_os = "windows")]
+fn normalize_proxy_address(value: &str, fallback_scheme: &str) -> Option<String> {
+    let trimmed = value.trim().trim_matches('"');
+    if trimmed.is_empty() {
+        return None;
+    }
+    if trimmed.contains("://") {
+        return Some(trimmed.to_string());
+    }
+    Some(format!("{fallback_scheme}://{trimmed}"))
+}
+
+#[cfg(target_os = "windows")]
+fn normalize_windows_proxy_override(value: &str) -> Option<String> {
+    let mut entries: Vec<String> = Vec::new();
+    for part in value.split(';') {
+        let trimmed = part.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if trimmed.eq_ignore_ascii_case("<local>") {
+            push_unique_no_proxy(&mut entries, "localhost");
+            push_unique_no_proxy(&mut entries, "127.0.0.1");
+            push_unique_no_proxy(&mut entries, "::1");
+        } else {
+            push_unique_no_proxy(&mut entries, trimmed);
+        }
+    }
+
+    if entries.is_empty() {
+        None
+    } else {
+        Some(entries.join(","))
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn push_unique_no_proxy(entries: &mut Vec<String>, value: &str) {
+    if !entries
+        .iter()
+        .any(|entry| entry.eq_ignore_ascii_case(value))
+    {
+        entries.push(value.to_string());
+    }
 }
 
 fn ensure_git_success(result: GitCommandResult, action: &str) -> Result<GitCommandResult, String> {

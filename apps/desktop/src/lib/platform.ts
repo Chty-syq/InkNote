@@ -25,6 +25,8 @@ export interface PublishStatusResponse {
   branchExists: boolean;
   remoteCommit: string;
   shortStatus: string;
+  latencyMs: number;
+  proxySummary: string;
 }
 
 export interface PublishSiteRequest {
