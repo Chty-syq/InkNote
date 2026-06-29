@@ -26,7 +26,6 @@ import {
   IconDownload,
   IconExternalLink,
   IconGripVertical,
-  IconHeading,
   IconHistory,
   IconInfoCircle,
   IconItalic,
@@ -1572,6 +1571,18 @@ function prefixSelectedLines(
     nextSelectionStart: blockStart,
     nextSelectionEnd: blockStart + nextBlock.length,
   };
+}
+
+function increaseMarkdownHeadingLevel(line: string): string {
+  const match = /^(\s*)(#{1,6})(?:\s+)?(.*)$/.exec(line);
+  if (!match) {
+    const indent = line.match(/^\s*/)?.[0] ?? '';
+    return `${indent}# ${line.slice(indent.length)}`;
+  }
+
+  const [, indent, hashes, content] = match;
+  const nextLevel = Math.min(hashes.length + 1, 6);
+  return `${indent}${'#'.repeat(nextLevel)} ${content.trimStart()}`;
 }
 
 function insertSnippet(
@@ -6850,11 +6861,11 @@ export default function NotesWorkbench() {
                     <button
                       type="button"
                       className="notes-toolbar-button"
-                      onClick={() => applyLinePrefix((line) => `## ${line.replace(/^#{1,6}\s+/, '')}`)}
-                      title="Heading"
-                      aria-label="Heading"
+                      onClick={() => applyLinePrefix(increaseMarkdownHeadingLevel)}
+                      title="标题层级 +1"
+                      aria-label="标题层级 +1"
                     >
-                      <IconHeading aria-hidden="true" />
+                      <span className="notes-toolbar-glyph notes-toolbar-glyph-heading">H</span>
                     </button>
                     <button
                       type="button"
@@ -6942,22 +6953,12 @@ export default function NotesWorkbench() {
                     <button
                       type="button"
                       className="notes-toolbar-button"
-                      onClick={() => applyLinkedNotebookLinePrefix((line) => `# ${line.replace(/^#{1,6}\s+/, '')}`)}
+                      onClick={() => applyLinkedNotebookLinePrefix(increaseMarkdownHeadingLevel)}
                       disabled={!linkedNotebook}
-                      title="标题"
-                      aria-label="标题"
+                      title="标题层级 +1"
+                      aria-label="标题层级 +1"
                     >
-                      <span className="notes-toolbar-glyph notes-toolbar-glyph-heading">H1</span>
-                    </button>
-                    <button
-                      type="button"
-                      className="notes-toolbar-button"
-                      onClick={() => applyLinkedNotebookLinePrefix((line) => `## ${line.replace(/^#{1,6}\s+/, '')}`)}
-                      disabled={!linkedNotebook}
-                      title="副标题"
-                      aria-label="副标题"
-                    >
-                      <span className="notes-toolbar-glyph notes-toolbar-glyph-heading">H2</span>
+                      <span className="notes-toolbar-glyph notes-toolbar-glyph-heading">H</span>
                     </button>
                     <button
                       type="button"

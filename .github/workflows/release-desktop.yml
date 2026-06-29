@@ -52,7 +52,7 @@ jobs:
         run: node scripts/configure-tauri-updater.mjs
 
       - name: Build and publish release
-        uses: tauri-apps/tauri-action@v0
+        uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
@@ -64,4 +64,31 @@ jobs:
           releaseBody: Download the Windows installer below.
           releaseDraft: false
           prerelease: false
+          uploadUpdaterJson: true
+          uploadUpdaterSignatures: true
           updaterJsonPreferNsis: true
+
+      - name: Verify updater manifest
+        shell: pwsh
+        run: |
+          $manifestUrl = "https://github.com/${{ github.repository }}/releases/latest/download/latest.json"
+          $lastError = $null
+          for ($attempt = 1; $attempt -le 6; $attempt++) {
+            try {
+              $response = Invoke-WebRequest -UseBasicParsing -Uri $manifestUrl -MaximumRedirection 5 -TimeoutSec 30
+              $manifest = $response.Content | ConvertFrom-Json
+              if (-not $manifest.version) {
+                throw "latest.json is missing the version field."
+              }
+              if (-not $manifest.platforms) {
+                throw "latest.json is missing the platforms field."
+              }
+              Write-Host "Updater manifest is available: $manifestUrl"
+              exit 0
+            } catch {
+              $lastError = $_.Exception.Message
+              Write-Warning "Updater manifest check attempt $attempt failed: $lastError"
+              Start-Sleep -Seconds 10
+            }
+          }
+          throw "Updater manifest was not published or is invalid: $lastError"

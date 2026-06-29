@@ -6318,6 +6318,8 @@ input[type='range']::-moz-range-thumb {
 }
 
 .notes-editor-toolbar {
+  --notes-toolbar-button-size: 28px;
+  --notes-toolbar-icon-size: 16px;
   display: flex;
   align-items: center;
   gap: 0.08rem;
@@ -6331,18 +6333,24 @@ input[type='range']::-moz-range-thumb {
 .notes-toolbar-button {
   display: inline-flex;
   align-items: center;
+  justify-content: center;
+  flex: 0 0 var(--notes-toolbar-button-size);
+  width: var(--notes-toolbar-button-size);
+  min-width: var(--notes-toolbar-button-size);
+  height: var(--notes-toolbar-button-size);
+  min-height: var(--notes-toolbar-button-size);
+  padding: 0;
   color: #66788b;
   font-size: 0.82rem;
   font-weight: 700;
-  min-width: 30px;
-  padding: 0.24rem 0.44rem;
-  justify-content: center;
 }
 
 .notes-toolbar-button svg {
   display: block;
-  width: 16px;
-  height: 16px;
+  width: var(--notes-toolbar-icon-size);
+  height: var(--notes-toolbar-icon-size);
+  min-width: var(--notes-toolbar-icon-size);
+  min-height: var(--notes-toolbar-icon-size);
   fill: none;
   stroke: currentColor;
   stroke-width: 1.6;
@@ -6405,11 +6413,15 @@ input[type='range']::-moz-range-thumb {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-width: 14px;
+  width: var(--notes-toolbar-icon-size);
+  min-width: var(--notes-toolbar-icon-size);
+  height: var(--notes-toolbar-icon-size);
+  min-height: var(--notes-toolbar-icon-size);
   color: currentColor;
   font-family: Georgia, "Times New Roman", serif;
-  font-size: 0.98rem;
+  font-size: 0.92rem;
   line-height: 1;
+  letter-spacing: 0;
 }
 
 .notes-toolbar-glyph-bold {
@@ -6422,7 +6434,7 @@ input[type='range']::-moz-range-thumb {
 }
 
 .notes-toolbar-glyph-heading {
-  font-weight: 600;
+  font-weight: 700;
 }
 
 .notes-editor-workbench {
