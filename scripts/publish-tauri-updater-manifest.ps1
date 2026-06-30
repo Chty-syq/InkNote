@@ -78,11 +78,18 @@ if (-not $signatureAsset) {
   throw "No signature asset matching $($installer.name) was found. Assets: $assetNames"
 }
 
-$signature = (Invoke-WebRequest `
-    -UseBasicParsing `
-    -Uri $signatureAsset.browser_download_url `
-    -Headers @{ "User-Agent" = "InkNote release workflow" } `
-    -TimeoutSec 60).Content.Trim()
+$signatureResponse = Invoke-WebRequest `
+  -UseBasicParsing `
+  -Uri $signatureAsset.browser_download_url `
+  -Headers @{ "User-Agent" = "InkNote release workflow" } `
+  -TimeoutSec 60
+
+$signatureContent = $signatureResponse.Content
+if ($signatureContent -is [byte[]]) {
+  $signature = [System.Text.Encoding]::UTF8.GetString($signatureContent).Trim()
+} else {
+  $signature = ([string]$signatureContent).Trim()
+}
 
 if (-not $signature) {
   throw "Signature asset is empty: $($signatureAsset.name)"
