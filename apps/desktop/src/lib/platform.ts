@@ -36,6 +36,8 @@ export interface PublishSiteRequest {
   basePath: string;
   sshKeyPath: string;
   message: string;
+  knownRemoteCommit?: string;
+  verifyAfterPush?: boolean;
 }
 
 export interface PullRemoteContentRequest {
@@ -43,6 +45,10 @@ export interface PullRemoteContentRequest {
   remote: string;
   branch: string;
   sshKeyPath: string;
+  conflictStrategy: 'remote' | 'local';
+}
+
+export interface SyncSiteRequest extends PublishSiteRequest {
   conflictStrategy: 'remote' | 'local';
 }
 
@@ -196,6 +202,10 @@ export async function publishContentChanges(request: PublishSiteRequest): Promis
 
 export async function pullRemoteContent(request: PullRemoteContentRequest): Promise<GitCommandResult> {
   return invoke('pull_remote_content', { request });
+}
+
+export async function syncContentChanges(request: SyncSiteRequest): Promise<GitCommandResult> {
+  return invoke('sync_content_changes', { request });
 }
 
 export async function listenToPublishProgress(

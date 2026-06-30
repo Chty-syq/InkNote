@@ -1,139 +1,139 @@
 {
-  "author": "Chty",
+  "title": "Chty's Blog",
+  "tagline": "秋阴不散霜飞晚，留得残荷听雨声",
+  "description": "记录技术学习、长期写作与古典摘录的个人博客。",
   "baseUrl": "https://example.github.io/inknote",
-  "cardImages": {
-    "enabled": true,
-    "manifest": "/card-images/gallery/manifest.json"
+  "language": "zh-CN",
+  "author": "Chty",
+  "hero": {
+    "eyebrow": "Personal Notebook",
+    "title": "Markdown 笔记与 InkNote 摘录",
+    "description": "从桌面端写作工作台同步到静态博客的一套内容系统。",
+    "primaryLink": {
+      "label": "浏览文章",
+      "href": "/notes"
+    },
+    "secondaryLink": {
+      "label": "浏览 InkNote",
+      "href": "/inknote"
+    }
   },
   "channels": [
     {
-      "description": "站内检索",
+      "label": "搜索",
       "href": "#blog-search",
-      "label": "搜索"
+      "description": "站内检索"
     },
     {
-      "description": "文章归档",
+      "label": "归档",
       "href": "#",
-      "label": "归档"
+      "description": "文章归档"
     },
     {
-      "description": "订阅更新",
+      "label": "RSS",
       "href": "#",
-      "label": "RSS"
+      "description": "订阅更新"
     },
     {
-      "description": "关于这个博客",
+      "label": "关于",
       "href": "/about",
-      "label": "关于"
+      "description": "关于这个博客"
     }
   ],
-  "description": "记录技术学习、长期写作与古典摘录的个人博客。",
   "friendLinks": [
     {
+      "label": "科学空间",
       "href": "https://spaces.ac.cn",
+      "note": "",
       "icon": "",
-      "iconFetchedAt": "",
       "iconSource": "",
       "iconTarget": "",
-      "label": "科学空间",
-      "note": ""
+      "iconFetchedAt": ""
     },
     {
+      "label": "YangWC‘s Blog",
       "href": "https://yangwc.com/",
+      "note": "",
       "icon": "/generated/friend-icons/d78b3313dc394f60517bf6b2.png",
-      "iconFetchedAt": "2026-06-22T08:39:56.179Z",
       "iconSource": "https://cdn.jsdelivr.net/gh/ZeusYang/CDN-for-yangwc.com@1.1//globalImage/logo.ico",
       "iconTarget": "https://yangwc.com/",
-      "label": "YangWC‘s Blog",
-      "note": ""
+      "iconFetchedAt": "2026-06-22T08:39:56.179Z"
     }
   ],
+  "toolLinks": [
+    {
+      "label": "图论作图",
+      "href": "https://csacademy.com/app/graph_editor/",
+      "note": "",
+      "icon": "/generated/friend-icons/630e132dc88ac12b044a5349.png",
+      "iconSource": "https://csacademy.com/static/favicon.png",
+      "iconTarget": "https://csacademy.com/app/graph_editor/",
+      "iconFetchedAt": "2026-06-27T16:21:31.879Z"
+    },
+    {
+      "label": "开源动画搜索引擎",
+      "href": "https://trace.moe/",
+      "note": "",
+      "icon": "/generated/friend-icons/4526c8080aa0b5fd4345490d.png",
+      "iconSource": "https://trace.moe/favicon128.png",
+      "iconTarget": "https://trace.moe/",
+      "iconFetchedAt": "2026-06-27T16:22:14.070Z"
+    },
+    {
+      "label": "欧拉计划",
+      "href": "https://pe-cn.github.io/",
+      "note": "",
+      "icon": "/generated/friend-icons/e451e580be744bd90b8a59b3.png",
+      "iconSource": "https://pe-cn.github.io/images/32x32.png",
+      "iconTarget": "https://pe-cn.github.io/",
+      "iconFetchedAt": "2026-06-27T16:26:00.624Z"
+    },
+    {
+      "label": "图片背景消除",
+      "href": "https://www.remove.bg/zh",
+      "note": "",
+      "icon": "/generated/friend-icons/46d143fadd96ae79f467b1e4.png",
+      "iconSource": "https://www.remove.bg/favicon-32x32.png?v=fc0bfce6e1310f1539afec9729716721",
+      "iconTarget": "https://www.remove.bg/zh",
+      "iconFetchedAt": "2026-06-27T16:26:43.540Z"
+    },
+    {
+      "label": "AoPS",
+      "href": "https://artofproblemsolving.com/community/c7_college_math",
+      "note": "",
+      "icon": "",
+      "iconSource": "",
+      "iconTarget": "",
+      "iconFetchedAt": ""
+    }
+  ],
+  "repository": {
+    "remote": "git@github.com:Chty-syq/inknote-web.git",
+    "branch": "gh-page",
+    "pagesUrl": "https://chty-syq.github.io/inknote-web/",
+    "basePath": "/inknote-web/"
+  },
   "giscus": {
-    "category": "Announcements",
-    "categoryId": "DIC_kwDOS4ofns4C_U79",
-    "emitMetadata": false,
     "enabled": true,
-    "inputPosition": "bottom",
-    "lang": "zh-CN",
-    "mapping": "pathname",
-    "reactionsEnabled": false,
     "repo": "Chty-syq/InkNote",
     "repoId": "R_kgDOS4ofng",
+    "category": "Announcements",
+    "categoryId": "DIC_kwDOS4ofns4C_U79",
+    "mapping": "pathname",
     "strict": false,
-    "theme": "noborder_light"
+    "reactionsEnabled": false,
+    "emitMetadata": false,
+    "inputPosition": "bottom",
+    "theme": "noborder_light",
+    "lang": "zh-CN"
   },
   "goatcounter": {
     "enabled": true,
     "endpoint": "https://chty.goatcounter.com/count",
     "scriptUrl": "https://gc.zgo.at/count.js"
   },
-  "hero": {
-    "description": "从桌面端写作工作台同步到静态博客的一套内容系统。",
-    "eyebrow": "Personal Notebook",
-    "primaryLink": {
-      "href": "/notes",
-      "label": "浏览文章"
-    },
-    "secondaryLink": {
-      "href": "/inknote",
-      "label": "浏览 InkNote"
-    },
-    "title": "Markdown 笔记与 InkNote 摘录"
-  },
-  "language": "zh-CN",
-  "repository": {
-    "basePath": "/inknote-web/",
-    "branch": "gh-page",
-    "pagesUrl": "https://chty-syq.github.io/inknote-web/",
-    "remote": "git@github.com:Chty-syq/inknote-web.git"
-  },
-  "tagline": "秋阴不散霜飞晚，留得残荷听雨声",
-  "title": "Chty's Blog",
-  "toolLinks": [
-    {
-      "href": "https://csacademy.com/app/graph_editor/",
-      "icon": "/generated/friend-icons/630e132dc88ac12b044a5349.png",
-      "iconFetchedAt": "2026-06-27T16:21:31.879Z",
-      "iconSource": "https://csacademy.com/static/favicon.png",
-      "iconTarget": "https://csacademy.com/app/graph_editor/",
-      "label": "图论作图",
-      "note": ""
-    },
-    {
-      "href": "https://trace.moe/",
-      "icon": "/generated/friend-icons/4526c8080aa0b5fd4345490d.png",
-      "iconFetchedAt": "2026-06-27T16:22:14.070Z",
-      "iconSource": "https://trace.moe/favicon128.png",
-      "iconTarget": "https://trace.moe/",
-      "label": "开源动画搜索引擎",
-      "note": ""
-    },
-    {
-      "href": "https://pe-cn.github.io/",
-      "icon": "/generated/friend-icons/e451e580be744bd90b8a59b3.png",
-      "iconFetchedAt": "2026-06-27T16:26:00.624Z",
-      "iconSource": "https://pe-cn.github.io/images/32x32.png",
-      "iconTarget": "https://pe-cn.github.io/",
-      "label": "欧拉计划",
-      "note": ""
-    },
-    {
-      "href": "https://www.remove.bg/zh",
-      "icon": "/generated/friend-icons/46d143fadd96ae79f467b1e4.png",
-      "iconFetchedAt": "2026-06-27T16:26:43.540Z",
-      "iconSource": "https://www.remove.bg/favicon-32x32.png?v=fc0bfce6e1310f1539afec9729716721",
-      "iconTarget": "https://www.remove.bg/zh",
-      "label": "图片背景消除",
-      "note": ""
-    },
-    {
-      "href": "https://artofproblemsolving.com/community/c7_college_math",
-      "icon": "",
-      "iconFetchedAt": "",
-      "iconSource": "",
-      "iconTarget": "",
-      "label": "AoPS",
-      "note": ""
-    }
-  ]
+  "cardImages": {
+    "enabled": true,
+    "manifest": "/card-images/gallery/manifest.json"
+  }
 }

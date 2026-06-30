@@ -13,6 +13,7 @@ use std::{
     process::{Child, Command, Stdio},
     sync::{
         atomic::{AtomicU8, Ordering},
+        mpsc,
         Mutex, OnceLock,
     },
     thread::{self, JoinHandle},
@@ -73,6 +74,8 @@ struct PublishSiteRequest {
     base_path: String,
     ssh_key_path: String,
     message: String,
+    known_remote_commit: Option<String>,
+    verify_after_push: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -83,6 +86,20 @@ struct PullRemoteContentRequest {
     branch: String,
     ssh_key_path: String,
     conflict_strategy: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SyncSiteRequest {
+    task_id: String,
+    remote: String,
+    branch: String,
+    base_path: String,
+    ssh_key_path: String,
+    message: String,
+    conflict_strategy: String,
+    known_remote_commit: Option<String>,
+    verify_after_push: Option<bool>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -679,6 +696,33 @@ fn get_publish_status_with_ssh(
     })
 }
 
+fn publish_status_from_known_commit(
+    remote: &str,
+    branch: &str,
+    remote_commit: &str,
+) -> PublishStatus {
+    let remote_commit = remote_commit.trim().to_string();
+    let branch_exists = !remote_commit.is_empty();
+    let short_status = if branch_exists {
+        format!(
+            "远程分支 {branch} 已连接，当前版本 {}。",
+            short_commit(&remote_commit)
+        )
+    } else {
+        format!("远程仓库已连接，首次发布时将创建分支 {branch}。")
+    };
+
+    PublishStatus {
+        proxy_summary: describe_git_system_proxy(remote),
+        remote: remote.to_string(),
+        branch: branch.to_string(),
+        branch_exists,
+        remote_commit,
+        short_status,
+        latency_ms: 0,
+    }
+}
+
 #[tauri::command]
 async fn publish_content_changes(
     app: tauri::AppHandle,
@@ -775,6 +819,197 @@ fn pull_remote_content_blocking(
     result
 }
 
+#[tauri::command]
+async fn sync_content_changes(
+    app: tauri::AppHandle,
+    request: SyncSiteRequest,
+) -> Result<GitCommandResult, String> {
+    tauri::async_runtime::spawn_blocking(move || sync_content_changes_blocking(app, request))
+        .await
+        .map_err(|error| format!("站点同步任务线程异常结束：{error}"))?
+}
+
+fn sync_content_changes_blocking(
+    app: tauri::AppHandle,
+    request: SyncSiteRequest,
+) -> Result<GitCommandResult, String> {
+    let reporter = PublishProgressReporter {
+        app: Some(app),
+        task_id: request.task_id.clone(),
+        event_name: "publish-progress",
+        progress: AtomicU8::new(0),
+    };
+    reporter.emit(
+        18,
+        "fetch",
+        "准备拉取远端仓库",
+        "正在校验仓库地址、分支与冲突策略。",
+        "info",
+    );
+
+    let result = sync_content_changes_inner(&request, &reporter);
+    match &result {
+        Ok(output) => reporter.emit(
+            100,
+            "push",
+            "同步完成",
+            concise_git_result_detail(output, "远端站点已更新。"),
+            "success",
+        ),
+        Err(error) => reporter.emit(
+            reporter.current_progress(),
+            "failed",
+            "站点同步失败",
+            error.as_str(),
+            "error",
+        ),
+    }
+    result
+}
+
+fn sync_content_changes_inner(
+    request: &SyncSiteRequest,
+    reporter: &PublishProgressReporter,
+) -> Result<GitCommandResult, String> {
+    let (remote, branch) = validate_publish_target(&request.remote, &request.branch)?;
+    let ssh_key_path = request.ssh_key_path.trim();
+    let ssh_command = create_git_ssh_command((!ssh_key_path.is_empty()).then_some(ssh_key_path))?;
+    let conflict_strategy = ContentSyncConflictStrategy::parse(&request.conflict_strategy)?;
+    let commit_message = request.message.trim();
+    if commit_message.is_empty() {
+        return Err("请输入同步说明。".to_string());
+    }
+
+    let status = if let Some(remote_commit) = request.known_remote_commit.as_deref() {
+        publish_status_from_known_commit(&remote, &branch, remote_commit)
+    } else {
+        get_publish_status_with_ssh(
+            remote.clone(),
+            branch.clone(),
+            (!ssh_key_path.is_empty()).then_some(ssh_key_path),
+        )?
+    };
+
+    reporter.emit(
+        20,
+        "fetch",
+        "准备拉取远端仓库",
+        "正在创建临时 Git 工作区。",
+        "info",
+    );
+    let sync_directory = TemporaryPublishDirectory::create()?;
+    let sync_root = sync_directory.path();
+    ensure_git_success(
+        run_git_in(sync_root, &["init"])?,
+        "initialize sync publishing repository",
+    )?;
+    ensure_git_success(
+        run_git_in(sync_root, &["remote", "add", "origin", &remote])?,
+        "configure sync publishing remote",
+    )?;
+    reporter.emit(
+        22,
+        "fetch",
+        "拉取准备完成",
+        status.short_status.clone(),
+        "success",
+    );
+
+    let remote_ref = format!("refs/heads/{branch}");
+    if status.branch_exists {
+        reporter.emit(
+            24,
+            "fetch",
+            "正在拉取远端仓库",
+            format!("分支：{branch}"),
+            "info",
+        );
+        let mut last_fetch_percent = None;
+        let fetched = ensure_git_success(
+            run_git_in_with_ssh_progress(
+                sync_root,
+                &["fetch", "--progress", "--depth=1", "origin", &remote_ref],
+                ssh_command.as_deref(),
+                |line| {
+                    emit_git_transfer_progress(
+                        reporter,
+                        24,
+                        18,
+                        "fetch",
+                        "正在拉取远端仓库",
+                        line,
+                        &mut last_fetch_percent,
+                    );
+                },
+            )?,
+            "fetch sync branch",
+        )?;
+        reporter.emit(
+            42,
+            "fetch",
+            "远端仓库拉取完成",
+            concise_git_result_detail(&fetched, "已取得远端发布分支。"),
+            "success",
+        );
+        ensure_git_success(
+            run_git_in(sync_root, &["checkout", "-B", &branch, "FETCH_HEAD"])?,
+            "checkout sync branch",
+        )?;
+
+        reporter.emit(
+            44,
+            "merge",
+            "正在合并内容",
+            format!("冲突策略：{}", conflict_strategy.label()),
+            "info",
+        );
+        let payload = read_runtime_content_payload_from_artifact_root(sync_root)?;
+        restore_runtime_content_payload(&payload, conflict_strategy)?;
+        restore_runtime_public_assets(sync_root, conflict_strategy)?;
+        reporter.emit(
+            54,
+            "merge",
+            "内容合并完成",
+            "远端独有与本地独有内容已保留，冲突项已按策略处理。",
+            "success",
+        );
+    } else {
+        reporter.emit(
+            42,
+            "fetch",
+            "远端分支不存在",
+            "将创建首次发布分支，并以本地内容作为初始版本。",
+            "warning",
+        );
+        ensure_git_success(
+            run_git_in(sync_root, &["checkout", "--orphan", &branch])?,
+            "create first sync branch",
+        )?;
+        reporter.emit(
+            54,
+            "merge",
+            "无需合并远端内容",
+            "远端尚无发布内容，跳过拉取合并。",
+            "success",
+        );
+    }
+
+    let artifact = create_publish_artifact(&request.base_path, 56, reporter)?;
+    publish_prepared_worktree(
+        artifact.path(),
+        sync_root,
+        &remote,
+        &branch,
+        &remote_ref,
+        (!ssh_key_path.is_empty()).then_some(ssh_key_path),
+        ssh_command.as_deref(),
+        commit_message,
+        &status,
+        request.verify_after_push.unwrap_or(false),
+        reporter,
+    )
+}
+
 fn pull_remote_content_inner(
     request: &PullRemoteContentRequest,
     reporter: &PublishProgressReporter,
@@ -831,26 +1066,14 @@ fn pull_remote_content_inner(
         "checkout remote content branch",
     )?;
 
-    let manifest_path = sync_root.join("inknote-content.json");
-    if !manifest_path.is_file() {
-        return Err(
-            "远端分支中没有找到 inknote-content.json，请确认该分支是 InkNote 发布产物。"
-                .to_string(),
-        );
-    }
-
     reporter.emit(
         52,
         "manifest",
         "正在读取远端内容清单",
-        manifest_path.display().to_string(),
+        sync_root.join("inknote-content.json").display().to_string(),
         "info",
     );
-    let manifest = fs::read_to_string(&manifest_path)
-        .map_err(|error| format!("failed to read {}: {error}", manifest_path.display()))?;
-    let payload: RuntimeContentPayload =
-        serde_json::from_str(manifest.trim_start_matches('\u{feff}'))
-            .map_err(|error| format!("failed to parse {}: {error}", manifest_path.display()))?;
+    let payload = read_runtime_content_payload_from_artifact_root(sync_root)?;
 
     reporter.emit(
         65,
@@ -897,6 +1120,23 @@ fn pull_remote_content_inner(
     })
 }
 
+fn read_runtime_content_payload_from_artifact_root(
+    artifact_root: &Path,
+) -> Result<RuntimeContentPayload, String> {
+    let manifest_path = artifact_root.join("inknote-content.json");
+    if !manifest_path.is_file() {
+        return Err(
+            "远端分支中没有找到 inknote-content.json，请确认该分支是 InkNote 发布产物。"
+                .to_string(),
+        );
+    }
+
+    let manifest = fs::read_to_string(&manifest_path)
+        .map_err(|error| format!("failed to read {}: {error}", manifest_path.display()))?;
+    serde_json::from_str(manifest.trim_start_matches('\u{feff}'))
+        .map_err(|error| format!("failed to parse {}: {error}", manifest_path.display()))
+}
+
 fn publish_content_changes_inner(
     request: &PublishSiteRequest,
     reporter: &PublishProgressReporter,
@@ -909,13 +1149,31 @@ fn publish_content_changes_inner(
         return Err("请输入发布说明。".to_string());
     }
 
-    let base_path = normalize_pages_base(&request.base_path)?;
+    let artifact = create_publish_artifact(&request.base_path, 14, reporter)?;
+    publish_built_site(
+        artifact.path(),
+        &remote,
+        &branch,
+        (!ssh_key_path.is_empty()).then_some(ssh_key_path),
+        commit_message,
+        request.known_remote_commit.as_deref(),
+        request.verify_after_push.unwrap_or(true),
+        reporter,
+    )
+}
+
+fn create_publish_artifact(
+    base_path_value: &str,
+    progress_base: u8,
+    reporter: &PublishProgressReporter,
+) -> Result<TemporaryPublishDirectory, String> {
+    let base_path = normalize_pages_base(base_path_value)?;
     if can_rebuild_web_shell_from_workspace() {
         reporter.emit(
-            14,
-            "shell",
-            "正在重建 Web 前端外壳",
-            "检测到源码工作区，发布前会自动执行 npm run web:build。",
+            progress_base,
+            "build",
+            "正在构建 Web 镜像",
+            "正在更新博客前端外壳。",
             "info",
         );
         let rebuild_result = rebuild_web_shell_from_workspace()?;
@@ -926,54 +1184,53 @@ fn publish_content_changes_inner(
             ));
         }
         reporter.emit(
-            16,
-            "shell",
-            "Web 前端外壳重建完成",
-            format_git_result(&rebuild_result),
+            progress_base.saturating_add(2),
+            "build",
+            "Web 前端外壳已更新",
+            concise_git_result_detail(&rebuild_result, "前端资源构建完成。"),
             "success",
         );
     } else {
         reporter.emit(
-            14,
-            "shell",
-            "本次发布使用现有 Web 外壳",
-            "未检测到可重建的源码工作区；若修改了 apps/web/src，请先构建新版桌面应用或在源码仓库中发布。",
+            progress_base,
+            "build",
+            "正在构建 Web 镜像",
+            "使用当前应用内置的博客前端外壳。",
             "info",
         );
     }
     reporter.emit(
-        17,
-        "shell",
-        "已确认 Web 外壳来源",
-        get_web_shell_root()?.display().to_string(),
+        progress_base.saturating_add(3),
+        "build",
+        "已确认 Web 外壳",
+        "开始写入运行时内容清单。",
         "info",
     );
     reporter.emit(
-        18,
+        progress_base.saturating_add(4),
         "build",
-        "正在生成静态站点",
-        format!("基础路径：{base_path}"),
+        "正在构建 Web 镜像",
+        format!("站点路径：{base_path}"),
         "info",
     );
     let artifact = create_runtime_web_artifact(&base_path)?;
     if let Ok(summary) = summarize_runtime_manifest(artifact.path()) {
-        reporter.emit(24, "build", "已生成运行时内容清单", summary, "success");
+        reporter.emit(
+            progress_base.saturating_add(10),
+            "build",
+            "Web 内容清单已生成",
+            summary,
+            "success",
+        );
     }
     reporter.emit(
-        30,
+        progress_base.saturating_add(16),
         "build",
-        "静态站点生成完成",
-        format!("临时产物：{}", artifact.path().display()),
+        "Web 镜像构建完成",
+        "文章、配置、RSS 与公开资源已写入临时镜像。",
         "success",
     );
-    publish_built_site(
-        artifact.path(),
-        &remote,
-        &branch,
-        (!ssh_key_path.is_empty()).then_some(ssh_key_path),
-        commit_message,
-        reporter,
-    )
+    Ok(artifact)
 }
 
 fn publish_built_site(
@@ -982,6 +1239,8 @@ fn publish_built_site(
     branch: &str,
     ssh_key_path: Option<&str>,
     commit_message: &str,
+    known_remote_commit: Option<&str>,
+    verify_after_push: bool,
     reporter: &PublishProgressReporter,
 ) -> Result<GitCommandResult, String> {
     let ssh_command = create_git_ssh_command(ssh_key_path)?;
@@ -1026,7 +1285,11 @@ fn publish_built_site(
         format!("检查分支：{branch}"),
         "info",
     );
-    let status = get_publish_status_with_ssh(remote.to_string(), branch.to_string(), ssh_key_path)?;
+    let status = if let Some(remote_commit) = known_remote_commit {
+        publish_status_from_known_commit(remote, branch, remote_commit)
+    } else {
+        get_publish_status_with_ssh(remote.to_string(), branch.to_string(), ssh_key_path)?
+    };
     reporter.emit(
         50,
         "remote",
@@ -1089,19 +1352,47 @@ fn publish_built_site(
         );
     }
 
+    publish_prepared_worktree(
+        dist,
+        publish_root,
+        remote,
+        branch,
+        &remote_ref,
+        ssh_key_path,
+        ssh_command.as_deref(),
+        commit_message,
+        &status,
+        verify_after_push,
+        reporter,
+    )
+}
+
+fn publish_prepared_worktree(
+    dist: &Path,
+    publish_root: &Path,
+    remote: &str,
+    branch: &str,
+    remote_ref: &str,
+    ssh_key_path: Option<&str>,
+    ssh_command: Option<&str>,
+    commit_message: &str,
+    status: &PublishStatus,
+    verify_after_push: bool,
+    reporter: &PublishProgressReporter,
+) -> Result<GitCommandResult, String> {
     reporter.emit(
-        64,
-        "files",
-        "正在整理站点文件",
-        "镜像静态产物并保留已有 CNAME。",
+        74,
+        "build",
+        "正在整理 Web 镜像",
+        "正在把静态产物写入待推送工作区。",
         "info",
     );
     mirror_deployment_artifact(&dist, publish_root)?;
     reporter.emit(
-        70,
-        "files",
-        "站点文件整理完成",
-        "静态资源和内容清单已写入。",
+        78,
+        "build",
+        "Web 镜像已准备好",
+        "静态资源和内容清单已整理完成。",
         "success",
     );
     ensure_git_success(
@@ -1116,10 +1407,10 @@ fn publish_built_site(
         "configure Git author email",
     )?;
     reporter.emit(
-        73,
-        "commit",
-        "正在暂存发布文件",
-        "执行 git add --all。",
+        80,
+        "push",
+        "正在准备远端推送",
+        "正在检查本次同步是否产生变更。",
         "info",
     );
     let staged_files = ensure_git_success(
@@ -1127,10 +1418,10 @@ fn publish_built_site(
         "stage deployment artifact",
     )?;
     reporter.emit(
-        77,
-        "commit",
-        "发布文件已暂存",
-        format_git_result(&staged_files),
+        82,
+        "push",
+        "远端推送准备完成",
+        concise_git_result_detail(&staged_files, "待推送文件已暂存。"),
         "success",
     );
 
@@ -1138,10 +1429,10 @@ fn publish_built_site(
     if staged.success {
         let manifest_summary = summarize_runtime_manifest(publish_root)
             .unwrap_or_else(|error| format!("无法读取当前发布清单：{error}"));
-        reporter.emit(94, "complete", "本次发布清单摘要", manifest_summary, "info");
+        reporter.emit(94, "push", "本次同步内容摘要", manifest_summary, "info");
         reporter.emit(
-            96,
-            "complete",
+            100,
+            "push",
             "远程站点已是最新版本",
             "没有检测到需要提交的文件变更。",
             "success",
@@ -1153,56 +1444,79 @@ fn publish_built_site(
         });
     }
 
-    reporter.emit(80, "commit", "正在创建发布提交", commit_message, "info");
+    reporter.emit(84, "push", "正在创建同步提交", commit_message, "info");
     let committed = ensure_git_success(
         run_git_in(publish_root, &["commit", "-m", commit_message])?,
         "commit deployment artifact",
     )?;
     reporter.emit(
-        85,
-        "commit",
-        "发布提交已创建",
-        format_git_result(&committed),
+        86,
+        "push",
+        "同步提交已创建",
+        concise_git_result_detail(&committed, "本地同步提交已创建。"),
         "success",
     );
 
     if let Ok(summary) = summarize_runtime_manifest(publish_root) {
-        reporter.emit(86, "commit", "本次发布清单摘要", summary, "info");
+        reporter.emit(88, "push", "本次同步内容摘要", summary, "info");
     }
 
     let refspec = format!("HEAD:{remote_ref}");
     reporter.emit(
-        88,
+        90,
         "push",
         "正在推送到远程仓库",
         format!("目标分支：{branch}"),
         "info",
     );
+    let mut last_push_percent = None;
     let push_result = if status.branch_exists {
         let lease = format!("--force-with-lease={remote_ref}:{}", status.remote_commit);
         ensure_git_success(
-            run_git_in_with_ssh(
+            run_git_in_with_ssh_progress(
                 publish_root,
-                &["push", "origin", &refspec, &lease],
-                ssh_command.as_deref(),
+                &["push", "--progress", "origin", &refspec, &lease],
+                ssh_command,
+                |line| {
+                    emit_git_transfer_progress(
+                        reporter,
+                        90,
+                        8,
+                        "push",
+                        "正在推送到远程仓库",
+                        line,
+                        &mut last_push_percent,
+                    );
+                },
             )?,
             "push deployment branch",
         )?
     } else {
         ensure_git_success(
-            run_git_in_with_ssh(
+            run_git_in_with_ssh_progress(
                 publish_root,
-                &["push", "--set-upstream", "origin", &refspec],
-                ssh_command.as_deref(),
+                &["push", "--progress", "--set-upstream", "origin", &refspec],
+                ssh_command,
+                |line| {
+                    emit_git_transfer_progress(
+                        reporter,
+                        90,
+                        8,
+                        "push",
+                        "正在推送到远程仓库",
+                        line,
+                        &mut last_push_percent,
+                    );
+                },
             )?,
             "create remote deployment branch",
         )?
     };
     reporter.emit(
-        96,
+        98,
         "push",
         "远程推送完成",
-        format_git_result(&push_result),
+        concise_git_result_detail(&push_result, "远程仓库已接收本次同步。"),
         "success",
     );
 
@@ -1211,35 +1525,50 @@ fn publish_built_site(
         "read deployment commit",
     )?;
     let deployed_commit = commit.stdout.trim().to_string();
-    let remote_status_after_push =
-        get_publish_status_with_ssh(remote.to_string(), branch.to_string(), ssh_key_path)?;
-    let remote_commit_after_push = remote_status_after_push.remote_commit.trim().to_string();
-    let remote_matches_local = !remote_commit_after_push.is_empty()
-        && short_commit(&remote_commit_after_push) == short_commit(&deployed_commit);
-    reporter.emit(
-        98,
-        "verify",
-        if remote_matches_local {
-            "远端分支校验通过"
-        } else {
-            "远端分支校验异常"
-        },
-        format!(
-            "本地：{}\n远端：{}\n分支：{}",
-            short_commit(&deployed_commit),
-            if remote_commit_after_push.is_empty() {
-                "(empty)"
+    let remote_commit_after_push = if verify_after_push {
+        let remote_status_after_push =
+            get_publish_status_with_ssh(remote.to_string(), branch.to_string(), ssh_key_path)?;
+        let remote_commit_after_push = remote_status_after_push.remote_commit.trim().to_string();
+        let remote_matches_local = !remote_commit_after_push.is_empty()
+            && short_commit(&remote_commit_after_push) == short_commit(&deployed_commit);
+        reporter.emit(
+            99,
+            "push",
+            if remote_matches_local {
+                "远端分支校验通过"
             } else {
-                short_commit(&remote_commit_after_push)
+                "远端分支校验异常"
             },
-            branch
-        ),
-        if remote_matches_local {
-            "success"
-        } else {
-            "warning"
-        },
-    );
+            format!(
+                "本地：{}\n远端：{}\n分支：{}",
+                short_commit(&deployed_commit),
+                if remote_commit_after_push.is_empty() {
+                    "(empty)"
+                } else {
+                    short_commit(&remote_commit_after_push)
+                },
+                branch
+            ),
+            if remote_matches_local {
+                "success"
+            } else {
+                "warning"
+            },
+        );
+        remote_commit_after_push
+    } else {
+        reporter.emit(
+            99,
+            "push",
+            "远端推送已确认",
+            format!(
+                "Git 已接受推送，发布版本：{}",
+                short_commit(&deployed_commit)
+            ),
+            "success",
+        );
+        deployed_commit.clone()
+    };
     Ok(GitCommandResult {
         success: push_result.success,
         stdout: format!(
@@ -1262,6 +1591,26 @@ fn format_git_result(result: &GitCommandResult) -> String {
         (true, false) => result.stderr.clone(),
         (false, false) => format!("{}\n{}", result.stdout, result.stderr),
     }
+}
+
+fn concise_git_result_detail(result: &GitCommandResult, fallback: &str) -> String {
+    let combined = format_git_result(result);
+    if combined == "命令执行成功，未返回额外信息。" {
+        return fallback.to_string();
+    }
+
+    combined
+        .lines()
+        .map(str::trim)
+        .find(|line| {
+            !line.is_empty()
+                && !line.contains('%')
+                && !line.starts_with("remote:")
+                && !line.starts_with("From ")
+                && !line.starts_with("To ")
+        })
+        .map(|line| line.to_string())
+        .unwrap_or_else(|| fallback.to_string())
 }
 
 #[tauri::command]
@@ -3165,6 +3514,227 @@ fn run_git_in_with_ssh(
     })
 }
 
+fn run_git_in_with_ssh_progress<F>(
+    directory: &Path,
+    args: &[&str],
+    ssh_command: Option<&str>,
+    mut on_progress: F,
+) -> Result<GitCommandResult, String>
+where
+    F: FnMut(&str),
+{
+    let mut command = Command::new("git");
+    command
+        .args(args)
+        .current_dir(directory)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GCM_INTERACTIVE", "Never")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    apply_git_system_proxy_env(&mut command);
+    if let Some(ssh_command) = ssh_command {
+        command.env("GIT_SSH_COMMAND", ssh_command);
+    }
+
+    #[cfg(target_os = "windows")]
+    command.creation_flags(CREATE_NO_WINDOW);
+
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("failed to run git {:?}: {error}", args))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| format!("failed to capture git stdout for {:?}", args))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| format!("failed to capture git stderr for {:?}", args))?;
+    let (sender, receiver) = mpsc::channel::<(bool, String)>();
+    let stdout_reader = spawn_process_stream_reader(stdout, false, sender.clone());
+    let stderr_reader = spawn_process_stream_reader(stderr, true, sender);
+    let mut stdout_lines = Vec::new();
+    let mut stderr_lines = Vec::new();
+    let status = loop {
+        while let Ok((is_stderr, chunk)) = receiver.try_recv() {
+            if is_stderr {
+                let trimmed = chunk.trim();
+                if !trimmed.is_empty() {
+                    on_progress(trimmed);
+                    stderr_lines.push(trimmed.to_string());
+                }
+            } else {
+                let trimmed = chunk.trim();
+                if !trimmed.is_empty() {
+                    stdout_lines.push(trimmed.to_string());
+                }
+            }
+        }
+
+        if let Some(status) = child
+            .try_wait()
+            .map_err(|error| format!("failed to wait for git {:?}: {error}", args))?
+        {
+            break status;
+        }
+        thread::sleep(Duration::from_millis(80));
+    };
+
+    let _ = stdout_reader.join();
+    let _ = stderr_reader.join();
+    while let Ok((is_stderr, chunk)) = receiver.try_recv() {
+        let trimmed = chunk.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if is_stderr {
+            on_progress(trimmed);
+            stderr_lines.push(trimmed.to_string());
+        } else {
+            stdout_lines.push(trimmed.to_string());
+        }
+    }
+
+    Ok(GitCommandResult {
+        success: status.success(),
+        stdout: dedupe_git_stream_lines(stdout_lines).join("\n"),
+        stderr: dedupe_git_stream_lines(stderr_lines).join("\n"),
+    })
+}
+
+fn spawn_process_stream_reader<R: Read + Send + 'static>(
+    mut reader: R,
+    is_stderr: bool,
+    sender: mpsc::Sender<(bool, String)>,
+) -> JoinHandle<()> {
+    thread::spawn(move || {
+        let mut buffer = [0_u8; 1024];
+        let mut segment = Vec::new();
+        loop {
+            let Ok(read) = reader.read(&mut buffer) else {
+                break;
+            };
+            if read == 0 {
+                break;
+            }
+
+            for byte in &buffer[..read] {
+                match *byte {
+                    b'\r' | b'\n' => {
+                        if !segment.is_empty() {
+                            let line = String::from_utf8_lossy(&segment).to_string();
+                            let _ = sender.send((is_stderr, line));
+                            segment.clear();
+                        }
+                    }
+                    value => segment.push(value),
+                }
+            }
+        }
+
+        if !segment.is_empty() {
+            let line = String::from_utf8_lossy(&segment).to_string();
+            let _ = sender.send((is_stderr, line));
+        }
+    })
+}
+
+fn dedupe_git_stream_lines(lines: Vec<String>) -> Vec<String> {
+    let mut output = Vec::new();
+    for line in lines {
+        if output.last().is_some_and(|previous| previous == &line) {
+            continue;
+        }
+        output.push(line);
+    }
+    output
+}
+
+fn emit_git_transfer_progress(
+    reporter: &PublishProgressReporter,
+    base_progress: u8,
+    span: u8,
+    stage: &str,
+    message: &str,
+    line: &str,
+    last_progress: &mut Option<u8>,
+) {
+    let Some(percent) = extract_git_progress_percent(line) else {
+        return;
+    };
+    let phase_progress = map_git_transfer_phase_progress(line, percent);
+    let progress =
+        base_progress.saturating_add(((span as u16 * phase_progress as u16) / 100) as u8);
+    if last_progress.is_some_and(|previous| progress <= previous && progress < 100) {
+        return;
+    }
+    *last_progress = Some(progress);
+    reporter.emit(
+        progress,
+        stage,
+        message,
+        describe_git_progress_line(line, percent),
+        "info",
+    );
+}
+
+fn map_git_transfer_phase_progress(line: &str, percent: u8) -> u8 {
+    let percent = percent.min(100) as u16;
+    let mapped = if line.contains("Counting objects") {
+        percent * 15 / 100
+    } else if line.contains("Compressing objects") {
+        15 + percent * 25 / 100
+    } else if line.contains("Receiving objects") {
+        40 + percent * 40 / 100
+    } else if line.contains("Resolving deltas") {
+        80 + percent * 20 / 100
+    } else if line.contains("Writing objects") {
+        40 + percent * 55 / 100
+    } else if line.contains("Enumerating objects") {
+        5
+    } else {
+        percent
+    };
+    mapped.min(100) as u8
+}
+
+fn extract_git_progress_percent(line: &str) -> Option<u8> {
+    let percent_index = line.find('%')?;
+    let before_percent = &line[..percent_index];
+    let digits: String = before_percent
+        .chars()
+        .rev()
+        .skip_while(|character| character.is_whitespace())
+        .take_while(|character| character.is_ascii_digit())
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect();
+    if digits.is_empty() {
+        return None;
+    }
+    digits.parse::<u8>().ok().map(|value| value.min(100))
+}
+
+fn describe_git_progress_line(line: &str, percent: u8) -> String {
+    let label = if line.contains("Receiving objects") {
+        "正在下载远端对象"
+    } else if line.contains("Resolving deltas") {
+        "正在解析远端变更"
+    } else if line.contains("Counting objects") {
+        "正在统计对象"
+    } else if line.contains("Compressing objects") {
+        "正在压缩对象"
+    } else if line.contains("Writing objects") {
+        "正在上传站点文件"
+    } else if line.contains("Enumerating objects") {
+        "正在准备对象"
+    } else {
+        "Git 正在处理"
+    };
+    format!("{label}：{percent}%")
+}
+
 #[cfg(target_os = "windows")]
 fn apply_git_system_proxy_env(command: &mut Command) {
     let Some(proxy_env) = read_windows_system_proxy_env() else {
@@ -3539,6 +4109,8 @@ mod tests {
             "gh-pages",
             None,
             "First publish",
+            None,
+            true,
             &reporter,
         )
         .unwrap();
@@ -3553,6 +4125,8 @@ mod tests {
             "gh-pages",
             None,
             "Second publish",
+            None,
+            true,
             &reporter,
         )
         .unwrap();
@@ -3601,6 +4175,7 @@ fn main() {
             get_publish_status,
             publish_content_changes,
             pull_remote_content,
+            sync_content_changes,
             open_external_url,
             download_and_run_desktop_installer,
             ensure_blog_preview_server

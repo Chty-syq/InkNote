@@ -122,6 +122,7 @@ import {
   pullRemoteContent,
   readContentFile,
   readTextFile,
+  syncContentChanges,
   writeBinaryFile,
   writeContentFile,
   writeTextFile,
@@ -3244,27 +3245,12 @@ export default function NotesWorkbench() {
     setPublishRunState('running');
     setIsPullingContent(true);
     setIsPublishingSite(true);
-    let stopPullListening: (() => void) | null = null;
     let stopPublishListening: (() => void) | null = null;
 
     try {
-      stopPullListening = await listenToContentSyncProgress((event) => {
-        if (event.taskId === taskId) {
-          updateRunProgress(event.progress, {
-            offset: 14,
-            scale: 0.34,
-            forceRunState: event.level === 'error' ? 'error' : 'running',
-            level: event.level,
-          });
-        }
-      });
       stopPublishListening = await listenToPublishProgress((event) => {
         if (event.taskId === taskId) {
-          updateRunProgress(event.progress, {
-            offset: 50,
-            scale: 0.5,
-            level: event.level,
-          });
+          upsertPublishFlowEntry(event);
         }
       });
 
@@ -3302,7 +3288,7 @@ export default function NotesWorkbench() {
 
       recordManualProgress(
         10,
-        'prepare',
+        'save',
         '准备本地内容',
         `冲突策略：${conflictLabel}`,
       );
@@ -3310,84 +3296,60 @@ export default function NotesWorkbench() {
       if (draft && dirty) {
         const savedItem = await saveDraft();
         if (!savedItem) {
-          recordManualProgress(12, 'prepare', '当前文章保存失败', '同步已停止，请先修正文章保存错误。', 'error');
+          recordManualProgress(12, 'save', '当前文章保存失败', '同步已停止，请先修正文章保存错误。', 'error');
           return;
         }
       }
 
       const savedConfig = await saveSiteConfig();
       if (!savedConfig) {
-        recordManualProgress(12, 'prepare', '站点设置保存失败', '同步已停止，请检查站点设置。', 'error');
+        recordManualProgress(12, 'save', '站点设置保存失败', '同步已停止，请检查站点设置。', 'error');
         return;
       }
-      recordManualProgress(12, 'prepare', '本地内容已准备好', '文章与站点设置已保存。', 'success');
+      recordManualProgress(16, 'save', '本地内容已保存', '文章、图库与站点设置已写入本地内容仓。', 'success');
 
       const repository = savedConfig.repository;
       const remote = repository?.remote.trim() ?? '';
       const branch = repository?.branch.trim() ?? '';
       const basePath = inferGitHubPagesBasePath(remote);
       if (!remote || !branch) {
-        recordManualProgress(10, 'prepare', '同步配置不完整', '请配置远程仓库地址和发布分支。', 'error');
+        recordManualProgress(16, 'save', '同步配置不完整', '请配置远程仓库地址和发布分支。', 'error');
         return;
       }
 
-      if (remoteStatus.branchExists) {
-        recordManualProgress(
-          14,
-          'merge',
-          '合并远端内容',
-          '远端独有和本地独有都会保留。',
-        );
-        await pullRemoteContent({
-          taskId,
-          remote,
-          branch,
-          sshKeyPath: selectedSshKeyPath,
-          conflictStrategy: pullConflictStrategy,
-        });
-
-        draftCacheRef.current.clear();
-        cleanDraftsRef.current = new WeakSet();
-        clearLinkedNotebookState();
-        await loadSiteConfig();
-        await loadLibrary(undefined, true);
-        if (isSettingsOpen && settingsSection === 'images') {
-          await loadUserGalleryManifest();
-        }
-        recordManualProgress(49, 'merge', '内容合并完成', '已得到本次同步的最终内容集合。', 'success');
-      } else {
-        recordManualProgress(
-          49,
-          'merge',
-          '远端分支不存在',
-          '将直接发布本地内容作为远端初始版本。',
-          'warning',
-        );
-      }
-
-      recordManualProgress(50, 'publish', '发布站点', '正在生成并推送静态博客。');
-      const result = await publishContentChanges({
+      recordManualProgress(
+        18,
+        'fetch',
+        remoteStatus.branchExists ? '准备拉取远端仓库' : '准备首次发布',
+        remoteStatus.branchExists
+          ? '将拉取远端发布分支，并与本地内容取并集。'
+          : '远端分支不存在，将直接创建并发布本地内容。',
+        remoteStatus.branchExists ? 'info' : 'warning',
+      );
+      const result = await syncContentChanges({
         taskId,
         remote,
         branch,
         basePath,
         sshKeyPath: selectedSshKeyPath,
         message,
+        conflictStrategy: pullConflictStrategy,
+        knownRemoteCommit: remoteStatus.remoteCommit,
+        verifyAfterPush: false,
       });
 
+      draftCacheRef.current.clear();
+      cleanDraftsRef.current = new WeakSet();
+      clearLinkedNotebookState();
+      await loadSiteConfig();
+      await loadLibrary(undefined, true);
+      if (isSettingsOpen && settingsSection === 'images') {
+        await loadUserGalleryManifest();
+      }
       appendHistoryEntry('Synced site', message);
       setStatus(result.stdout || '站点已同步到远程分支。');
-      recordManualProgress(100, 'publish', '同步完成', '远端站点已更新。', 'success');
-      try {
-        const nextStatus = await getPublishStatus(remote, branch, selectedSshKeyPath);
-        setPublishConnectionMessage(nextStatus.shortStatus);
-      } catch (error) {
-        setPublishConnectionMessage(
-          `站点已同步，但状态刷新失败：${
-            error instanceof Error ? error.message : typeof error === 'string' ? error : String(error)
-          }`,
-        );
-      }
+      recordManualProgress(100, 'push', '同步完成', '远端站点已更新。', 'success');
+      setPublishConnectionMessage(`远程分支 ${branch} 已同步。`);
     } catch (error) {
       const detail = error instanceof Error ? error.message : typeof error === 'string' ? error : String(error);
       setStatus(detail || '站点同步失败。');
@@ -3399,7 +3361,6 @@ export default function NotesWorkbench() {
         'error',
       );
     } finally {
-      stopPullListening?.();
       stopPublishListening?.();
       setIsPullingContent(false);
       setIsPublishingSite(false);
