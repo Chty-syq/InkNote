@@ -1850,7 +1850,7 @@ dependencies = [
 
 [[package]]
 name = "inknote-desktop"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "image",
  "reqwest",
