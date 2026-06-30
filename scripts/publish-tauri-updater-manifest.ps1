@@ -109,7 +109,9 @@ $manifest = [ordered]@{
 
 $tempRoot = if ($env:RUNNER_TEMP) { $env:RUNNER_TEMP } else { [System.IO.Path]::GetTempPath() }
 $manifestPath = Join-Path $tempRoot "latest.json"
-$manifest | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $manifestPath -Encoding UTF8
+$manifestJson = $manifest | ConvertTo-Json -Depth 10
+$utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+[System.IO.File]::WriteAllText($manifestPath, $manifestJson, $utf8NoBom)
 
 $existingManifest = $assets | Where-Object { $_.name -eq "latest.json" }
 foreach ($asset in $existingManifest) {
