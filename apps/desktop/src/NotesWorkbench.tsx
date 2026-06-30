@@ -47,7 +47,7 @@ import {
 } from '@tabler/icons-react';
 import { convertFileSrc, invoke } from '@tauri-apps/api/core';
 import { relaunch } from '@tauri-apps/plugin-process';
-import { Update } from '@tauri-apps/plugin-updater';
+import { check as checkForTauriUpdate, Update } from '@tauri-apps/plugin-updater';
 import type { DownloadEvent } from '@tauri-apps/plugin-updater';
 import desktopPackage from '../package.json';
 import desktopIconUrl from '../src-tauri/icons/icon.png';
@@ -588,16 +588,7 @@ function formatDesktopReleaseDate(value: string): string {
 }
 
 async function checkTauriDesktopUpdate(): Promise<Update | null> {
-  const metadata = await invoke<{
-    rid: number;
-    available: boolean;
-    currentVersion: string;
-    version: string;
-    date?: string;
-    body?: string;
-  } | null>('plugin:updater|check', { timeout: 30_000 });
-
-  return metadata?.available ? new Update(metadata) : null;
+  return checkForTauriUpdate({ timeout: 30_000 });
 }
 
 function resolveDesktopContentImages(markdown: string, contentRoot: string | null): string {
