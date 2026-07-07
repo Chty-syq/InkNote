@@ -44,12 +44,18 @@ export interface PullRemoteContentRequest {
   taskId: string;
   remote: string;
   branch: string;
+  contentBranch?: string;
   sshKeyPath: string;
-  conflictStrategy: 'remote' | 'local';
+  conflictStrategy: 'remote' | 'local' | 'manual';
+  conflictResolutions?: Record<string, 'remote' | 'local'>;
+  allowRiskyContentSync?: boolean;
 }
 
 export interface SyncSiteRequest extends PublishSiteRequest {
-  conflictStrategy: 'remote' | 'local';
+  contentBranch?: string;
+  conflictStrategy: 'remote' | 'local' | 'manual';
+  conflictResolutions?: Record<string, 'remote' | 'local'>;
+  allowRiskyContentSync?: boolean;
 }
 
 export type PublishProgressLevel = 'info' | 'success' | 'warning' | 'error';

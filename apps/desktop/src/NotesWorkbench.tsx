@@ -132,7 +132,32 @@ import {
 
 type WorkspacePanel = 'write' | 'inknote';
 type CategoryDialogState = { mode: 'create' } | { mode: 'edit'; slug: string };
-type PullConflictStrategy = 'remote' | 'local';
+type CategoryDeleteDialogState = { categorySlug: string; targetSlug: string };
+type PullConflictStrategy = 'manual';
+type ContentSyncConflictResolution = 'remote' | 'local';
+type ContentSyncConflictResolutions = Record<string, ContentSyncConflictResolution>;
+const DEFAULT_CONTENT_BRANCH = 'content';
+
+interface ContentSyncConflictItem {
+  path: string;
+  kind: string;
+  local: string;
+  remote: string;
+  localContent: string;
+  remoteContent: string;
+}
+
+interface ContentSyncConflictDialogState {
+  conflicts: ContentSyncConflictItem[];
+  source: 'sync' | 'pull';
+  resolutions: Partial<ContentSyncConflictResolutions>;
+}
+
+interface ContentSyncRiskReport {
+  code: string;
+  title: string;
+  detail: string;
+}
 
 interface TextTransformResult {
   nextValue: string;
@@ -1005,7 +1030,8 @@ const DEFAULT_SITE_CONFIG: SiteConfig = {
   toolLinks: [],
   repository: {
     remote: '',
-    branch: 'gh-pages',
+    contentBranch: DEFAULT_CONTENT_BRANCH,
+    branch: DEFAULT_CONTENT_BRANCH,
     pagesUrl: '',
     basePath: '/',
   },
@@ -1154,6 +1180,80 @@ function inferGitHubPagesBasePath(remote: string): string {
   return `/${repository.repo}/`;
 }
 
+function getRepositoryContentBranch(repository?: RepositoryConfig): string {
+  return repository?.contentBranch?.trim() || DEFAULT_CONTENT_BRANCH;
+}
+
+function parseContentSyncConflictError(detail: string): ContentSyncConflictItem[] | null {
+  const marker = 'CONTENT_SYNC_CONFLICTS:';
+  const markerIndex = detail.indexOf(marker);
+  if (markerIndex < 0) {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(detail.slice(markerIndex + marker.length));
+    if (!parsed || !Array.isArray(parsed.conflicts)) {
+      return null;
+    }
+    return parsed.conflicts
+      .map((item: Partial<ContentSyncConflictItem>) => ({
+        path: typeof item.path === 'string' ? item.path : '',
+        kind: typeof item.kind === 'string' ? item.kind : '内容冲突',
+        local: typeof item.local === 'string' ? item.local : '',
+        remote: typeof item.remote === 'string' ? item.remote : '',
+        localContent: typeof item.localContent === 'string' ? item.localContent : item.local ?? '',
+        remoteContent: typeof item.remoteContent === 'string' ? item.remoteContent : item.remote ?? '',
+      }))
+      .filter((item: ContentSyncConflictItem) => item.path.trim());
+  } catch {
+    return null;
+  }
+}
+
+function parseContentSyncRiskError(detail: string): ContentSyncRiskReport | null {
+  const marker = 'CONTENT_SYNC_RISK:';
+  const markerIndex = detail.indexOf(marker);
+  if (markerIndex < 0) {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(detail.slice(markerIndex + marker.length));
+    return {
+      code: typeof parsed?.code === 'string' ? parsed.code : 'content-sync-risk',
+      title: typeof parsed?.title === 'string' ? parsed.title : '同步风险确认',
+      detail: typeof parsed?.detail === 'string' ? parsed.detail : '继续操作可能覆盖或删除内容。',
+    };
+  } catch {
+    return {
+      code: 'content-sync-risk',
+      title: '同步风险确认',
+      detail: '继续操作可能覆盖或删除内容。',
+    };
+  }
+}
+
+function createContentSyncConflictResolutions(
+  conflicts: ContentSyncConflictItem[],
+): Partial<ContentSyncConflictResolutions> {
+  return conflicts.reduce<Partial<ContentSyncConflictResolutions>>((resolutions, conflict) => {
+    resolutions[conflict.path] = undefined;
+    return resolutions;
+  }, {});
+}
+
+function areContentSyncConflictsResolved(
+  conflicts: ContentSyncConflictItem[],
+  resolutions: Partial<ContentSyncConflictResolutions>,
+): resolutions is ContentSyncConflictResolutions {
+  return conflicts.every((conflict) => resolutions[conflict.path] === 'remote' || resolutions[conflict.path] === 'local');
+}
+
+function formatUnknownError(error: unknown): string {
+  return error instanceof Error ? error.message : typeof error === 'string' ? error : String(error);
+}
+
 function createHistoryEntry(label: string, detail = ''): NoteHistoryEntry {
   return {
     id: Date.now() + Math.floor(Math.random() * 1000),
@@ -1235,15 +1335,19 @@ function normalizeSiteConfig(value: unknown): SiteConfig {
     input.repository && typeof input.repository === 'object'
       ? (input.repository as Partial<RepositoryConfig>)
       : {};
+  const repositoryContentBranch =
+    typeof repositoryInput.contentBranch === 'string'
+      ? repositoryInput.contentBranch
+      : typeof repositoryInput.branch === 'string'
+        ? repositoryInput.branch
+        : fallback.repository?.contentBranch ?? DEFAULT_CONTENT_BRANCH;
   const repository: RepositoryConfig = {
     remote:
       typeof repositoryInput.remote === 'string'
         ? repositoryInput.remote
         : fallback.repository?.remote ?? '',
-    branch:
-      typeof repositoryInput.branch === 'string'
-        ? repositoryInput.branch
-        : fallback.repository?.branch ?? 'gh-pages',
+    contentBranch: repositoryContentBranch,
+    branch: repositoryContentBranch,
     pagesUrl:
       typeof repositoryInput.pagesUrl === 'string'
         ? repositoryInput.pagesUrl
@@ -1653,7 +1757,8 @@ export default function NotesWorkbench() {
   const [pullProgress, setPullProgress] = useState(0);
   const [pullRunState, setPullRunState] = useState<PublishRunState>('idle');
   const [pullLogs, setPullLogs] = useState<PublishLogEntry[]>([]);
-  const [pullConflictStrategy, setPullConflictStrategy] = useState<PullConflictStrategy>('remote');
+  const [contentSyncConflictDialog, setContentSyncConflictDialog] =
+    useState<ContentSyncConflictDialogState | null>(null);
   const [desktopVersion, setDesktopVersion] = useState(DESKTOP_FALLBACK_VERSION);
   const [desktopUpdateState, setDesktopUpdateState] = useState<DesktopUpdateState>('idle');
   const [desktopUpdateMessage, setDesktopUpdateMessage] = useState('\u5c1a\u672a\u68c0\u67e5\u66f4\u65b0');
@@ -1686,6 +1791,7 @@ export default function NotesWorkbench() {
   const [settingsSection, setSettingsSection] = useState<SettingsSection>('basic');
   const [siteIntegrationPanel, setSiteIntegrationPanel] = useState<SiteIntegrationPanel | null>(null);
   const [categoryDialog, setCategoryDialog] = useState<CategoryDialogState | null>(null);
+  const [categoryDeleteDialog, setCategoryDeleteDialog] = useState<CategoryDeleteDialogState | null>(null);
   const [categoryLabelValue, setCategoryLabelValue] = useState('');
   const [categoryLabelEnValue, setCategoryLabelEnValue] = useState('');
   const [categorySlugValue, setCategorySlugValue] = useState('');
@@ -1770,14 +1876,21 @@ export default function NotesWorkbench() {
 
   const formatPublishLatency = (latencyMs: number): string => `${Math.max(0, Math.round(latencyMs))} ms`;
 
+  const formatPublishErrorDetail = (detail: string): string => {
+    const firstLine = detail
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .find(Boolean);
+    return firstLine || '没有收到可识别的错误信息。';
+  };
+
   const formatPublishStatusDetail = (statusResponse: PublishStatusResponse): string => {
     const version = statusResponse.branchExists
-      ? `远端版本：${statusResponse.remoteCommit ? statusResponse.remoteCommit.slice(0, 7) : '未知'}`
+      ? `远端：${statusResponse.branch}@${statusResponse.remoteCommit ? statusResponse.remoteCommit.slice(0, 7) : '未知'}`
       : '远端分支：尚未创建';
     return [
-      `远程仓库：${statusResponse.remote}`,
-      `发布分支：${statusResponse.branch}`,
-      `网络延迟：${formatPublishLatency(statusResponse.latencyMs)}`,
+      '连接：正常',
+      `耗时：${formatPublishLatency(statusResponse.latencyMs)}`,
       statusResponse.proxySummary,
       version,
     ].join('\n');
@@ -1785,14 +1898,17 @@ export default function NotesWorkbench() {
 
   const upsertPublishFlowEntry = (event: PublishProgressEvent) => {
     const normalizedProgress = clampNumber(event.progress, 0, 100);
-    setPublishProgress(normalizedProgress);
-    setPublishRunState(
-      event.level === 'error'
-        ? 'error'
-        : normalizedProgress >= 100
-          ? 'success'
-          : 'running',
-    );
+    setPublishProgress((current) => {
+      const nextProgress = Math.max(current, normalizedProgress);
+      setPublishRunState(
+        event.level === 'error'
+          ? 'error'
+          : nextProgress >= 100
+            ? 'success'
+            : 'running',
+      );
+      return nextProgress;
+    });
     setPublishLogs((current) => {
       const receivedAt = new Date().toLocaleTimeString('zh-CN', { hour12: false });
       const nextEntry: PublishLogEntry = {
@@ -2736,11 +2852,11 @@ export default function NotesWorkbench() {
 
     const repository = siteConfigDraft.repository;
     const remote = repository?.remote.trim() ?? '';
-    const branch = repository?.branch.trim() ?? '';
+    const branch = getRepositoryContentBranch(repository);
     const selectedSshKeyPath = sshKeyPath.trim();
     if (!remote || !branch) {
-      setPublishConnectionMessage('请先填写远程仓库和发布分支。');
-      setStatus('请先填写远程仓库和发布分支。');
+      setPublishConnectionMessage('请先填写远程仓库和内容分支。');
+      setStatus('请先填写远程仓库和内容分支。');
       setPublishLogs([]);
       setPublishProgress(0);
       setPublishRunState('error');
@@ -2755,7 +2871,7 @@ export default function NotesWorkbench() {
       progress: 15,
       stage: 'connection',
       message: '正在测试远程连接',
-      detail: `远程仓库：${remote}\n发布分支：${branch}`,
+      detail: `目标分支：${branch}`,
       level: 'info',
     });
 
@@ -2781,7 +2897,7 @@ export default function NotesWorkbench() {
         progress: 100,
         stage: 'connection',
         message: '连接测试失败',
-        detail: `${remote}\n${detail || '没有收到可识别的错误信息。'}`,
+        detail: formatPublishErrorDetail(detail),
         level: 'error',
       });
     } finally {
@@ -2790,6 +2906,10 @@ export default function NotesWorkbench() {
   };
 
   const publishSiteChanges = async () => {
+    setIsPublishDialogOpen(false);
+    await syncSiteChanges();
+    return;
+
     setIsPublishDialogOpen(true);
     if (!isTauri()) {
       setStatus('Publishing requires the Tauri desktop app.');
@@ -2852,7 +2972,7 @@ export default function NotesWorkbench() {
           progress: 5,
           stage: 'save',
           message: '正在保存当前文章',
-          detail: draft.title,
+          detail: draft?.title ?? '',
           level: 'info',
         });
         const savedItem = await saveDraft();
@@ -2872,7 +2992,7 @@ export default function NotesWorkbench() {
           progress: 8,
           stage: 'save',
           message: '当前文章已保存',
-          detail: savedItem.relativePath,
+          detail: savedItem?.relativePath ?? '',
           level: 'success',
         });
       } else {
@@ -2916,13 +3036,13 @@ export default function NotesWorkbench() {
         progress: 12,
         stage: 'config',
         message: '已确认本次发布使用的内容库',
-        detail: `内容库：${libraryRoot}\n配置：${siteConfigDisplayPath}\n标题：${savedConfig.title}`,
+        detail: `内容库：${libraryRoot}\n配置：${siteConfigDisplayPath}\n标题：${savedConfig?.title ?? ''}`,
         level: 'success',
       });
 
-      const repository = savedConfig.repository;
+      const repository = savedConfig?.repository;
       const remote = repository?.remote.trim() ?? '';
-      const branch = repository?.branch.trim() ?? '';
+      const branch = getRepositoryContentBranch(repository);
       const basePath = inferGitHubPagesBasePath(remote);
       const selectedSshKeyPath = sshKeyPath.trim();
       if (!remote || !branch) {
@@ -2931,10 +3051,10 @@ export default function NotesWorkbench() {
           progress: 10,
           stage: 'config',
           message: '发布配置不完整',
-          detail: '请填写远程仓库地址和发布分支。',
+          detail: '请填写远程仓库地址。',
           level: 'error',
         });
-        setStatus('\u8bf7先填写远程仓库和发布分支。');
+        setStatus('请先填写远程仓库。');
         return;
       }
 
@@ -2966,12 +3086,12 @@ export default function NotesWorkbench() {
           progress: 100,
           stage: 'status',
           message: '站点已发布，但状态刷新失败',
-          detail: error instanceof Error ? error.message : typeof error === 'string' ? error : String(error),
+          detail: formatUnknownError(error),
           level: 'warning',
         });
       }
     } catch (error) {
-      const detail = error instanceof Error ? error.message : typeof error === 'string' ? error : String(error);
+      const detail = formatUnknownError(error);
       setStatus(detail || 'Failed to publish site changes.');
       recordProgress({
         taskId,
@@ -2998,9 +3118,13 @@ export default function NotesWorkbench() {
     setIsPullDialogOpen(true);
   };
 
-  const pullRemoteContentToLocal = async () => {
+  const pullRemoteContentToLocal = async (
+    strategyOverride?: PullConflictStrategy,
+    conflictResolutions?: ContentSyncConflictResolutions,
+    allowRiskyContentSync = false,
+  ) => {
     setIsPullDialogOpen(true);
-    if (isPullingContent) {
+    if (isPullingContent && !allowRiskyContentSync) {
       return;
     }
     if (!isTauri()) {
@@ -3010,21 +3134,24 @@ export default function NotesWorkbench() {
 
     const configuredRepository = siteConfigDraft.repository;
     const configuredRemote = configuredRepository?.remote.trim() ?? '';
-    const configuredBranch = configuredRepository?.branch.trim() ?? '';
+    const configuredBranch = getRepositoryContentBranch(configuredRepository);
     if (!configuredRemote || !configuredBranch) {
-      setStatus('请先填写远程仓库和发布分支。');
+      setStatus('请先填写远程仓库和内容分支。');
       setPullLogs([]);
       setPullRunState('error');
       return;
     }
 
-    const conflictLabel = pullConflictStrategy === 'remote' ? '远端优先' : '本地优先';
-    const confirmed = window.confirm(
-      `将从远端发布分支合并内容到本地；本地独有内容会保留，冲突时使用“${conflictLabel}”。是否继续？`,
-    );
-    if (!confirmed) {
-      setStatus('已取消远端内容同步。');
-      return;
+    const activeConflictStrategy: PullConflictStrategy = 'manual';
+    const conflictLabel = '逐项选择';
+    if (!strategyOverride) {
+      const confirmed = window.confirm(
+        `将从远端内容分支合并内容到本地；删除会按三方记录同步，冲突时使用“${conflictLabel}”。是否继续？`,
+      );
+      if (!confirmed) {
+        setStatus('已取消远端内容同步。');
+        return;
+      }
     }
 
     const taskId = globalThis.crypto?.randomUUID?.() ?? `pull-${Date.now()}`;
@@ -3068,7 +3195,7 @@ export default function NotesWorkbench() {
         progress: 2,
         stage: 'prepare',
         message: '正在准备远端同步',
-        detail: `本次操作会合并远端发布内容；冲突时使用“${conflictLabel}”。`,
+        detail: `本次操作会合并远端内容分支；真实冲突会暂停并逐项选择保留哪一侧。`,
         level: 'info',
       });
 
@@ -3095,7 +3222,7 @@ export default function NotesWorkbench() {
 
       const repository = savedConfig.repository;
       const remote = repository?.remote.trim() ?? '';
-      const branch = repository?.branch.trim() ?? '';
+      const branch = getRepositoryContentBranch(repository);
       const selectedSshKeyPath = sshKeyPath.trim();
       if (!remote || !branch) {
         recordProgress({
@@ -3103,7 +3230,7 @@ export default function NotesWorkbench() {
           progress: 5,
           stage: 'config',
           message: '远端同步配置不完整',
-          detail: '请填写远程仓库地址和发布分支。',
+          detail: '请填写远程仓库地址和内容分支。',
           level: 'error',
         });
         return;
@@ -3113,8 +3240,11 @@ export default function NotesWorkbench() {
         taskId,
         remote,
         branch,
+        contentBranch: branch,
         sshKeyPath: selectedSshKeyPath,
-        conflictStrategy: pullConflictStrategy,
+        conflictStrategy: activeConflictStrategy,
+        conflictResolutions,
+        allowRiskyContentSync,
       });
 
       draftCacheRef.current.clear();
@@ -3136,6 +3266,44 @@ export default function NotesWorkbench() {
       }
     } catch (error) {
       const detail = error instanceof Error ? error.message : typeof error === 'string' ? error : String(error);
+      const conflicts = parseContentSyncConflictError(detail);
+      if (conflicts) {
+        setContentSyncConflictDialog({
+          conflicts,
+          source: 'pull',
+          resolutions: createContentSyncConflictResolutions(conflicts),
+        });
+        setStatus(`发现 ${conflicts.length} 个内容冲突，请逐项选择保留本地或远端版本。`);
+        recordProgress({
+          taskId,
+          progress: currentProgress,
+          stage: 'conflict',
+          message: '发现内容冲突',
+          detail: `共 ${conflicts.length} 个冲突，等待逐项选择。`,
+          level: 'warning',
+        });
+        return;
+      }
+      const risk = parseContentSyncRiskError(detail);
+      if (risk) {
+        recordProgress({
+          taskId,
+          progress: currentProgress,
+          stage: 'risk',
+          message: risk.title,
+          detail: risk.detail,
+          level: 'warning',
+        });
+        const confirmed = window.confirm(`${risk.title}\n\n${risk.detail}\n\n确认继续吗？`);
+        if (confirmed) {
+          window.setTimeout(() => {
+            void pullRemoteContentToLocal(strategyOverride, conflictResolutions, true);
+          }, 0);
+        } else {
+          setStatus('已取消远端内容同步。');
+        }
+        return;
+      }
       setStatus(detail || '远端内容同步失败。');
       recordProgress({
         taskId,
@@ -3151,8 +3319,12 @@ export default function NotesWorkbench() {
     }
   };
 
-  const syncSiteChanges = async () => {
-    if (isPublishingSite || isPullingContent) {
+  const syncSiteChanges = async (
+    strategyOverride?: PullConflictStrategy,
+    conflictResolutions?: ContentSyncConflictResolutions,
+    allowRiskyContentSync = false,
+  ) => {
+    if ((isPublishingSite || isPullingContent) && !allowRiskyContentSync) {
       return;
     }
 
@@ -3165,17 +3337,18 @@ export default function NotesWorkbench() {
 
     const configuredRepository = siteConfigDraft.repository;
     const configuredRemote = configuredRepository?.remote.trim() ?? '';
-    const configuredBranch = configuredRepository?.branch.trim() ?? '';
-    if (!configuredRemote || !configuredBranch) {
-      setStatus('请先配置远程仓库和发布分支。');
+    const configuredContentBranch = getRepositoryContentBranch(configuredRepository);
+    if (!configuredRemote || !configuredContentBranch) {
+      setStatus('请先配置远程仓库和内容分支。');
       setPublishLogs([]);
       setPublishProgress(0);
       setPublishRunState('error');
       return;
     }
 
+    const activeConflictStrategy: PullConflictStrategy = 'manual';
     const taskId = globalThis.crypto?.randomUUID?.() ?? `sync-${Date.now()}`;
-    const conflictLabel = pullConflictStrategy === 'remote' ? '远端优先' : '本地优先';
+    const conflictLabel = '逐项选择';
     const selectedSshKeyPath = sshKeyPath.trim();
     let currentProgress = 2;
 
@@ -3258,11 +3431,11 @@ export default function NotesWorkbench() {
         2,
         'connection',
         '测试远程连接',
-        `远程仓库：${configuredRemote}\n发布分支：${configuredBranch}`,
+        `内容分支：${configuredContentBranch}`,
       );
       let remoteStatus: PublishStatusResponse;
       try {
-        remoteStatus = await getPublishStatus(configuredRemote, configuredBranch, selectedSshKeyPath);
+        remoteStatus = await getPublishStatus(configuredRemote, configuredContentBranch, selectedSshKeyPath);
         setPublishConnectionMessage(remoteStatus.shortStatus);
         recordManualProgress(
           8,
@@ -3280,7 +3453,7 @@ export default function NotesWorkbench() {
           8,
           'connection',
           '连接测试失败',
-          `${configuredRemote}\n${detail || '没有收到可识别的错误信息。'}`,
+          formatPublishErrorDetail(detail),
           'error',
         );
         return;
@@ -3290,7 +3463,7 @@ export default function NotesWorkbench() {
         10,
         'save',
         '准备本地内容',
-        `冲突策略：${conflictLabel}`,
+        `冲突处理：${conflictLabel}`,
       );
 
       if (draft && dirty) {
@@ -3310,31 +3483,34 @@ export default function NotesWorkbench() {
 
       const repository = savedConfig.repository;
       const remote = repository?.remote.trim() ?? '';
-      const branch = repository?.branch.trim() ?? '';
+      const contentBranch = getRepositoryContentBranch(repository);
       const basePath = inferGitHubPagesBasePath(remote);
-      if (!remote || !branch) {
-        recordManualProgress(16, 'save', '同步配置不完整', '请配置远程仓库地址和发布分支。', 'error');
+      if (!remote || !contentBranch) {
+        recordManualProgress(16, 'save', '同步配置不完整', '请配置远程仓库地址和内容分支。', 'error');
         return;
       }
 
       recordManualProgress(
         18,
         'fetch',
-        remoteStatus.branchExists ? '准备拉取远端仓库' : '准备首次发布',
+        remoteStatus.branchExists ? '准备拉取内容分支' : '准备创建内容分支',
         remoteStatus.branchExists
-          ? '将拉取远端发布分支，并与本地内容取并集。'
-          : '远端分支不存在，将直接创建并发布本地内容。',
+          ? '将使用内容分支与本地内容做三方合并，删除也会作为变更同步。'
+          : '内容分支不存在，将以本地内容创建初始内容源。',
         remoteStatus.branchExists ? 'info' : 'warning',
       );
       const result = await syncContentChanges({
         taskId,
         remote,
-        branch,
+        branch: contentBranch,
+        contentBranch,
         basePath,
         sshKeyPath: selectedSshKeyPath,
         message,
-        conflictStrategy: pullConflictStrategy,
+        conflictStrategy: activeConflictStrategy,
+        conflictResolutions,
         knownRemoteCommit: remoteStatus.remoteCommit,
+        allowRiskyContentSync,
         verifyAfterPush: false,
       });
 
@@ -3347,11 +3523,73 @@ export default function NotesWorkbench() {
         await loadUserGalleryManifest();
       }
       appendHistoryEntry('Synced site', message);
-      setStatus(result.stdout || '站点已同步到远程分支。');
-      recordManualProgress(100, 'push', '同步完成', '远端站点已更新。', 'success');
-      setPublishConnectionMessage(`远程分支 ${branch} 已同步。`);
+      recordManualProgress(
+        84,
+        'push',
+        '内容已推送',
+        result.stdout || `内容分支 ${contentBranch} 已更新。`,
+        'success',
+      );
+
+      try {
+        const nextStatus = await getPublishStatus(remote, contentBranch, selectedSshKeyPath);
+        setPublishConnectionMessage(nextStatus.shortStatus);
+      } catch (error) {
+        recordManualProgress(
+          88,
+          'status',
+          '远端状态刷新失败',
+          formatPublishErrorDetail(formatUnknownError(error)),
+          'warning',
+        );
+      }
+
+      recordManualProgress(
+        100,
+        'done',
+        '同步完成',
+        '内容分支已推送。远端构建与 Pages 发布将由仓库工作流继续处理。',
+        'success',
+      );
+      setStatus('内容已同步并推送，远端构建会自动继续。');
     } catch (error) {
       const detail = error instanceof Error ? error.message : typeof error === 'string' ? error : String(error);
+      const conflicts = parseContentSyncConflictError(detail);
+      if (conflicts) {
+        setContentSyncConflictDialog({
+          conflicts,
+          source: 'sync',
+          resolutions: createContentSyncConflictResolutions(conflicts),
+        });
+        setStatus(`发现 ${conflicts.length} 个内容冲突，请逐项选择保留本地或远端版本。`);
+        recordManualProgress(
+          currentProgress,
+          'conflict',
+          '发现内容冲突',
+          `共 ${conflicts.length} 个冲突，等待逐项选择。`,
+          'warning',
+        );
+        return;
+      }
+      const risk = parseContentSyncRiskError(detail);
+      if (risk) {
+        recordManualProgress(
+          currentProgress,
+          'risk',
+          risk.title,
+          risk.detail,
+          'warning',
+        );
+        const confirmed = window.confirm(`${risk.title}\n\n${risk.detail}\n\n确认继续吗？`);
+        if (confirmed) {
+          window.setTimeout(() => {
+            void syncSiteChanges(strategyOverride, conflictResolutions, true);
+          }, 0);
+        } else {
+          setStatus('已取消站点同步。');
+        }
+        return;
+      }
       setStatus(detail || '站点同步失败。');
       recordManualProgress(
         currentProgress,
@@ -3365,6 +3603,39 @@ export default function NotesWorkbench() {
       setIsPullingContent(false);
       setIsPublishingSite(false);
     }
+  };
+
+  const continueContentSyncWithResolutions = () => {
+    if (!contentSyncConflictDialog) {
+      return;
+    }
+
+    const { conflicts, resolutions, source } = contentSyncConflictDialog;
+    if (!areContentSyncConflictsResolved(conflicts, resolutions)) {
+      setStatus('请先为每个冲突文件选择使用远端或本地版本。');
+      return;
+    }
+
+    setContentSyncConflictDialog(null);
+    if (source === 'pull') {
+      void pullRemoteContentToLocal('manual', resolutions);
+    } else {
+      void syncSiteChanges('manual', resolutions);
+    }
+  };
+
+  const setContentSyncConflictResolution = (path: string, resolution: ContentSyncConflictResolution) => {
+    setContentSyncConflictDialog((current) =>
+      current
+        ? {
+            ...current,
+            resolutions: {
+              ...current.resolutions,
+              [path]: resolution,
+            },
+          }
+        : current,
+    );
   };
 
   const handleBrandAvatarChange = (event: ChangeEvent<HTMLInputElement>) => {
@@ -3744,6 +4015,7 @@ export default function NotesWorkbench() {
       repository: {
         ...(current.repository ?? cloneDefaultSiteConfig().repository!),
         ...patch,
+        branch: patch.contentBranch ?? current.repository?.contentBranch ?? DEFAULT_CONTENT_BRANCH,
       },
     }));
   };
@@ -4667,10 +4939,10 @@ export default function NotesWorkbench() {
     await persistReorderedNotes(sourcePath, originalItems, nextOrder);
   };
 
-  const deleteSelectedCategory = async (categoryOverride?: ContentCategory | null) => {
+  const openDeleteCategoryDialog = (categoryOverride?: ContentCategory | null) => {
     const categoryToDelete = categoryOverride ?? selectedCategory;
     if (!categoryToDelete) {
-      setStatus('Select a category to delete it.');
+      setStatus('请选择要删除的类目。');
       return;
     }
 
@@ -4681,44 +4953,52 @@ export default function NotesWorkbench() {
     const affectedItems = items.filter((item) => getItemCategorySlug(item) === categoryToDelete.slug);
     const otherCategories = categories.filter((category) => category.slug !== categoryToDelete.slug);
 
-    let targetCategory: ContentCategory | null = null;
-    if (affectedItems.length > 0) {
-      if (otherCategories.length === 0) {
-        setStatus('Move the notes out of this category before deleting it.');
-        return;
-      }
+    if (affectedItems.length > 0 && otherCategories.length === 0) {
+      setStatus('该类目下还有文章，请先新建另一个类目用于承接这些文章。');
+      return;
+    }
 
-      const targetInput = window
-        .prompt(
-          `Move ${affectedItems.length} note(s) to which category before deleting "${categoryToDelete.label}"?\n\n${otherCategories
-            .map((category) => `${category.label} (${category.slug})`)
-            .join('\n')}`,
-          otherCategories[0]?.label ?? '',
-        )
-        ?.trim();
+    setCategoryDeleteDialog({
+      categorySlug: categoryToDelete.slug,
+      targetSlug: affectedItems.length > 0 ? otherCategories[0]?.slug ?? '' : '',
+    });
+  };
 
-      if (!targetInput) {
-        setStatus('Category deletion cancelled.');
-        return;
-      }
+  const closeCategoryDeleteDialog = () => {
+    if (!isBusy) {
+      setCategoryDeleteDialog(null);
+    }
+  };
 
-      const normalizedTarget = slugifyCategoryLabel(targetInput);
-      targetCategory =
-        otherCategories.find((category) => category.slug === normalizedTarget) ??
-        otherCategories.find((category) => category.label === targetInput) ??
-        null;
+  const confirmDeleteCategory = async () => {
+    if (!categoryDeleteDialog) {
+      return;
+    }
 
-      if (!targetCategory) {
-        setStatus('Choose a valid target category before deleting this one.');
-        return;
-      }
+    const categoryToDelete = categories.find((category) => category.slug === categoryDeleteDialog.categorySlug) ?? null;
+    if (!categoryToDelete) {
+      setCategoryDeleteDialog(null);
+      setStatus('要删除的类目已不存在。');
+      return;
+    }
+
+    const affectedItems = items.filter((item) => getItemCategorySlug(item) === categoryToDelete.slug);
+    const otherCategories = categories.filter((category) => category.slug !== categoryToDelete.slug);
+    const targetCategory =
+      affectedItems.length > 0
+        ? otherCategories.find((category) => category.slug === categoryDeleteDialog.targetSlug) ?? null
+        : null;
+
+    if (affectedItems.length > 0 && !targetCategory) {
+      setStatus('请选择这些文章要迁移到的新类目。');
+      return;
     }
 
     setIsBusy(true);
     try {
       const rewrittenItems =
         targetCategory && affectedItems.length > 0
-          ? await Promise.all(affectedItems.map((item) => rewriteItemCategory(item, targetCategory!.slug)))
+          ? await Promise.all(affectedItems.map((item) => rewriteItemCategory(item, targetCategory.slug)))
           : [];
       const nextCategories = categories.filter((category) => category.slug !== categoryToDelete.slug);
 
@@ -4726,17 +5006,18 @@ export default function NotesWorkbench() {
       await persistCategoryConfig(nextCategories);
       setSelectedCategorySlug(targetCategory?.slug ?? nextCategories[0]?.slug ?? null);
       setDraft((current) =>
-        current && !current.sourceRelativePath && current.category === categoryToDelete.slug
+        current && current.category === categoryToDelete.slug
           ? patchDraft(current, { category: targetCategory?.slug ?? '' })
           : current,
       );
+      setCategoryDeleteDialog(null);
       setStatus(
         targetCategory
-          ? `Moved ${affectedItems.length} note(s) to "${targetCategory.label}" and deleted "${categoryToDelete.label}".`
-          : `Deleted "${categoryToDelete.label}".`,
+          ? `已将 ${affectedItems.length} 篇文章迁移到「${targetCategory.label}」，并删除类目「${categoryToDelete.label}」。`
+          : `已删除类目「${categoryToDelete.label}」。`,
       );
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : 'Failed to delete the category.');
+      setStatus(error instanceof Error ? error.message : '删除类目失败。');
     } finally {
       setIsBusy(false);
     }
@@ -6298,6 +6579,16 @@ export default function NotesWorkbench() {
 
   const selectedCategory =
     (selectedCategorySlug ? categories.find((category) => category.slug === selectedCategorySlug) : null) ?? null;
+  const categoryToDelete =
+    categoryDeleteDialog
+      ? categories.find((category) => category.slug === categoryDeleteDialog.categorySlug) ?? null
+      : null;
+  const categoryDeleteAffectedItems = categoryToDelete
+    ? items.filter((item) => getItemCategorySlug(item) === categoryToDelete.slug)
+    : [];
+  const categoryDeleteTargetOptions = categoryToDelete
+    ? categories.filter((category) => category.slug !== categoryToDelete.slug)
+    : [];
   const metadataCategoryOptions =
     draft?.category && !categories.some((category) => category.slug === draft.category)
       ? [...categories, { slug: draft.category, label: draft.category }]
@@ -7305,6 +7596,108 @@ export default function NotesWorkbench() {
         </div>
       ) : null}
 
+      {contentSyncConflictDialog ? (
+        <div className="notes-dialog-overlay notes-content-conflict-overlay" onClick={() => setContentSyncConflictDialog(null)}>
+          <section
+            className="notes-unsaved-dialog notes-content-conflict-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="notes-content-conflict-title"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="notes-unsaved-dialog-header">
+              <h2 id="notes-content-conflict-title">发现内容冲突</h2>
+              <p>
+                同一文件在本地和远端都发生了不可自动合并的变化。当前没有写入或推送任何内容，请逐项选择保留哪一侧。
+              </p>
+            </div>
+
+            <div className="notes-content-conflict-toolbar">
+              <span>
+                {contentSyncConflictDialog.conflicts.filter(
+                  (conflict) =>
+                    contentSyncConflictDialog.resolutions[conflict.path] === 'remote' ||
+                    contentSyncConflictDialog.resolutions[conflict.path] === 'local',
+                ).length}
+                {' / '}
+                {contentSyncConflictDialog.conflicts.length}
+                {' 已选择'}
+              </span>
+              <small>逐项对比本地和远端内容，选择需要保留的一侧。</small>
+            </div>
+
+            <div className="notes-content-conflict-list">
+              {contentSyncConflictDialog.conflicts.map((conflict) => {
+                const resolution = contentSyncConflictDialog.resolutions[conflict.path];
+                return (
+                <article className="notes-content-conflict-item" key={`${conflict.path}-${conflict.kind}`}>
+                  <header className="notes-content-conflict-item-head">
+                    <div>
+                      <strong>{conflict.path}</strong>
+                      <span>{conflict.kind}</span>
+                    </div>
+                    {resolution ? <em>{resolution === 'local' ? '已选择本地' : '已选择远端'}</em> : <em>未选择</em>}
+                  </header>
+                  <div className="notes-content-conflict-preview-grid">
+                    <section className={`notes-content-conflict-preview ${resolution === 'local' ? 'active' : ''}`}>
+                      <header>
+                        <strong>本地</strong>
+                        <button
+                          type="button"
+                          onClick={() => setContentSyncConflictResolution(conflict.path, 'local')}
+                        >
+                          保留本地
+                        </button>
+                      </header>
+                      <pre>{conflict.localContent || conflict.local || '本地内容为空。'}</pre>
+                    </section>
+                    <section className={`notes-content-conflict-preview ${resolution === 'remote' ? 'active' : ''}`}>
+                      <header>
+                        <strong>远端</strong>
+                        <button
+                          type="button"
+                          onClick={() => setContentSyncConflictResolution(conflict.path, 'remote')}
+                        >
+                          保留远端
+                        </button>
+                      </header>
+                      <pre>{conflict.remoteContent || conflict.remote || '远端内容为空。'}</pre>
+                    </section>
+                  </div>
+                </article>
+                );
+              })}
+            </div>
+
+            <div className="notes-unsaved-dialog-actions">
+              <button
+                type="button"
+                className="notes-unsaved-dialog-cancel"
+                onClick={() => setContentSyncConflictDialog(null)}
+                disabled={isPullingContent || isPublishingSite}
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                className="notes-unsaved-dialog-primary"
+                onClick={() => continueContentSyncWithResolutions()}
+                disabled={
+                  isPullingContent ||
+                  isPublishingSite ||
+                  !areContentSyncConflictsResolved(
+                    contentSyncConflictDialog.conflicts,
+                    contentSyncConflictDialog.resolutions,
+                  )
+                }
+              >
+                按选择继续
+              </button>
+            </div>
+          </section>
+        </div>
+      ) : null}
+
       {isSettingsOpen ? (
         <div className="notes-dialog-overlay" onClick={() => setIsSettingsOpen(false)}>
           <section
@@ -7441,7 +7834,7 @@ export default function NotesWorkbench() {
                               <button
                                 type="button"
                                 className="notes-settings-icon-button danger"
-                                onClick={() => void deleteSelectedCategory(category)}
+                                onClick={() => openDeleteCategoryDialog(category)}
                                 disabled={isBusy}
                                 title={'\u5220\u9664\u7c7b\u76ee'}
                                 aria-label={`\u5220\u9664 ${category.label}`}
@@ -8148,8 +8541,8 @@ export default function NotesWorkbench() {
                           <strong>同步站点</strong>
                           <span>
                             {siteConfigDraft.repository?.remote.trim() || '尚未配置远程仓库'}
-                            {siteConfigDraft.repository?.branch.trim()
-                              ? ` · ${siteConfigDraft.repository.branch.trim()}`
+                            {siteConfigDraft.repository?.remote.trim()
+                              ? ` · 内容 ${getRepositoryContentBranch(siteConfigDraft.repository)} · 工作流发布`
                               : ''}
                           </span>
                         </div>
@@ -8165,33 +8558,6 @@ export default function NotesWorkbench() {
                       </header>
 
                       <div className="notes-settings-sync-body">
-                        <div className="notes-pull-conflict-strategy notes-settings-sync-conflict" aria-label="冲突处理方式">
-                          <span>冲突处理</span>
-                          <div>
-                            <button
-                              type="button"
-                              className={pullConflictStrategy === 'remote' ? 'active' : ''}
-                              onClick={() => setPullConflictStrategy('remote')}
-                              disabled={isPullingContent || isPublishingSite}
-                            >
-                              远端优先
-                            </button>
-                            <button
-                              type="button"
-                              className={pullConflictStrategy === 'local' ? 'active' : ''}
-                              onClick={() => setPullConflictStrategy('local')}
-                              disabled={isPullingContent || isPublishingSite}
-                            >
-                              本地优先
-                            </button>
-                          </div>
-                          <small>
-                            {pullConflictStrategy === 'remote'
-                              ? '远端独有与本地独有都会保留，同一路径冲突时使用远端版本。'
-                              : '远端独有与本地独有都会保留，同一路径冲突时保留本地版本。'}
-                          </small>
-                        </div>
-
                         {publishLogs.length > 0 ? (
                           <section
                             className={`notes-sync-flow ${publishRunState}`}
@@ -8224,9 +8590,14 @@ export default function NotesWorkbench() {
                             </div>
                           </section>
                         ) : (
-                          <div className="notes-publish-dialog-pending notes-settings-sync-pending">
-                            <IconRefresh aria-hidden="true" />
-                            <span>点击同步后，会先合并远端与本地内容，再发布最终结果。</span>
+                          <div className="notes-settings-sync-pending">
+                            <span className="notes-settings-sync-pending-icon">
+                              <IconRefresh aria-hidden="true" />
+                            </span>
+                            <div>
+                              <strong>准备同步</strong>
+                              <span>同步会推送内容分支，远端工作流会自动构建并发布站点。</span>
+                            </div>
                           </div>
                         )}
                       </div>
@@ -8241,7 +8612,7 @@ export default function NotesWorkbench() {
                             isPullingContent ||
                             isPublishingSite ||
                             !siteConfigDraft.repository?.remote.trim() ||
-                            !siteConfigDraft.repository?.branch.trim()
+                            !getRepositoryContentBranch(siteConfigDraft.repository)
                           }
                         >
                           {isTestingRemote ? (
@@ -8260,7 +8631,7 @@ export default function NotesWorkbench() {
                             isPullingContent ||
                             isBusy ||
                             !siteConfigDraft.repository?.remote.trim() ||
-                            !siteConfigDraft.repository?.branch.trim()
+                            !getRepositoryContentBranch(siteConfigDraft.repository)
                           }
                         >
                           {isPublishingSite || isPullingContent ? (
@@ -8467,11 +8838,11 @@ export default function NotesWorkbench() {
                   />
                 </label>
                 <label className="notes-settings-field wide">
-                  <span>发布分支</span>
+                  <span>内容分支</span>
                   <input
-                    value={siteConfigDraft.repository?.branch ?? 'gh-pages'}
-                    onChange={(event) => updateRepositoryConfigDraft({ branch: event.target.value })}
-                    placeholder="gh-pages"
+                    value={getRepositoryContentBranch(siteConfigDraft.repository)}
+                    onChange={(event) => updateRepositoryConfigDraft({ contentBranch: event.target.value })}
+                    placeholder={DEFAULT_CONTENT_BRANCH}
                   />
                 </label>
                 <div className="notes-site-integration-dialog-actions compact">
@@ -8569,8 +8940,8 @@ export default function NotesWorkbench() {
                 <h2 id="notes-publish-dialog-title">发布站点</h2>
                 <span>
                   {siteConfigDraft.repository?.remote.trim() || '尚未配置远程仓库'}
-                  {siteConfigDraft.repository?.branch.trim()
-                    ? ` · ${siteConfigDraft.repository.branch.trim()}`
+                  {siteConfigDraft.repository?.remote.trim()
+                    ? ` · ${getRepositoryContentBranch(siteConfigDraft.repository)}`
                     : ''}
                 </span>
               </div>
@@ -8671,8 +9042,8 @@ export default function NotesWorkbench() {
                 <h2 id="notes-pull-dialog-title">同步远端内容</h2>
                 <span>
                   {siteConfigDraft.repository?.remote.trim() || '尚未配置远程仓库'}
-                  {siteConfigDraft.repository?.branch.trim()
-                    ? ` · ${siteConfigDraft.repository.branch.trim()}`
+                  {siteConfigDraft.repository?.remote.trim()
+                    ? ` · ${getRepositoryContentBranch(siteConfigDraft.repository)}`
                     : ''}
                 </span>
               </div>
@@ -8686,32 +9057,6 @@ export default function NotesWorkbench() {
             </header>
 
             <div className="notes-publish-dialog-body">
-              <div className="notes-pull-conflict-strategy" aria-label="冲突处理方式">
-                <span>冲突处理</span>
-                <div>
-                  <button
-                    type="button"
-                    className={pullConflictStrategy === 'remote' ? 'active' : ''}
-                    onClick={() => setPullConflictStrategy('remote')}
-                    disabled={isPullingContent}
-                  >
-                    远端优先
-                  </button>
-                  <button
-                    type="button"
-                    className={pullConflictStrategy === 'local' ? 'active' : ''}
-                    onClick={() => setPullConflictStrategy('local')}
-                    disabled={isPullingContent}
-                  >
-                    本地优先
-                  </button>
-                </div>
-                <small>
-                  {pullConflictStrategy === 'remote'
-                    ? '同一路径内容不一致时使用远端版本。'
-                    : '同一路径内容不一致时保留本地版本。'}
-                </small>
-              </div>
               {pullLogs.length > 0 ? (
                 <section
                   className={`notes-publish-progress ${pullRunState}`}
@@ -8753,7 +9098,7 @@ export default function NotesWorkbench() {
               ) : (
                 <div className="notes-publish-dialog-pending">
                   <IconDownload aria-hidden="true" />
-                  <span>点击开始后，将合并远端发布分支内容；本地独有内容会保留。</span>
+                  <span>点击开始后，将合并远端内容分支；本地独有内容会保留。</span>
                 </div>
               )}
             </div>
@@ -8892,6 +9237,96 @@ export default function NotesWorkbench() {
                   : categoryDialog.mode === 'create'
                     ? '\u65b0\u5efa'
                     : '\u4fdd\u5b58'}
+              </button>
+            </footer>
+          </section>
+        </div>
+      ) : null}
+
+      {categoryDeleteDialog && categoryToDelete ? (
+        <div className="notes-dialog-overlay notes-category-dialog-overlay" onClick={closeCategoryDeleteDialog}>
+          <section
+            className="notes-category-dialog notes-category-delete-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="notes-category-delete-dialog-title"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <header className="notes-category-dialog-header">
+              <div>
+                <h2 id="notes-category-delete-dialog-title">删除类目</h2>
+                <span>删除前请为类目中的文章选择新的归属类目</span>
+              </div>
+              <button
+                type="button"
+                className="notes-category-dialog-close"
+                onClick={closeCategoryDeleteDialog}
+                disabled={isBusy}
+                aria-label="关闭删除类目弹窗"
+              >
+                <IconX aria-hidden="true" />
+              </button>
+            </header>
+
+            <div className="notes-category-dialog-body">
+              <div className="notes-category-delete-summary">
+                <span>将删除</span>
+                <strong>{categoryToDelete.label}</strong>
+                <em>{categoryDeleteAffectedItems.length} 篇文章</em>
+              </div>
+
+              {categoryDeleteAffectedItems.length > 0 ? (
+                <>
+                  <label className="notes-category-dialog-field">
+                    <span>迁移到</span>
+                    <select
+                      value={categoryDeleteDialog.targetSlug}
+                      onChange={(event) =>
+                        setCategoryDeleteDialog((current) =>
+                          current ? { ...current, targetSlug: event.target.value } : current,
+                        )
+                      }
+                      disabled={isBusy}
+                    >
+                      {categoryDeleteTargetOptions.map((category) => (
+                        <option key={category.slug} value={category.slug}>
+                          {category.label}
+                          {category.labelEn?.trim() ? ` / ${category.labelEn.trim()}` : ''}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+
+                  <div className="notes-category-delete-preview">
+                    {categoryDeleteAffectedItems.slice(0, 5).map((item) => (
+                      <span key={item.relativePath}>{item.frontmatter.title}</span>
+                    ))}
+                    {categoryDeleteAffectedItems.length > 5 ? (
+                      <small>还有 {categoryDeleteAffectedItems.length - 5} 篇文章会一并迁移</small>
+                    ) : null}
+                  </div>
+                </>
+              ) : (
+                <p className="notes-category-delete-empty">该类目下没有文章，确认后只会删除类目配置。</p>
+              )}
+            </div>
+
+            <footer className="notes-category-dialog-actions">
+              <button
+                type="button"
+                className="notes-category-dialog-cancel"
+                onClick={closeCategoryDeleteDialog}
+                disabled={isBusy}
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                className="notes-category-dialog-submit danger"
+                onClick={() => void confirmDeleteCategory()}
+                disabled={isBusy || (categoryDeleteAffectedItems.length > 0 && !categoryDeleteDialog.targetSlug)}
+              >
+                {isBusy ? '删除中...' : '确认删除'}
               </button>
             </footer>
           </section>

@@ -1,7 +1,7 @@
 ---
 type: markdown
 title: 3D Rotations
-slug: 6237698
+slug: "6237698"
 date: 2023-11-08
 updatedAt: 2026-06-23 13:10:27
 tags:

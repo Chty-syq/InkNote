@@ -1826,10 +1826,6 @@ input {
   background: transparent;
 }
 
-.markdown-body blockquote .katex-display > .katex {
-  font-size: 1.05em;
-}
-
 .markdown-body blockquote .katex-display + p {
   margin-top: 0.12rem;
 }

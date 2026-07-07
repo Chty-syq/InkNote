@@ -6,15 +6,14 @@ use image::{codecs::jpeg::JpegEncoder, imageops::FilterType, GenericImageView};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
-    fs,
+    fs::{self, OpenOptions},
     io::{Read, Write},
     net::{SocketAddr, TcpListener, TcpStream},
     path::{Component, Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::{
         atomic::{AtomicU8, Ordering},
-        mpsc,
-        Mutex, OnceLock,
+        mpsc, Mutex, OnceLock,
     },
     thread::{self, JoinHandle},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -29,6 +28,14 @@ const BLOG_PREVIEW_ORIGIN: &str = "http://localhost:4321";
 const BLOG_PREVIEW_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
 const BLOG_PREVIEW_WAIT_STEP: Duration = Duration::from_millis(100);
 const BLOG_PREVIEW_HTTP_TIMEOUT: Duration = Duration::from_millis(800);
+const DEFAULT_CONTENT_BRANCH: &str = "content";
+const CONTENT_SYNC_CACHE_DIR: &str = ".inknote-sync/content-source";
+const CONTENT_GIT_REPOSITORY_DIR: &str = ".inknote-sync/repository";
+const CONTENT_SYNC_LOCK_PATH: &str = ".inknote-sync/sync.lock";
+const CONTENT_SYNC_LOCK_STALE_AFTER: Duration = Duration::from_secs(6 * 60 * 60);
+const CONTENT_SOURCE_ROOTS: &[&str] = &["content", "apps/web/public"];
+const CONTENT_BRANCH_WORKFLOW_PATH: &str = ".github/workflows/deploy-web.yml";
+const CONTENT_BRANCH_WORKFLOW: &str = include_str!("../../../../.github/workflows/deploy-web.yml");
 
 static WORKSPACE_ROOT: OnceLock<PathBuf> = OnceLock::new();
 static CONTENT_ROOT: OnceLock<PathBuf> = OnceLock::new();
@@ -84,8 +91,11 @@ struct PullRemoteContentRequest {
     task_id: String,
     remote: String,
     branch: String,
+    content_branch: Option<String>,
     ssh_key_path: String,
     conflict_strategy: String,
+    conflict_resolutions: Option<BTreeMap<String, String>>,
+    allow_risky_content_sync: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -94,18 +104,20 @@ struct SyncSiteRequest {
     task_id: String,
     remote: String,
     branch: String,
-    base_path: String,
+    content_branch: Option<String>,
     ssh_key_path: String,
     message: String,
     conflict_strategy: String,
+    conflict_resolutions: Option<BTreeMap<String, String>>,
     known_remote_commit: Option<String>,
-    verify_after_push: Option<bool>,
+    allow_risky_content_sync: Option<bool>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ContentSyncConflictStrategy {
     Remote,
     Local,
+    Manual,
 }
 
 impl ContentSyncConflictStrategy {
@@ -113,6 +125,7 @@ impl ContentSyncConflictStrategy {
         match value.trim() {
             "" | "remote" => Ok(Self::Remote),
             "local" => Ok(Self::Local),
+            "manual" => Ok(Self::Manual),
             other => Err(format!(
                 "unsupported content sync conflict strategy: {other}"
             )),
@@ -123,6 +136,25 @@ impl ContentSyncConflictStrategy {
         match self {
             Self::Remote => "远端优先",
             Self::Local => "本地优先",
+            Self::Manual => "逐项选择",
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum ContentSyncConflictResolution {
+    Remote,
+    Local,
+}
+
+impl ContentSyncConflictResolution {
+    fn parse(value: &str) -> Result<Self, String> {
+        match value.trim() {
+            "remote" => Ok(Self::Remote),
+            "local" => Ok(Self::Local),
+            other => Err(format!(
+                "unsupported content sync conflict resolution: {other}"
+            )),
         }
     }
 }
@@ -209,6 +241,7 @@ fn emit_desktop_update_progress(
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RuntimeContentPayload {
+    #[serde(default = "empty_json_array")]
     navigation: serde_json::Value,
     site_config: serde_json::Value,
     categories: serde_json::Value,
@@ -655,7 +688,8 @@ fn get_publish_status_with_ssh(
     branch: String,
     ssh_key_path: Option<&str>,
 ) -> Result<PublishStatus, String> {
-    let (remote, branch) = validate_publish_target(&remote, &branch)?;
+    let remote = validate_remote_repository(&remote)?;
+    let branch = validate_content_branch(&branch)?;
     let ssh_command = create_git_ssh_command(ssh_key_path)?;
     let remote_ref = format!("refs/heads/{branch}");
     let command_directory = std::env::temp_dir();
@@ -843,7 +877,7 @@ fn sync_content_changes_blocking(
         18,
         "fetch",
         "准备拉取远端仓库",
-        "正在校验仓库地址、分支与冲突策略。",
+        "正在校验仓库地址、分支与冲突处理方式。",
         "info",
     );
 
@@ -871,21 +905,34 @@ fn sync_content_changes_inner(
     request: &SyncSiteRequest,
     reporter: &PublishProgressReporter,
 ) -> Result<GitCommandResult, String> {
-    let (remote, branch) = validate_publish_target(&request.remote, &request.branch)?;
+    let _sync_lock = acquire_content_sync_lock("sync")?;
+    let remote = validate_remote_repository(&request.remote)?;
+    let content_branch =
+        validate_content_branch(request.content_branch.as_deref().unwrap_or_else(|| {
+            let branch = request.branch.trim();
+            if branch.is_empty() {
+                DEFAULT_CONTENT_BRANCH
+            } else {
+                branch
+            }
+        }))?;
     let ssh_key_path = request.ssh_key_path.trim();
     let ssh_command = create_git_ssh_command((!ssh_key_path.is_empty()).then_some(ssh_key_path))?;
     let conflict_strategy = ContentSyncConflictStrategy::parse(&request.conflict_strategy)?;
+    let conflict_resolutions =
+        parse_content_sync_conflict_resolutions(request.conflict_resolutions.as_ref())?;
+    let allow_risky_content_sync = request.allow_risky_content_sync.unwrap_or(false);
     let commit_message = request.message.trim();
     if commit_message.is_empty() {
         return Err("请输入同步说明。".to_string());
     }
 
-    let status = if let Some(remote_commit) = request.known_remote_commit.as_deref() {
-        publish_status_from_known_commit(&remote, &branch, remote_commit)
+    let content_status = if let Some(remote_commit) = request.known_remote_commit.as_deref() {
+        publish_status_from_known_commit(&remote, &content_branch, remote_commit)
     } else {
         get_publish_status_with_ssh(
             remote.clone(),
-            branch.clone(),
+            content_branch.clone(),
             (!ssh_key_path.is_empty()).then_some(ssh_key_path),
         )?
     };
@@ -893,132 +940,1685 @@ fn sync_content_changes_inner(
     reporter.emit(
         20,
         "fetch",
-        "准备拉取远端仓库",
-        "正在创建临时 Git 工作区。",
+        "准备同步内容分支",
+        format!("内容分支：{content_branch}"),
         "info",
     );
-    let sync_directory = TemporaryPublishDirectory::create()?;
-    let sync_root = sync_directory.path();
-    ensure_git_success(
-        run_git_in(sync_root, &["init"])?,
-        "initialize sync publishing repository",
+    let content_result = sync_content_git_branch(
+        &remote,
+        &content_branch,
+        ssh_command.as_deref(),
+        &content_status,
+        conflict_strategy,
+        &conflict_resolutions,
+        commit_message,
+        allow_risky_content_sync,
+        reporter,
     )?;
-    ensure_git_success(
-        run_git_in(sync_root, &["remote", "add", "origin", &remote])?,
-        "configure sync publishing remote",
-    )?;
+
     reporter.emit(
-        22,
-        "fetch",
-        "拉取准备完成",
-        status.short_status.clone(),
+        82,
+        "workflow",
+        "内容分支已更新",
+        "远端工作流将构建 Web 并通过 Pages artifact 发布。",
         "success",
     );
 
-    let remote_ref = format!("refs/heads/{branch}");
+    Ok(GitCommandResult {
+        success: content_result.success,
+        stdout: format!(
+            "{}\n远端工作流将构建 Web 并通过 Pages artifact 发布。",
+            content_result.stdout.trim()
+        )
+        .trim()
+        .to_string(),
+        stderr: content_result.stderr,
+    })
+}
+
+type ContentSourceFileMap = BTreeMap<String, Vec<u8>>;
+
+struct ContentSyncLock {
+    path: PathBuf,
+}
+
+impl Drop for ContentSyncLock {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ContentSourceRiskReport {
+    code: String,
+    title: String,
+    detail: String,
+}
+
+fn format_content_sync_risk_error(code: &str, title: &str, detail: &str) -> String {
+    let report = ContentSourceRiskReport {
+        code: code.to_string(),
+        title: title.to_string(),
+        detail: detail.to_string(),
+    };
+    serde_json::to_string(&report)
+        .map(|payload| format!("CONTENT_SYNC_RISK:{payload}"))
+        .unwrap_or_else(|_| format!("CONTENT_SYNC_RISK:{{\"code\":\"{code}\",\"title\":\"{title}\",\"detail\":\"{detail}\"}}"))
+}
+
+fn acquire_content_sync_lock(operation: &str) -> Result<ContentSyncLock, String> {
+    let lock_path = get_workspace_root()?.join(CONTENT_SYNC_LOCK_PATH);
+    if let Some(parent) = lock_path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("failed to create sync lock directory: {error}"))?;
+    }
+
+    if lock_path.exists() {
+        let stale = fs::metadata(&lock_path)
+            .and_then(|metadata| metadata.modified())
+            .ok()
+            .and_then(|modified| modified.elapsed().ok())
+            .is_some_and(|elapsed| elapsed > CONTENT_SYNC_LOCK_STALE_AFTER);
+        if stale {
+            let _ = fs::remove_file(&lock_path);
+        }
+    }
+
+    match OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&lock_path)
+    {
+        Ok(mut file) => {
+            let _ = writeln!(
+                file,
+                "operation={operation}\npid={}\ncreatedAt={:?}",
+                std::process::id(),
+                SystemTime::now()
+            );
+            Ok(ContentSyncLock { path: lock_path })
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Err(
+            "已有同步任务正在运行，请稍后再试；如果确认没有同步任务，可重启编辑器后重试。".to_string(),
+        ),
+        Err(error) => Err(format!("failed to create sync lock: {error}")),
+    }
+}
+
+struct ContentSourceMergeSummary {
+    remote_only: usize,
+    local_only: usize,
+    local_changes: usize,
+    remote_changes: usize,
+    local_deletions: usize,
+    remote_deletions: usize,
+    conflicts: usize,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ContentSourceConflictReport {
+    conflicts: Vec<ContentSourceConflictItem>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ContentSourceConflictItem {
+    path: String,
+    kind: String,
+    local: String,
+    remote: String,
+    local_content: String,
+    remote_content: String,
+}
+
+impl ContentSourceMergeSummary {
+    fn format(&self, conflict_strategy: ContentSyncConflictStrategy) -> String {
+        format!(
+            "新增：本地 {} / 远端 {}\n修改：本地 {} / 远端 {}\n删除：本地 {} / 远端 {}\n冲突：{}（{}）",
+            self.local_only,
+            self.remote_only,
+            self.local_changes,
+            self.remote_changes,
+            self.local_deletions,
+            self.remote_deletions,
+            self.conflicts,
+            conflict_strategy.label()
+        )
+    }
+}
+
+fn format_content_sync_conflict_error(
+    conflicts: &[ContentSourceConflictItem],
+) -> Result<String, String> {
+    let report = ContentSourceConflictReport {
+        conflicts: conflicts
+            .iter()
+            .take(50)
+            .map(|item| ContentSourceConflictItem {
+                path: item.path.clone(),
+                kind: item.kind.clone(),
+                local: item.local.clone(),
+                remote: item.remote.clone(),
+                local_content: item.local_content.clone(),
+                remote_content: item.remote_content.clone(),
+            })
+            .collect(),
+    };
+    let serialized = serde_json::to_string(&report)
+        .map_err(|error| format!("failed to serialize content conflict report: {error}"))?;
+    Ok(format!("CONTENT_SYNC_CONFLICTS:{serialized}"))
+}
+
+fn parse_content_sync_conflict_resolutions(
+    values: Option<&BTreeMap<String, String>>,
+) -> Result<BTreeMap<String, ContentSyncConflictResolution>, String> {
+    let mut resolutions = BTreeMap::new();
+    let Some(values) = values else {
+        return Ok(resolutions);
+    };
+
+    for (path, value) in values {
+        if path.trim().is_empty() {
+            return Err("content sync conflict resolution path cannot be empty".to_string());
+        }
+        join_safe_relative_path(Path::new("."), path)?;
+        resolutions.insert(
+            normalize_relative_path(Path::new(path)),
+            ContentSyncConflictResolution::parse(value)?,
+        );
+    }
+    Ok(resolutions)
+}
+
+#[allow(dead_code)]
+fn sync_content_source_branch(
+    remote: &str,
+    content_branch: &str,
+    ssh_command: Option<&str>,
+    status: &PublishStatus,
+    conflict_strategy: ContentSyncConflictStrategy,
+    conflict_resolutions: &BTreeMap<String, ContentSyncConflictResolution>,
+    commit_message: &str,
+    reporter: &PublishProgressReporter,
+) -> Result<GitCommandResult, String> {
+    let workspace_root = get_workspace_root()?;
+    let source_directory = TemporaryPublishDirectory::create()?;
+    let source_root = source_directory.path();
+    ensure_git_success(
+        run_git_in(source_root, &["init"])?,
+        "initialize content source repository",
+    )?;
+    ensure_git_success(
+        run_git_in(source_root, &["remote", "add", "origin", remote])?,
+        "configure content source remote",
+    )?;
+
+    let remote_ref = format!("refs/heads/{content_branch}");
     if status.branch_exists {
         reporter.emit(
             24,
             "fetch",
-            "正在拉取远端仓库",
-            format!("分支：{branch}"),
+            "正在拉取内容分支",
+            format!("分支：{content_branch}"),
             "info",
         );
         let mut last_fetch_percent = None;
         let fetched = ensure_git_success(
             run_git_in_with_ssh_progress(
-                sync_root,
+                source_root,
                 &["fetch", "--progress", "--depth=1", "origin", &remote_ref],
-                ssh_command.as_deref(),
+                ssh_command,
                 |line| {
                     emit_git_transfer_progress(
                         reporter,
                         24,
-                        18,
+                        14,
                         "fetch",
-                        "正在拉取远端仓库",
+                        "正在拉取内容分支",
                         line,
                         &mut last_fetch_percent,
                     );
                 },
             )?,
-            "fetch sync branch",
+            "fetch content source branch",
         )?;
         reporter.emit(
-            42,
+            38,
             "fetch",
-            "远端仓库拉取完成",
-            concise_git_result_detail(&fetched, "已取得远端发布分支。"),
+            "内容分支拉取完成",
+            concise_git_result_detail(&fetched, "已取得远端内容源。"),
             "success",
         );
         ensure_git_success(
-            run_git_in(sync_root, &["checkout", "-B", &branch, "FETCH_HEAD"])?,
-            "checkout sync branch",
+            run_git_in(
+                source_root,
+                &["checkout", "-B", content_branch, "FETCH_HEAD"],
+            )?,
+            "checkout content source branch",
         )?;
-
-        reporter.emit(
-            44,
-            "merge",
-            "正在合并内容",
-            format!("冲突策略：{}", conflict_strategy.label()),
-            "info",
-        );
-        let payload = read_runtime_content_payload_from_artifact_root(sync_root)?;
-        restore_runtime_content_payload(&payload, conflict_strategy)?;
-        restore_runtime_public_assets(sync_root, conflict_strategy)?;
-        reporter.emit(
-            54,
-            "merge",
-            "内容合并完成",
-            "远端独有与本地独有内容已保留，冲突项已按策略处理。",
-            "success",
-        );
     } else {
         reporter.emit(
-            42,
+            38,
             "fetch",
-            "远端分支不存在",
-            "将创建首次发布分支，并以本地内容作为初始版本。",
+            "内容分支尚未创建",
+            format!("将创建内容分支：{content_branch}"),
             "warning",
         );
         ensure_git_success(
-            run_git_in(sync_root, &["checkout", "--orphan", &branch])?,
-            "create first sync branch",
+            run_git_in(source_root, &["checkout", "--orphan", content_branch])?,
+            "create content source branch",
+        )?;
+    }
+
+    reporter.emit(
+        42,
+        "merge",
+        "正在合并内容源",
+        format!("冲突处理：{}", conflict_strategy.label()),
+        "info",
+    );
+    let local_files = collect_content_source_files(&workspace_root)?;
+    let remote_files = collect_content_source_files(source_root)?;
+    let cache_root = content_sync_cache_root()?;
+    let base_files = if cache_root.is_dir() && is_initialized_content_source(&remote_files) {
+        Some(collect_content_source_files(&cache_root)?)
+    } else {
+        None
+    };
+    let (merged_files, merge_summary, conflicts) = merge_content_source_files(
+        base_files.as_ref(),
+        &local_files,
+        &remote_files,
+        conflict_strategy,
+        conflict_resolutions,
+    );
+    if conflict_strategy == ContentSyncConflictStrategy::Manual && !conflicts.is_empty() {
+        return Err(format_content_sync_conflict_error(&conflicts)?);
+    }
+    reporter.emit(
+        50,
+        "merge",
+        "内容源合并完成",
+        merge_summary.format(conflict_strategy),
+        if merge_summary.conflicts > 0 {
+            "warning"
+        } else {
+            "success"
+        },
+    );
+
+    reporter.emit(
+        52,
+        "content",
+        "正在写回本地内容",
+        "将合并后的内容写入 content/ 与公开资源目录。",
+        "info",
+    );
+    write_content_source_files(&workspace_root, &merged_files)?;
+    write_content_source_files(source_root, &merged_files)?;
+    write_content_branch_workflow(source_root, content_branch)?;
+    reporter.emit(
+        56,
+        "content",
+        "本地内容已更新",
+        "内容分支与本地内容库已使用同一份合并结果。",
+        "success",
+    );
+
+    ensure_git_success(
+        run_git_in(source_root, &["config", "user.name", "InkNote Publisher"])?,
+        "configure content source Git author",
+    )?;
+    ensure_git_success(
+        run_git_in(
+            source_root,
+            &["config", "user.email", "inknote-publisher@localhost"],
+        )?,
+        "configure content source Git author email",
+    )?;
+    ensure_git_success(
+        run_git_in(source_root, &["add", "--all"])?,
+        "stage content source files",
+    )?;
+    let staged = run_git_in(source_root, &["diff", "--cached", "--quiet"])?;
+    if staged.success {
+        reporter.emit(
+            60,
+            "source",
+            "正在触发远端构建",
+            "内容没有文件差异，将创建空提交以触发远端工作流。",
+            "info",
+        );
+        let committed = ensure_git_success(
+            run_git_in(
+                source_root,
+                &["commit", "--allow-empty", "-m", commit_message],
+            )?,
+            "create empty content source commit",
         )?;
         reporter.emit(
-            54,
-            "merge",
-            "无需合并远端内容",
-            "远端尚无发布内容，跳过拉取合并。",
+            63,
+            "source",
+            "远端构建触发提交已创建",
+            concise_git_result_detail(&committed, "空提交已创建，用于触发 Web 构建。"),
+            "success",
+        );
+    } else {
+        reporter.emit(60, "source", "正在提交内容分支", commit_message, "info");
+        let committed = ensure_git_success(
+            run_git_in(source_root, &["commit", "-m", commit_message])?,
+            "commit content source branch",
+        )?;
+        reporter.emit(
+            63,
+            "source",
+            "内容分支提交完成",
+            concise_git_result_detail(&committed, "内容源提交已创建。"),
             "success",
         );
     }
 
-    let artifact = create_publish_artifact(&request.base_path, 56, reporter)?;
-    publish_prepared_worktree(
-        artifact.path(),
-        sync_root,
-        &remote,
-        &branch,
-        &remote_ref,
-        (!ssh_key_path.is_empty()).then_some(ssh_key_path),
-        ssh_command.as_deref(),
-        commit_message,
-        &status,
-        request.verify_after_push.unwrap_or(false),
+    reporter.emit(
+        65,
+        "source",
+        "正在推送内容分支",
+        format!("目标分支：{content_branch}"),
+        "info",
+    );
+    let refspec = format!("HEAD:{remote_ref}");
+    let mut last_push_percent = None;
+    let push_result = if status.branch_exists {
+        ensure_git_success(
+            run_git_in_with_ssh_progress(
+                source_root,
+                &["push", "--progress", "origin", &refspec],
+                ssh_command,
+                |line| {
+                    emit_git_transfer_progress(
+                        reporter,
+                        65,
+                        7,
+                        "source",
+                        "正在推送内容分支",
+                        line,
+                        &mut last_push_percent,
+                    );
+                },
+            )?,
+            "push content source branch",
+        )?
+    } else {
+        ensure_git_success(
+            run_git_in_with_ssh_progress(
+                source_root,
+                &["push", "--progress", "--set-upstream", "origin", &refspec],
+                ssh_command,
+                |line| {
+                    emit_git_transfer_progress(
+                        reporter,
+                        65,
+                        7,
+                        "source",
+                        "正在创建内容分支",
+                        line,
+                        &mut last_push_percent,
+                    );
+                },
+            )?,
+            "create content source branch",
+        )?
+    };
+    write_content_source_files(&cache_root, &merged_files)?;
+    reporter.emit(
+        72,
+        "source",
+        "内容分支已同步",
+        concise_git_result_detail(&push_result, "远端内容分支已更新。"),
+        "success",
+    );
+
+    Ok(GitCommandResult {
+        success: push_result.success,
+        stdout: format!("内容分支 {content_branch} 已同步。"),
+        stderr: push_result.stderr,
+    })
+}
+
+fn content_sync_cache_root() -> Result<PathBuf, String> {
+    Ok(get_workspace_root()?.join(CONTENT_SYNC_CACHE_DIR))
+}
+
+fn content_git_repository_root() -> Result<PathBuf, String> {
+    Ok(get_workspace_root()?.join(CONTENT_GIT_REPOSITORY_DIR))
+}
+
+fn sync_content_git_branch(
+    remote: &str,
+    content_branch: &str,
+    ssh_command: Option<&str>,
+    status: &PublishStatus,
+    conflict_strategy: ContentSyncConflictStrategy,
+    conflict_resolutions: &BTreeMap<String, ContentSyncConflictResolution>,
+    commit_message: &str,
+    allow_risky_content_sync: bool,
+    reporter: &PublishProgressReporter,
+) -> Result<GitCommandResult, String> {
+    let repo_root =
+        ensure_content_git_repository(remote, content_branch, ssh_command, status, reporter)?;
+
+    if has_git_merge_in_progress(&repo_root) {
+        resolve_content_git_merge(
+            &repo_root,
+            conflict_strategy,
+            conflict_resolutions,
+            reporter,
+        )?;
+    } else {
+        stage_workspace_content_in_git_repo(
+            &repo_root,
+            content_branch,
+            commit_message,
+            allow_risky_content_sync,
+            reporter,
+        )?;
+        if status.branch_exists {
+            fetch_and_merge_content_branch(
+                &repo_root,
+                content_branch,
+                ssh_command,
+                conflict_strategy,
+                conflict_resolutions,
+                reporter,
+            )?;
+        }
+    }
+
+    sync_content_git_repo_back_to_workspace(&repo_root, reporter)?;
+
+    reporter.emit(
+        65,
+        "source",
+        "正在推送内容分支",
+        format!("目标分支：{content_branch}"),
+        "info",
+    );
+    let push_result = push_content_git_branch(
+        &repo_root,
+        content_branch,
+        ssh_command,
+        status.branch_exists,
         reporter,
+    )?;
+
+    Ok(GitCommandResult {
+        success: push_result.success,
+        stdout: format!("内容分支 {content_branch} 已通过 Git 同步。"),
+        stderr: push_result.stderr,
+    })
+}
+
+fn ensure_content_git_repository(
+    remote: &str,
+    content_branch: &str,
+    ssh_command: Option<&str>,
+    status: &PublishStatus,
+    reporter: &PublishProgressReporter,
+) -> Result<PathBuf, String> {
+    let repo_root = content_git_repository_root()?;
+    fs::create_dir_all(&repo_root)
+        .map_err(|error| format!("failed to create content git repository: {error}"))?;
+
+    if repo_root.join(".git").exists()
+        && !content_git_repository_matches(&repo_root, remote, content_branch, ssh_command)
+    {
+        reporter.emit(
+            21,
+            "git",
+            "正在重建本地内容仓库",
+            "远程仓库或内容分支已变化，重新初始化同步基线。",
+            "warning",
+        );
+        clear_path(&repo_root)?;
+        fs::create_dir_all(&repo_root)
+            .map_err(|error| format!("failed to recreate content git repository: {error}"))?;
+    }
+
+    if !repo_root.join(".git").exists() {
+        reporter.emit(
+            22,
+            "git",
+            "正在初始化本地内容仓库",
+            repo_root.display().to_string(),
+            "info",
+        );
+        ensure_git_success(
+            run_git_in(&repo_root, &["init"])?,
+            "initialize content git repository",
+        )?;
+    }
+
+    configure_content_git_remote(&repo_root, remote, ssh_command)?;
+    configure_content_git_author(&repo_root)?;
+
+    if has_git_merge_in_progress(&repo_root) {
+        return Ok(repo_root);
+    }
+
+    if !has_git_head(&repo_root)? {
+        if status.branch_exists {
+            let remote_ref = format!("refs/heads/{content_branch}");
+            reporter.emit(
+                24,
+                "fetch",
+                "正在拉取远端内容分支",
+                format!("分支：{content_branch}"),
+                "info",
+            );
+            let mut last_fetch_percent = None;
+            ensure_git_success(
+                run_git_in_with_ssh_progress(
+                    &repo_root,
+                    &["fetch", "--progress", "--depth=1", "origin", &remote_ref],
+                    ssh_command,
+                    |line| {
+                        emit_git_transfer_progress(
+                            reporter,
+                            24,
+                            10,
+                            "fetch",
+                            "正在拉取远端内容分支",
+                            line,
+                            &mut last_fetch_percent,
+                        );
+                    },
+                )?,
+                "fetch initial content branch",
+            )?;
+            ensure_git_success(
+                run_git_in(
+                    &repo_root,
+                    &["checkout", "-B", content_branch, "FETCH_HEAD"],
+                )?,
+                "checkout initial content branch",
+            )?;
+        } else {
+            reporter.emit(
+                24,
+                "git",
+                "正在创建本地内容分支",
+                format!("分支：{content_branch}"),
+                "warning",
+            );
+            ensure_git_success(
+                run_git_in(&repo_root, &["checkout", "--orphan", content_branch])?,
+                "create local content branch",
+            )?;
+        }
+    } else {
+        ensure_git_success(
+            run_git_in(&repo_root, &["checkout", "-B", content_branch])?,
+            "checkout local content branch",
+        )?;
+    }
+
+    Ok(repo_root)
+}
+
+fn configure_content_git_remote(
+    repo_root: &Path,
+    remote: &str,
+    ssh_command: Option<&str>,
+) -> Result<(), String> {
+    let current = run_git_in_with_ssh(repo_root, &["remote", "get-url", "origin"], ssh_command)?;
+    if current.success {
+        ensure_git_success(
+            run_git_in_with_ssh(
+                repo_root,
+                &["remote", "set-url", "origin", remote],
+                ssh_command,
+            )?,
+            "update content git remote",
+        )?;
+    } else {
+        ensure_git_success(
+            run_git_in_with_ssh(repo_root, &["remote", "add", "origin", remote], ssh_command)?,
+            "add content git remote",
+        )?;
+    }
+    Ok(())
+}
+
+fn content_git_repository_matches(
+    repo_root: &Path,
+    remote: &str,
+    content_branch: &str,
+    ssh_command: Option<&str>,
+) -> bool {
+    let current_remote =
+        match run_git_in_with_ssh(repo_root, &["remote", "get-url", "origin"], ssh_command) {
+            Ok(output) if output.success => output.stdout.trim().to_string(),
+            _ => return false,
+        };
+    if current_remote != remote {
+        return false;
+    }
+
+    let current_branch = match run_git_in(repo_root, &["rev-parse", "--abbrev-ref", "HEAD"]) {
+        Ok(output) if output.success => output.stdout.trim().to_string(),
+        _ => return false,
+    };
+    current_branch == content_branch
+}
+
+fn configure_content_git_author(repo_root: &Path) -> Result<(), String> {
+    ensure_git_success(
+        run_git_in(repo_root, &["config", "user.name", "InkNote Publisher"])?,
+        "configure content git author",
+    )?;
+    ensure_git_success(
+        run_git_in(
+            repo_root,
+            &["config", "user.email", "inknote-publisher@localhost"],
+        )?,
+        "configure content git author email",
+    )?;
+    Ok(())
+}
+
+fn has_git_head(repo_root: &Path) -> Result<bool, String> {
+    Ok(run_git_in(repo_root, &["rev-parse", "--verify", "HEAD"])?.success)
+}
+
+fn has_git_merge_in_progress(repo_root: &Path) -> bool {
+    repo_root.join(".git").join("MERGE_HEAD").is_file()
+}
+
+fn stage_workspace_content_in_git_repo(
+    repo_root: &Path,
+    content_branch: &str,
+    commit_message: &str,
+    allow_risky_content_sync: bool,
+    reporter: &PublishProgressReporter,
+) -> Result<bool, String> {
+    reporter.emit(
+        38,
+        "content",
+        "正在写入本地内容快照",
+        "将 content/ 与公开资源写入 Git 工作区。",
+        "info",
+    );
+    let workspace_files = collect_content_source_files(&get_workspace_root()?)?;
+    let previous_files = collect_content_source_files(repo_root)?;
+    validate_content_source_health(
+        &workspace_files,
+        Some(&previous_files),
+        allow_risky_content_sync,
+    )?;
+    clear_content_git_worktree(repo_root)?;
+    write_content_source_files(repo_root, &workspace_files)?;
+    write_content_branch_workflow(repo_root, content_branch)?;
+
+    ensure_git_success(
+        run_git_in(repo_root, &["add", "--all"])?,
+        "stage content git files",
+    )?;
+    let staged = run_git_in(repo_root, &["diff", "--cached", "--quiet"])?;
+    if staged.success {
+        reporter.emit(
+            42,
+            "content",
+            "本地内容没有新增提交",
+            "Git 工作区与上次本地内容提交一致。",
+            "success",
+        );
+        return Ok(false);
+    }
+
+    reporter.emit(42, "content", "正在提交本地内容", commit_message, "info");
+    ensure_git_success(
+        run_git_in(repo_root, &["commit", "-m", commit_message])?,
+        "commit local content changes",
+    )?;
+    Ok(true)
+}
+
+fn clear_content_git_worktree(repo_root: &Path) -> Result<(), String> {
+    for entry in fs::read_dir(repo_root)
+        .map_err(|error| format!("failed to read content git repository: {error}"))?
+    {
+        let entry =
+            entry.map_err(|error| format!("failed to inspect content git entry: {error}"))?;
+        if entry.file_name().to_string_lossy() == ".git" {
+            continue;
+        }
+        clear_path(&entry.path())?;
+    }
+    Ok(())
+}
+
+fn fetch_and_merge_content_branch(
+    repo_root: &Path,
+    content_branch: &str,
+    ssh_command: Option<&str>,
+    conflict_strategy: ContentSyncConflictStrategy,
+    conflict_resolutions: &BTreeMap<String, ContentSyncConflictResolution>,
+    reporter: &PublishProgressReporter,
+) -> Result<(), String> {
+    let remote_ref = format!("refs/heads/{content_branch}");
+    reporter.emit(
+        48,
+        "fetch",
+        "正在拉取远端内容分支",
+        format!("分支：{content_branch}"),
+        "info",
+    );
+    let mut last_fetch_percent = None;
+    ensure_git_success(
+        run_git_in_with_ssh_progress(
+            repo_root,
+            &["fetch", "--progress", "origin", &remote_ref],
+            ssh_command,
+            |line| {
+                emit_git_transfer_progress(
+                    reporter,
+                    48,
+                    8,
+                    "fetch",
+                    "正在拉取远端内容分支",
+                    line,
+                    &mut last_fetch_percent,
+                );
+            },
+        )?,
+        "fetch content branch for merge",
+    )?;
+
+    reporter.emit(
+        56,
+        "merge",
+        "正在执行 Git 合并",
+        "使用 Git 合并远端内容分支。",
+        "info",
+    );
+    let merged = run_git_in(
+        repo_root,
+        &[
+            "merge",
+            "--no-edit",
+            "--allow-unrelated-histories",
+            "FETCH_HEAD",
+        ],
+    )?;
+    if merged.success {
+        reporter.emit(
+            60,
+            "merge",
+            "Git 合并完成",
+            concise_git_result_detail(&merged, "远端内容已合并。"),
+            "success",
+        );
+        return Ok(());
+    }
+
+    let conflicts = git_content_conflicts(repo_root)?;
+    if conflicts.is_empty() {
+        return Err(format!(
+            "Git 合并失败：{}",
+            if merged.stderr.is_empty() {
+                merged.stdout
+            } else {
+                merged.stderr
+            }
+        ));
+    }
+
+    if conflict_strategy == ContentSyncConflictStrategy::Manual && conflict_resolutions.is_empty() {
+        return Err(format_content_sync_conflict_error(&conflicts)?);
+    }
+
+    resolve_content_git_merge(repo_root, conflict_strategy, conflict_resolutions, reporter)
+}
+
+fn resolve_content_git_merge(
+    repo_root: &Path,
+    conflict_strategy: ContentSyncConflictStrategy,
+    conflict_resolutions: &BTreeMap<String, ContentSyncConflictResolution>,
+    reporter: &PublishProgressReporter,
+) -> Result<(), String> {
+    let conflicts = git_content_conflicts(repo_root)?;
+    if conflicts.is_empty() {
+        return Ok(());
+    }
+
+    reporter.emit(
+        58,
+        "merge",
+        "正在处理 Git 冲突",
+        format!("冲突文件：{}", conflicts.len()),
+        "warning",
+    );
+
+    if conflict_strategy == ContentSyncConflictStrategy::Manual {
+        if conflict_resolutions.is_empty() {
+            return Err(format_content_sync_conflict_error(&conflicts)?);
+        }
+        for conflict in &conflicts {
+            let resolution = conflict_resolutions.get(&conflict.path).ok_or_else(|| {
+                format_content_sync_conflict_error(&conflicts)
+                    .unwrap_or_else(|_| "CONTENT_SYNC_CONFLICTS:{\"conflicts\":[]}".to_string())
+            })?;
+            checkout_git_conflict_side(repo_root, &conflict.path, *resolution)?;
+        }
+    } else {
+        let resolution = match conflict_strategy {
+            ContentSyncConflictStrategy::Local => ContentSyncConflictResolution::Local,
+            ContentSyncConflictStrategy::Remote => ContentSyncConflictResolution::Remote,
+            ContentSyncConflictStrategy::Manual => unreachable!(),
+        };
+        for conflict in &conflicts {
+            checkout_git_conflict_side(repo_root, &conflict.path, resolution)?;
+        }
+    }
+
+    ensure_git_success(
+        run_git_in(repo_root, &["add", "--all"])?,
+        "stage resolved git conflicts",
+    )?;
+    let unresolved = git_content_conflicts(repo_root)?;
+    if !unresolved.is_empty() {
+        return Err(format_content_sync_conflict_error(&unresolved)?);
+    }
+    ensure_git_success(
+        run_git_in(repo_root, &["commit", "--no-edit"])?,
+        "commit resolved git merge",
+    )?;
+    Ok(())
+}
+
+fn checkout_git_conflict_side(
+    repo_root: &Path,
+    path: &str,
+    resolution: ContentSyncConflictResolution,
+) -> Result<(), String> {
+    join_safe_relative_path(Path::new("."), path)?;
+    let (side, stage) = match resolution {
+        ContentSyncConflictResolution::Local => ("--ours", "2"),
+        ContentSyncConflictResolution::Remote => ("--theirs", "3"),
+    };
+    if git_conflict_has_stage(repo_root, path, stage)? {
+        ensure_git_success(
+            run_git_in(repo_root, &["checkout", side, "--", path])?,
+            "checkout git conflict side",
+        )?;
+    } else {
+        ensure_git_success(
+            run_git_in(repo_root, &["rm", "-f", "--ignore-unmatch", "--", path])?,
+            "resolve git conflict as deletion",
+        )?;
+    }
+    Ok(())
+}
+
+fn git_conflict_has_stage(repo_root: &Path, path: &str, stage: &str) -> Result<bool, String> {
+    let output = run_git_in(repo_root, &["ls-files", "-u", "--", path])?;
+    if !output.success {
+        return Err(if output.stderr.is_empty() {
+            output.stdout
+        } else {
+            output.stderr
+        });
+    }
+
+    Ok(output.stdout.lines().any(|line| {
+        let mut parts = line.split_whitespace();
+        let _mode = parts.next();
+        let _hash = parts.next();
+        matches!(parts.next(), Some(value) if value == stage)
+    }))
+}
+
+fn git_conflict_stage_preview(repo_root: &Path, path: &str, stage: &str) -> String {
+    let Ok(has_stage) = git_conflict_has_stage(repo_root, path, stage) else {
+        return "无法读取该侧内容。".to_string();
+    };
+    if !has_stage {
+        return "该侧已删除此文件。".to_string();
+    }
+
+    let spec = format!(":{stage}:{path}");
+    match run_git_in(repo_root, &["show", spec.as_str()]) {
+        Ok(output) if output.success => {
+            let text = output.stdout.trim_end();
+            if text.is_empty() {
+                "空文件。".to_string()
+            } else {
+                const PREVIEW_LIMIT: usize = 24_000;
+                let preview: String = text.chars().take(PREVIEW_LIMIT).collect();
+                if text.chars().count() > PREVIEW_LIMIT {
+                    format!("{preview}\n\n... 内容过长，已截断预览 ...")
+                } else {
+                    preview
+                }
+            }
+        }
+        Ok(output) => {
+            let detail = if output.stderr.trim().is_empty() {
+                output.stdout.trim()
+            } else {
+                output.stderr.trim()
+            };
+            if detail.is_empty() {
+                "无法读取该侧内容。".to_string()
+            } else {
+                format!("无法读取该侧内容：{detail}")
+            }
+        }
+        Err(error) => format!("无法读取该侧内容：{error}"),
+    }
+}
+
+fn git_content_conflicts(repo_root: &Path) -> Result<Vec<ContentSourceConflictItem>, String> {
+    let output = run_git_in(repo_root, &["diff", "--name-only", "--diff-filter=U"])?;
+    if !output.success {
+        return Err(if output.stderr.is_empty() {
+            output.stdout
+        } else {
+            output.stderr
+        });
+    }
+
+    Ok(output
+        .stdout
+        .lines()
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .map(|path| ContentSourceConflictItem {
+            path: path.to_string(),
+            kind: "Git 合并冲突".to_string(),
+            local: "本地版本".to_string(),
+            remote: "远端版本".to_string(),
+            local_content: git_conflict_stage_preview(repo_root, path, "2"),
+            remote_content: git_conflict_stage_preview(repo_root, path, "3"),
+        })
+        .collect())
+}
+
+fn push_content_git_branch(
+    repo_root: &Path,
+    content_branch: &str,
+    ssh_command: Option<&str>,
+    branch_exists: bool,
+    reporter: &PublishProgressReporter,
+) -> Result<GitCommandResult, String> {
+    let remote_ref = format!("refs/heads/{content_branch}");
+    let refspec = format!("HEAD:{remote_ref}");
+    let mut last_push_percent = None;
+    let args = if branch_exists {
+        vec!["push", "--progress", "origin", refspec.as_str()]
+    } else {
+        vec![
+            "push",
+            "--progress",
+            "--set-upstream",
+            "origin",
+            refspec.as_str(),
+        ]
+    };
+
+    ensure_git_success(
+        run_git_in_with_ssh_progress(repo_root, &args, ssh_command, |line| {
+            emit_git_transfer_progress(
+                reporter,
+                65,
+                20,
+                "source",
+                "正在推送内容分支",
+                line,
+                &mut last_push_percent,
+            );
+        })?,
+        "push content git branch",
     )
+}
+
+fn sync_content_git_repo_back_to_workspace(
+    repo_root: &Path,
+    reporter: &PublishProgressReporter,
+) -> Result<ContentSourceFileMap, String> {
+    reporter.emit(
+        62,
+        "content",
+        "正在写回本地内容",
+        "将 Git 合并结果写回本地内容库。",
+        "info",
+    );
+    let merged_files = collect_content_source_files(repo_root)?;
+    validate_content_source_health(&merged_files, None, false)?;
+    write_content_source_files(&get_workspace_root()?, &merged_files)?;
+    write_content_source_files(&content_sync_cache_root()?, &merged_files)?;
+    Ok(merged_files)
+}
+
+fn prepare_pull_git_repository(
+    pull_root: &Path,
+    remote: &str,
+    content_branch: &str,
+    ssh_command: Option<&str>,
+    status: &PublishStatus,
+    reporter: &PublishProgressReporter,
+) -> Result<bool, String> {
+    let persistent_root = content_git_repository_root()?;
+    if persistent_root.join(".git").exists()
+        && content_git_repository_matches(&persistent_root, remote, content_branch, ssh_command)
+    {
+        copy_directory_contents(&persistent_root, pull_root)?;
+        configure_content_git_remote(pull_root, remote, ssh_command)?;
+        configure_content_git_author(pull_root)?;
+        return Ok(true);
+    }
+
+    ensure_git_success(
+        run_git_in(pull_root, &["init"])?,
+        "initialize temporary content pull repository",
+    )?;
+    configure_content_git_remote(pull_root, remote, ssh_command)?;
+    configure_content_git_author(pull_root)?;
+
+    if !status.branch_exists {
+        return Err("远端内容分支不存在，无法建立拉取基线。".to_string());
+    }
+
+    let remote_ref = format!("refs/heads/{content_branch}");
+    let mut last_fetch_percent = None;
+    ensure_git_success(
+        run_git_in_with_ssh_progress(
+            pull_root,
+            &["fetch", "--progress", "--depth=1", "origin", &remote_ref],
+            ssh_command,
+            |line| {
+                emit_git_transfer_progress(
+                    reporter,
+                    24,
+                    10,
+                    "fetch",
+                    "正在拉取远端内容分支",
+                    line,
+                    &mut last_fetch_percent,
+                );
+            },
+        )?,
+        "fetch temporary content pull baseline",
+    )?;
+    ensure_git_success(
+        run_git_in(pull_root, &["checkout", "-B", content_branch, "FETCH_HEAD"])?,
+        "checkout temporary content pull baseline",
+    )?;
+    Ok(false)
+}
+
+fn refresh_content_git_repository_baseline(
+    remote: &str,
+    content_branch: &str,
+    ssh_command: Option<&str>,
+    _status: &PublishStatus,
+    files: &ContentSourceFileMap,
+    reporter: &PublishProgressReporter,
+) -> Result<(), String> {
+    validate_content_source_health(files, None, false)?;
+
+    let repo_root = content_git_repository_root()?;
+    if repo_root.exists() {
+        clear_path(&repo_root)?;
+    }
+    fs::create_dir_all(&repo_root)
+        .map_err(|error| format!("failed to create content git repository: {error}"))?;
+    ensure_git_success(
+        run_git_in(&repo_root, &["init"])?,
+        "initialize refreshed content git repository",
+    )?;
+    configure_content_git_remote(&repo_root, remote, ssh_command)?;
+    configure_content_git_author(&repo_root)?;
+
+    let remote_ref = format!("refs/heads/{content_branch}");
+    let mut last_fetch_percent = None;
+    ensure_git_success(
+        run_git_in_with_ssh_progress(
+            &repo_root,
+            &["fetch", "--progress", "--depth=1", "origin", &remote_ref],
+            ssh_command,
+            |line| {
+                emit_git_transfer_progress(
+                    reporter,
+                    64,
+                    6,
+                    "fetch",
+                    "正在刷新本地同步基线",
+                    line,
+                    &mut last_fetch_percent,
+                );
+            },
+        )?,
+        "fetch refreshed content baseline",
+    )?;
+    ensure_git_success(
+        run_git_in(
+            &repo_root,
+            &["checkout", "-B", content_branch, "FETCH_HEAD"],
+        )?,
+        "checkout refreshed content baseline",
+    )?;
+
+    clear_content_git_worktree(&repo_root)?;
+    write_content_source_files(&repo_root, files)?;
+    write_content_branch_workflow(&repo_root, content_branch)?;
+    ensure_git_success(
+        run_git_in(&repo_root, &["add", "--all"])?,
+        "stage refreshed content baseline",
+    )?;
+    let staged = run_git_in(&repo_root, &["diff", "--cached", "--quiet"])?;
+    if !staged.success {
+        ensure_git_success(
+            run_git_in(
+                &repo_root,
+                &["commit", "-m", "Update local content after pull"],
+            )?,
+            "commit refreshed content baseline",
+        )?;
+    }
+    Ok(())
+}
+
+fn pull_content_git_branch(
+    remote: &str,
+    content_branch: &str,
+    ssh_command: Option<&str>,
+    status: &PublishStatus,
+    conflict_strategy: ContentSyncConflictStrategy,
+    conflict_resolutions: &BTreeMap<String, ContentSyncConflictResolution>,
+    allow_risky_content_sync: bool,
+    reporter: &PublishProgressReporter,
+) -> Result<GitCommandResult, String> {
+    if !status.branch_exists {
+        return Err("远端内容分支还不存在，无法拉取。请先使用同步初始化该分支。".to_string());
+    }
+
+    let pull_directory = TemporaryPublishDirectory::create()?;
+    let pull_root = pull_directory.path();
+    let has_local_baseline = prepare_pull_git_repository(
+        pull_root,
+        remote,
+        content_branch,
+        ssh_command,
+        status,
+        reporter,
+    )?;
+
+    if has_git_merge_in_progress(pull_root) {
+        resolve_content_git_merge(pull_root, conflict_strategy, conflict_resolutions, reporter)?;
+    } else {
+        let workspace_files = collect_content_source_files(&get_workspace_root()?)?;
+        if !has_local_baseline
+            && is_initialized_content_source(&workspace_files)
+            && !allow_risky_content_sync
+        {
+            return Err(format_content_sync_risk_error(
+                "missing-local-baseline",
+                "缺少本地同步基线",
+                "没有找到上一次同步留下的本地 Git 基线。继续拉取会以远端内容为准写回本地内容库；如果这是刚安装的新编辑器且你确认远端是最新内容，可以继续。",
+            ));
+        }
+        if !has_local_baseline && allow_risky_content_sync {
+            reporter.emit(
+                34,
+                "baseline",
+                "已确认基线缺失风险",
+                "将使用远端内容作为本次同步结果，并刷新本地同步基线。",
+                "warning",
+            );
+        }
+        if has_local_baseline && is_initialized_content_source(&workspace_files) {
+            stage_workspace_content_in_git_repo(
+                pull_root,
+                content_branch,
+                "Save local content before pull",
+                allow_risky_content_sync,
+                reporter,
+            )?;
+            fetch_and_merge_content_branch(
+                pull_root,
+                content_branch,
+                ssh_command,
+                conflict_strategy,
+                conflict_resolutions,
+                reporter,
+            )?;
+        }
+    }
+
+    let merged_files = sync_content_git_repo_back_to_workspace(pull_root, reporter)?;
+    refresh_content_git_repository_baseline(
+        remote,
+        content_branch,
+        ssh_command,
+        status,
+        &merged_files,
+        reporter,
+    )?;
+
+    Ok(GitCommandResult {
+        success: true,
+        stdout: format!("已从 {remote} 的内容分支 {content_branch} 通过 Git 合并到本地。"),
+        stderr: String::new(),
+    })
+}
+
+fn collect_content_source_files(root: &Path) -> Result<ContentSourceFileMap, String> {
+    let mut files = BTreeMap::new();
+    for source_root in CONTENT_SOURCE_ROOTS {
+        let path = root.join(source_root);
+        if !path.exists() {
+            continue;
+        }
+        collect_content_source_files_recursive(root, &path, &mut files)?;
+    }
+    Ok(files)
+}
+
+fn is_initialized_content_source(files: &ContentSourceFileMap) -> bool {
+    files.contains_key("content/site/site.config.json")
+        || files.contains_key("content/site/categories.json")
+}
+
+fn validate_content_source_health(
+    files: &ContentSourceFileMap,
+    previous_files: Option<&ContentSourceFileMap>,
+    allow_risky_content_sync: bool,
+) -> Result<(), String> {
+    if !is_initialized_content_source(files) {
+        return Err(
+            "本地内容仓缺少 content/site/site.config.json，已停止同步以避免覆盖远端。".to_string(),
+        );
+    }
+
+    let Some(previous_files) = previous_files else {
+        return Ok(());
+    };
+    let previous_count = previous_files.len();
+    if previous_count < 10 {
+        return Ok(());
+    }
+
+    let deleted_count = previous_files
+        .keys()
+        .filter(|path| !files.contains_key(*path))
+        .count();
+    if deleted_count * 2 > previous_count && !allow_risky_content_sync {
+        return Err(format_content_sync_risk_error(
+            "large-local-deletion",
+            "检测到大量本地删除",
+            &format!(
+                "本地内容相比同步基线少了 {deleted_count}/{previous_count} 个文件。继续同步会把这些删除作为正式变更推送到远端；如果这是有意清理，可以确认后继续。"
+            ),
+        ));
+    }
+
+    Ok(())
+}
+
+fn collect_content_source_files_recursive(
+    root: &Path,
+    path: &Path,
+    files: &mut ContentSourceFileMap,
+) -> Result<(), String> {
+    let metadata = fs::metadata(path).map_err(|error| {
+        format!(
+            "failed to inspect content source {}: {error}",
+            path.display()
+        )
+    })?;
+    if metadata.is_file() {
+        let relative_path = normalize_relative_path(path.strip_prefix(root).map_err(|error| {
+            format!(
+                "failed to resolve content source path {} under {}: {error}",
+                path.display(),
+                root.display()
+            )
+        })?);
+        let bytes = fs::read(path).map_err(|error| {
+            format!("failed to read content source {}: {error}", path.display())
+        })?;
+        files.insert(relative_path, bytes);
+        return Ok(());
+    }
+
+    if !metadata.is_dir() {
+        return Ok(());
+    }
+
+    for entry in fs::read_dir(path).map_err(|error| {
+        format!(
+            "failed to read content source directory {}: {error}",
+            path.display()
+        )
+    })? {
+        let entry =
+            entry.map_err(|error| format!("failed to inspect content source entry: {error}"))?;
+        collect_content_source_files_recursive(root, &entry.path(), files)?;
+    }
+    Ok(())
+}
+
+fn merge_content_source_files(
+    base: Option<&ContentSourceFileMap>,
+    local: &ContentSourceFileMap,
+    remote: &ContentSourceFileMap,
+    conflict_strategy: ContentSyncConflictStrategy,
+    conflict_resolutions: &BTreeMap<String, ContentSyncConflictResolution>,
+) -> (
+    ContentSourceFileMap,
+    ContentSourceMergeSummary,
+    Vec<ContentSourceConflictItem>,
+) {
+    let mut merged = BTreeMap::new();
+    let mut conflicts = Vec::new();
+    let mut summary = ContentSourceMergeSummary {
+        remote_only: 0,
+        local_only: 0,
+        local_changes: 0,
+        remote_changes: 0,
+        local_deletions: 0,
+        remote_deletions: 0,
+        conflicts: 0,
+    };
+
+    let mut paths = BTreeMap::<String, ()>::new();
+    for path in local.keys() {
+        paths.insert(path.clone(), ());
+    }
+    for path in remote.keys() {
+        paths.insert(path.clone(), ());
+    }
+    if let Some(base) = base {
+        for path in base.keys() {
+            paths.insert(path.clone(), ());
+        }
+    }
+
+    for path in paths.keys() {
+        let base_value = base.and_then(|items| items.get(path));
+        let local_value = local.get(path);
+        let remote_value = remote.get(path);
+
+        let selected = if base.is_none() {
+            match (local_value, remote_value) {
+                (Some(local_bytes), Some(remote_bytes)) if local_bytes == remote_bytes => {
+                    Some(local_bytes.clone())
+                }
+                (Some(local_bytes), Some(remote_bytes)) => {
+                    summary.conflicts += 1;
+                    if !conflict_resolutions.contains_key(path) {
+                        conflicts.push(content_source_conflict_item(
+                            path,
+                            "首次同步：本地和远端内容不同",
+                            local_value,
+                            remote_value,
+                        ));
+                    }
+                    match conflict_resolutions.get(path) {
+                        Some(ContentSyncConflictResolution::Local) => Some(local_bytes.clone()),
+                        Some(ContentSyncConflictResolution::Remote) => Some(remote_bytes.clone()),
+                        None => match conflict_strategy {
+                            ContentSyncConflictStrategy::Local => Some(local_bytes.clone()),
+                            ContentSyncConflictStrategy::Remote => Some(remote_bytes.clone()),
+                            ContentSyncConflictStrategy::Manual => None,
+                        },
+                    }
+                }
+                (Some(local_bytes), None) => {
+                    summary.local_only += 1;
+                    Some(local_bytes.clone())
+                }
+                (None, Some(remote_bytes)) => {
+                    summary.remote_only += 1;
+                    Some(remote_bytes.clone())
+                }
+                (None, None) => None,
+            }
+        } else if local_value == remote_value {
+            local_value.cloned()
+        } else if base_value == local_value {
+            if remote_value.is_none() && base_value.is_some() {
+                summary.remote_deletions += 1;
+                if conflict_strategy == ContentSyncConflictStrategy::Local {
+                    local_value.cloned()
+                } else {
+                    remote_value.cloned()
+                }
+            } else if remote_value.is_some() {
+                summary.remote_changes += 1;
+                remote_value.cloned()
+            } else {
+                remote_value.cloned()
+            }
+        } else if base_value == remote_value {
+            if local_value.is_none() && base_value.is_some() {
+                summary.local_deletions += 1;
+                if conflict_strategy == ContentSyncConflictStrategy::Remote {
+                    remote_value.cloned()
+                } else {
+                    local_value.cloned()
+                }
+            } else if local_value.is_some() {
+                summary.local_changes += 1;
+                local_value.cloned()
+            } else {
+                local_value.cloned()
+            }
+        } else {
+            summary.conflicts += 1;
+            if !conflict_resolutions.contains_key(path) {
+                conflicts.push(content_source_conflict_item(
+                    path,
+                    content_source_conflict_kind(base_value, local_value, remote_value),
+                    local_value,
+                    remote_value,
+                ));
+            }
+            match conflict_resolutions.get(path) {
+                Some(ContentSyncConflictResolution::Local) => local_value.cloned(),
+                Some(ContentSyncConflictResolution::Remote) => remote_value.cloned(),
+                None => match conflict_strategy {
+                    ContentSyncConflictStrategy::Local => local_value.cloned(),
+                    ContentSyncConflictStrategy::Remote => remote_value.cloned(),
+                    ContentSyncConflictStrategy::Manual => None,
+                },
+            }
+        };
+
+        if let Some(bytes) = selected {
+            merged.insert(path.clone(), bytes);
+        }
+    }
+
+    (merged, summary, conflicts)
+}
+
+fn content_source_conflict_item(
+    path: &str,
+    kind: impl Into<String>,
+    local_value: Option<&Vec<u8>>,
+    remote_value: Option<&Vec<u8>>,
+) -> ContentSourceConflictItem {
+    ContentSourceConflictItem {
+        path: path.to_string(),
+        kind: kind.into(),
+        local: content_source_state_label(local_value),
+        remote: content_source_state_label(remote_value),
+        local_content: content_source_preview(local_value),
+        remote_content: content_source_preview(remote_value),
+    }
+}
+
+fn content_source_conflict_kind(
+    base_value: Option<&Vec<u8>>,
+    local_value: Option<&Vec<u8>>,
+    remote_value: Option<&Vec<u8>>,
+) -> &'static str {
+    match (
+        base_value.is_some(),
+        local_value.is_some(),
+        remote_value.is_some(),
+    ) {
+        (true, false, true) => "本地删除，远端修改",
+        (true, true, false) => "本地修改，远端删除",
+        (true, true, true) => "本地和远端都修改",
+        (false, true, true) => "本地和远端同时新增",
+        _ => "本地和远端变更冲突",
+    }
+}
+
+fn content_source_state_label(value: Option<&Vec<u8>>) -> String {
+    match value {
+        Some(bytes) => {
+            if is_probably_text(bytes) {
+                format!("文本/配置 · {} bytes", bytes.len())
+            } else {
+                format!("二进制资源 · {} bytes", bytes.len())
+            }
+        }
+        None => "已删除".to_string(),
+    }
+}
+
+fn is_probably_text(bytes: &[u8]) -> bool {
+    std::str::from_utf8(bytes).is_ok()
+}
+
+fn content_source_preview(value: Option<&Vec<u8>>) -> String {
+    let Some(bytes) = value else {
+        return "已删除。".to_string();
+    };
+    if !is_probably_text(bytes) {
+        return format!("二进制资源，{} bytes。", bytes.len());
+    }
+
+    let text = String::from_utf8_lossy(bytes);
+    let text = text.trim_end();
+    if text.is_empty() {
+        return "空文件。".to_string();
+    }
+
+    const PREVIEW_LIMIT: usize = 24_000;
+    let preview: String = text.chars().take(PREVIEW_LIMIT).collect();
+    if text.chars().count() > PREVIEW_LIMIT {
+        format!("{preview}\n\n... 内容过长，已截断预览 ...")
+    } else {
+        preview
+    }
+}
+
+fn write_content_source_files(root: &Path, files: &ContentSourceFileMap) -> Result<(), String> {
+    for source_root in CONTENT_SOURCE_ROOTS {
+        let target = join_safe_relative_path(root, source_root)?;
+        if target.exists() {
+            clear_path(&target)?;
+        }
+    }
+
+    for (relative_path, bytes) in files {
+        let target = join_safe_relative_path(root, relative_path)?;
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|error| format!("failed to create {}: {error}", parent.display()))?;
+        }
+        fs::write(&target, bytes).map_err(|error| {
+            format!(
+                "failed to write content source {}: {error}",
+                target.display()
+            )
+        })?;
+    }
+    Ok(())
+}
+
+fn write_content_branch_workflow(root: &Path, content_branch: &str) -> Result<(), String> {
+    let target = join_safe_relative_path(root, CONTENT_BRANCH_WORKFLOW_PATH)?;
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("failed to create {}: {error}", parent.display()))?;
+    }
+    let workflow = CONTENT_BRANCH_WORKFLOW.replace(
+        "__INKNOTE_DEPLOY_BRANCH__",
+        &content_branch.replace('\\', "\\\\").replace('"', "\\\""),
+    );
+    fs::write(&target, workflow)
+        .map_err(|error| format!("failed to write {}: {error}", target.display()))
+}
+
+fn join_safe_relative_path(root: &Path, relative_path: &str) -> Result<PathBuf, String> {
+    let relative = Path::new(relative_path);
+    if relative.is_absolute()
+        || relative.components().any(|component| {
+            matches!(
+                component,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
+        })
+    {
+        return Err(format!("invalid content source path: {relative_path}"));
+    }
+    Ok(root.join(relative))
+}
+
+fn normalize_relative_path(path: &Path) -> String {
+    path.components()
+        .filter_map(|component| match component {
+            Component::Normal(value) => Some(value.to_string_lossy().replace('\\', "/")),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 fn pull_remote_content_inner(
     request: &PullRemoteContentRequest,
     reporter: &PublishProgressReporter,
 ) -> Result<GitCommandResult, String> {
-    let (remote, branch) = validate_publish_target(&request.remote, &request.branch)?;
+    let _sync_lock = acquire_content_sync_lock("pull")?;
+    let remote = validate_remote_repository(&request.remote)?;
+    let branch = validate_content_branch(
+        request
+            .content_branch
+            .as_deref()
+            .unwrap_or(request.branch.as_str()),
+    )?;
     let ssh_key_path = request.ssh_key_path.trim();
     let conflict_strategy = ContentSyncConflictStrategy::parse(&request.conflict_strategy)?;
+    let conflict_resolutions =
+        parse_content_sync_conflict_resolutions(request.conflict_resolutions.as_ref())?;
+    let allow_risky_content_sync = request.allow_risky_content_sync.unwrap_or(false);
     let ssh_command = create_git_ssh_command((!ssh_key_path.is_empty()).then_some(ssh_key_path))?;
 
+    let content_status = get_publish_status_with_ssh(
+        remote.clone(),
+        branch.clone(),
+        (!ssh_key_path.is_empty()).then_some(ssh_key_path),
+    )?;
+    pull_content_git_branch(
+        &remote,
+        &branch,
+        ssh_command.as_deref(),
+        &content_status,
+        conflict_strategy,
+        &conflict_resolutions,
+        allow_risky_content_sync,
+        reporter,
+    )
+}
+
+/*
     reporter.emit(
         14,
         "prepare",
@@ -1041,7 +2641,7 @@ fn pull_remote_content_inner(
     reporter.emit(
         25,
         "fetch",
-        "正在拉取远端发布分支",
+        "正在拉取远端内容分支",
         format!("分支：{branch}"),
         "info",
     );
@@ -1056,7 +2656,7 @@ fn pull_remote_content_inner(
     reporter.emit(
         42,
         "fetch",
-        "远端分支拉取完成",
+        "远端内容分支拉取完成",
         format_git_result(&fetched),
         "success",
     );
@@ -1068,74 +2668,64 @@ fn pull_remote_content_inner(
 
     reporter.emit(
         52,
-        "manifest",
-        "正在读取远端内容清单",
-        sync_root.join("inknote-content.json").display().to_string(),
+        "merge",
+        "正在合并内容源",
+        format!("冲突处理：{}", conflict_strategy.label()),
         "info",
     );
-    let payload = read_runtime_content_payload_from_artifact_root(sync_root)?;
-
+    let workspace_root = get_workspace_root()?;
+    let local_files = collect_content_source_files(&workspace_root)?;
+    let remote_files = collect_content_source_files(sync_root)?;
+    if !is_initialized_content_source(&remote_files) {
+        return Err("远端内容分支还没有 InkNote 内容，已停止拉取，避免覆盖本地。请使用“同步”将本地内容初始化到该分支。".to_string());
+    }
+    let cache_root = content_sync_cache_root()?;
+    let base_files = if cache_root.is_dir() {
+        Some(collect_content_source_files(&cache_root)?)
+    } else {
+        None
+    };
+    let (merged_files, merge_summary, conflicts) = merge_content_source_files(
+        base_files.as_ref(),
+        &local_files,
+        &remote_files,
+        conflict_strategy,
+        &conflict_resolutions,
+    );
+    if conflict_strategy == ContentSyncConflictStrategy::Manual && !conflicts.is_empty() {
+        return Err(format_content_sync_conflict_error(&conflicts)?);
+    }
     reporter.emit(
         65,
-        "content",
-        "正在写入本地内容库",
-        format!(
-            "远端独有会新增，本地独有会保留；冲突时使用{}。",
-            conflict_strategy.label()
-        ),
-        "info",
+        "merge",
+        "内容源合并完成",
+        merge_summary.format(conflict_strategy),
+        if merge_summary.conflicts > 0 {
+            "warning"
+        } else {
+            "success"
+        },
     );
-    restore_runtime_content_payload(&payload, conflict_strategy)?;
+    write_content_source_files(&workspace_root, &merged_files)?;
+    write_content_source_files(&cache_root, &merged_files)?;
     reporter.emit(
         80,
         "content",
         "本地内容库已更新",
-        "远端内容已经合并写入 content/。",
-        "success",
-    );
-
-    reporter.emit(
-        86,
-        "assets",
-        "正在同步公开资源",
-        "合并图片、图库、slides 与生成资源，不删除本地独有文件。",
-        "info",
-    );
-    restore_runtime_public_assets(sync_root, conflict_strategy)?;
-    reporter.emit(
-        96,
-        "assets",
-        "公开资源同步完成",
-        "本地 web 资源已完成合并同步。",
+        "远端内容已经按内容分支模型合并写入本地。",
         "success",
     );
 
     Ok(GitCommandResult {
         success: true,
         stdout: format!(
-            "已从 {remote} 的 {branch} 分支合并同步内容到本地，冲突策略：{}。",
+            "已从 {remote} 的内容分支 {branch} 合并同步到本地，冲突处理：{}。",
             conflict_strategy.label()
         ),
         stderr: String::new(),
     })
 }
-
-fn read_runtime_content_payload_from_artifact_root(
-    artifact_root: &Path,
-) -> Result<RuntimeContentPayload, String> {
-    let manifest_path = artifact_root.join("inknote-content.json");
-    if !manifest_path.is_file() {
-        return Err(
-            "远端分支中没有找到 inknote-content.json，请确认该分支是 InkNote 发布产物。"
-                .to_string(),
-        );
-    }
-
-    let manifest = fs::read_to_string(&manifest_path)
-        .map_err(|error| format!("failed to read {}: {error}", manifest_path.display()))?;
-    serde_json::from_str(manifest.trim_start_matches('\u{feff}'))
-        .map_err(|error| format!("failed to parse {}: {error}", manifest_path.display()))
-}
+*/
 
 fn publish_content_changes_inner(
     request: &PublishSiteRequest,
@@ -2426,8 +4016,28 @@ impl Drop for TemporaryPublishDirectory {
 }
 
 fn validate_publish_target(remote: &str, branch: &str) -> Result<(String, String), String> {
-    let remote = remote.trim();
+    let remote = validate_remote_repository(remote)?;
     let branch = branch.trim();
+    if branch.is_empty() {
+        return Err("请填写发布分支。".to_string());
+    }
+    if branch.eq_ignore_ascii_case("main") || branch.eq_ignore_ascii_case("master") {
+        return Err("发布器会镜像整个分支，请使用 gh-pages 等专用部署分支。".to_string());
+    }
+
+    let command_directory = std::env::temp_dir();
+    ensure_git_success(
+        run_git_in(
+            &command_directory,
+            &["check-ref-format", "--branch", branch],
+        )?,
+        "validate deployment branch",
+    )?;
+    Ok((remote, branch.to_string()))
+}
+
+fn validate_remote_repository(remote: &str) -> Result<String, String> {
+    let remote = remote.trim();
     if remote.is_empty() {
         return Err("请填写远程仓库地址。".to_string());
     }
@@ -2444,11 +4054,13 @@ fn validate_publish_target(remote: &str, branch: &str) -> Result<(String, String
             );
         }
     }
+    Ok(remote.to_string())
+}
+
+fn validate_content_branch(branch: &str) -> Result<String, String> {
+    let branch = branch.trim();
     if branch.is_empty() {
-        return Err("请填写发布分支。".to_string());
-    }
-    if branch.eq_ignore_ascii_case("main") || branch.eq_ignore_ascii_case("master") {
-        return Err("发布器会镜像整个分支，请使用 gh-pages 等专用部署分支。".to_string());
+        return Err("请填写内容分支。".to_string());
     }
 
     let command_directory = std::env::temp_dir();
@@ -2457,9 +4069,9 @@ fn validate_publish_target(remote: &str, branch: &str) -> Result<(String, String
             &command_directory,
             &["check-ref-format", "--branch", branch],
         )?,
-        "validate deployment branch",
+        "validate content branch",
     )?;
-    Ok((remote.to_string(), branch.to_string()))
+    Ok(branch.to_string())
 }
 
 fn create_git_ssh_command(ssh_key_path: Option<&str>) -> Result<Option<String>, String> {
@@ -2553,13 +4165,20 @@ fn create_runtime_web_artifact(base_path: &str) -> Result<TemporaryPublishDirect
 fn create_runtime_content_payload() -> Result<RuntimeContentPayload, String> {
     let content = get_content_root()?;
     Ok(RuntimeContentPayload {
-        navigation: read_json_value(&content.join("site/navigation.json"))?,
+        navigation: read_optional_json_value(
+            &content.join("site/navigation.json"),
+            empty_json_array(),
+        )?,
         site_config: read_json_value(&content.join("site/site.config.json"))?,
         categories: read_json_value(&content.join("site/categories.json"))?,
         markdown: read_markdown_collection(&content, "markdown")?,
         inknotes: read_markdown_collection(&content, "inknotes")?,
         inknote_projects: read_inknote_project_collection(&content)?,
     })
+}
+
+fn empty_json_array() -> serde_json::Value {
+    serde_json::Value::Array(Vec::new())
 }
 
 fn create_runtime_rss_feed() -> Result<String, String> {
@@ -2987,190 +4606,6 @@ fn summarize_runtime_manifest(artifact_root: &Path) -> Result<String, String> {
     ))
 }
 
-fn restore_runtime_content_payload(
-    payload: &RuntimeContentPayload,
-    conflict_strategy: ContentSyncConflictStrategy,
-) -> Result<(), String> {
-    write_json_content_file(
-        "site/navigation.json",
-        &payload.navigation,
-        conflict_strategy,
-    )?;
-    write_json_content_file(
-        "site/site.config.json",
-        &payload.site_config,
-        conflict_strategy,
-    )?;
-    write_json_content_file(
-        "site/categories.json",
-        &payload.categories,
-        conflict_strategy,
-    )?;
-
-    for (path, contents) in &payload.markdown {
-        restore_manifest_content_file(path, contents, conflict_strategy)?;
-    }
-    for (path, contents) in &payload.inknotes {
-        restore_manifest_content_file(path, contents, conflict_strategy)?;
-    }
-    for (path, contents) in &payload.inknote_projects {
-        restore_manifest_content_file(path, contents, conflict_strategy)?;
-    }
-
-    Ok(())
-}
-
-fn write_json_content_file(
-    relative_path: &str,
-    value: &serde_json::Value,
-    conflict_strategy: ContentSyncConflictStrategy,
-) -> Result<(), String> {
-    let serialized = serde_json::to_string_pretty(value)
-        .map_err(|error| format!("failed to serialize content/{relative_path}: {error}"))?;
-    write_content_file_with_strategy(relative_path, &format!("{serialized}\n"), conflict_strategy)
-}
-
-fn restore_manifest_content_file(
-    path: &str,
-    contents: &str,
-    conflict_strategy: ContentSyncConflictStrategy,
-) -> Result<(), String> {
-    let relative_path = path
-        .strip_prefix("content/")
-        .ok_or_else(|| format!("invalid runtime content path: {path}"))?;
-    write_content_file_with_strategy(relative_path, contents, conflict_strategy)
-}
-
-fn write_content_file_with_strategy(
-    relative_path: &str,
-    contents: &str,
-    conflict_strategy: ContentSyncConflictStrategy,
-) -> Result<(), String> {
-    let resolved = resolve_content_path(relative_path)?;
-    if resolved.exists() {
-        if resolved.is_dir() {
-            if conflict_strategy == ContentSyncConflictStrategy::Local {
-                return Ok(());
-            }
-            fs::remove_dir_all(&resolved)
-                .map_err(|error| format!("failed to replace content/{relative_path}: {error}"))?;
-        } else {
-            let current = fs::read_to_string(&resolved).unwrap_or_default();
-            if current == contents || conflict_strategy == ContentSyncConflictStrategy::Local {
-                return Ok(());
-            }
-        }
-    }
-
-    ensure_parent_directory(&resolved.to_string_lossy())?;
-    fs::write(&resolved, contents)
-        .map_err(|error| format!("failed to restore content/{relative_path}: {error}"))
-}
-
-fn restore_runtime_public_assets(
-    artifact_root: &Path,
-    conflict_strategy: ContentSyncConflictStrategy,
-) -> Result<(), String> {
-    let public_root = get_workspace_root()?.join("apps/web/public");
-    fs::create_dir_all(&public_root)
-        .map_err(|error| format!("failed to create public asset directory: {error}"))?;
-
-    for directory in [
-        "content-images",
-        "content-slides",
-        "card-images",
-        "generated",
-    ] {
-        merge_public_asset_path(
-            &artifact_root.join(directory),
-            &public_root.join(directory),
-            conflict_strategy,
-        )?;
-    }
-    for file in ["blog-avatar.jpg", "blog-header-bg.png"] {
-        merge_public_asset_path(
-            &artifact_root.join(file),
-            &public_root.join(file),
-            conflict_strategy,
-        )?;
-    }
-
-    Ok(())
-}
-
-fn merge_public_asset_path(
-    source: &Path,
-    target: &Path,
-    conflict_strategy: ContentSyncConflictStrategy,
-) -> Result<(), String> {
-    if !source.exists() {
-        return Ok(());
-    }
-
-    if !target.exists() {
-        return copy_public_asset_path(source, target);
-    }
-
-    let source_metadata = fs::metadata(source)
-        .map_err(|error| format!("failed to inspect {}: {error}", source.display()))?;
-    let target_metadata = fs::metadata(target)
-        .map_err(|error| format!("failed to inspect {}: {error}", target.display()))?;
-
-    if source_metadata.is_dir() && target_metadata.is_dir() {
-        for entry in fs::read_dir(source).map_err(|error| {
-            format!(
-                "failed to read public asset directory {}: {error}",
-                source.display()
-            )
-        })? {
-            let entry =
-                entry.map_err(|error| format!("failed to inspect public asset entry: {error}"))?;
-            merge_public_asset_path(
-                &entry.path(),
-                &target.join(entry.file_name()),
-                conflict_strategy,
-            )?;
-        }
-        return Ok(());
-    }
-
-    if source_metadata.is_file() && target_metadata.is_file() {
-        let source_bytes = fs::read(source).map_err(|error| {
-            format!("failed to read public asset {}: {error}", source.display())
-        })?;
-        let target_bytes = fs::read(target).map_err(|error| {
-            format!("failed to read public asset {}: {error}", target.display())
-        })?;
-        if source_bytes == target_bytes || conflict_strategy == ContentSyncConflictStrategy::Local {
-            return Ok(());
-        }
-        ensure_parent_directory(&target.to_string_lossy())?;
-        fs::write(target, source_bytes).map_err(|error| {
-            format!(
-                "failed to overwrite public asset {} from {}: {error}",
-                target.display(),
-                source.display()
-            )
-        })?;
-        return Ok(());
-    }
-
-    if conflict_strategy == ContentSyncConflictStrategy::Local {
-        return Ok(());
-    }
-
-    clear_path(target)?;
-    copy_public_asset_path(source, target)
-}
-
-fn copy_public_asset_path(source: &Path, target: &Path) -> Result<(), String> {
-    if source.is_dir() {
-        copy_directory_contents(source, target)
-    } else {
-        copy_file_overwriting(source, target)
-    }
-}
-
 fn clear_path(path: &Path) -> Result<(), String> {
     make_path_writable_recursive(path)?;
     if path.is_dir() {
@@ -3188,6 +4623,17 @@ fn read_json_value(path: &Path) -> Result<serde_json::Value, String> {
     let raw = raw.trim_start_matches('\u{feff}');
     serde_json::from_str(raw)
         .map_err(|error| format!("failed to parse {}: {error}", path.display()))
+}
+
+fn read_optional_json_value(
+    path: &Path,
+    fallback: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    if !path.exists() {
+        return Ok(fallback);
+    }
+
+    read_json_value(path)
 }
 
 fn read_markdown_collection(
@@ -3760,45 +5206,37 @@ fn apply_git_system_proxy_env(_command: &mut Command) {}
 
 #[cfg(target_os = "windows")]
 fn describe_git_system_proxy(remote: &str) -> String {
-    let mut lines: Vec<String> = Vec::new();
-    match read_windows_system_proxy_env() {
-        Some(proxy_env) => {
-            lines.push("系统代理：已读取并注入给 Git".to_string());
-            if let Some(value) = proxy_env.http_proxy.as_ref() {
-                lines.push(format!("HTTP：{value}"));
-            }
-            if let Some(value) = proxy_env.https_proxy.as_ref() {
-                lines.push(format!("HTTPS：{value}"));
-            }
-            if let Some(value) = proxy_env.all_proxy.as_ref() {
-                lines.push(format!("ALL：{value}"));
-            }
-            if let Some(value) = proxy_env.no_proxy.as_ref() {
-                lines.push(format!("忽略：{value}"));
-            }
-        }
-        None => {
-            lines.push("系统代理：未启用或未读取到，Git 将使用自身配置/进程环境变量。".to_string());
-        }
-    }
+    let has_system_proxy = read_windows_system_proxy_env().is_some();
 
     if is_ssh_remote(remote) {
-        lines.push("远程类型：SSH，HTTP/HTTPS 系统代理不会直接代理 SSH。".to_string());
-    } else if remote.starts_with("http://") || remote.starts_with("https://") {
-        lines.push("远程类型：HTTPS/HTTP，Git 会使用上述代理环境。".to_string());
-    } else {
-        lines.push("远程类型：本地路径或其它协议。".to_string());
+        return if has_system_proxy {
+            "代理：已读取系统代理，SSH 连接由 Git/SSH 配置处理。".to_string()
+        } else {
+            "代理：未读取到系统代理，SSH 连接由 Git/SSH 配置处理。".to_string()
+        };
     }
 
-    lines.join("\n")
+    if remote.starts_with("http://") || remote.starts_with("https://") {
+        return if has_system_proxy {
+            "代理：已读取系统代理并注入 Git。".to_string()
+        } else {
+            "代理：未启用系统代理，Git 使用自身配置。".to_string()
+        };
+    }
+
+    if has_system_proxy {
+        "代理：已读取系统代理。".to_string()
+    } else {
+        "代理：未启用系统代理。".to_string()
+    }
 }
 
 #[cfg(not(target_os = "windows"))]
 fn describe_git_system_proxy(remote: &str) -> String {
     if is_ssh_remote(remote) {
-        "系统代理：当前平台未自动读取系统代理；远程类型：SSH。".to_string()
+        "代理：SSH 连接由 Git/SSH 配置处理。".to_string()
     } else {
-        "系统代理：当前平台未自动读取系统代理，Git 将使用自身配置/进程环境变量。".to_string()
+        "代理：Git 使用自身配置/进程环境变量。".to_string()
     }
 }
 
@@ -4082,6 +5520,62 @@ mod tests {
 
         let parsed = read_json_value(&path).unwrap();
         assert_eq!(parsed[0]["label"], "Home");
+    }
+
+    #[test]
+    fn local_priority_keeps_local_files_when_remote_deleted_them() {
+        let mut base = ContentSourceFileMap::new();
+        base.insert("content/markdown/a/index.md".to_string(), b"old".to_vec());
+        let local = base.clone();
+        let remote = ContentSourceFileMap::new();
+
+        let (merged, summary, conflicts) = merge_content_source_files(
+            Some(&base),
+            &local,
+            &remote,
+            ContentSyncConflictStrategy::Local,
+            &BTreeMap::new(),
+        );
+
+        assert_eq!(
+            merged.get("content/markdown/a/index.md"),
+            Some(&b"old".to_vec())
+        );
+        assert_eq!(summary.remote_deletions, 1);
+        assert!(conflicts.is_empty());
+    }
+
+    #[test]
+    fn remote_priority_keeps_remote_files_when_local_deleted_them() {
+        let mut base = ContentSourceFileMap::new();
+        base.insert("content/markdown/a/index.md".to_string(), b"old".to_vec());
+        let local = ContentSourceFileMap::new();
+        let remote = base.clone();
+
+        let (merged, summary, conflicts) = merge_content_source_files(
+            Some(&base),
+            &local,
+            &remote,
+            ContentSyncConflictStrategy::Remote,
+            &BTreeMap::new(),
+        );
+
+        assert_eq!(
+            merged.get("content/markdown/a/index.md"),
+            Some(&b"old".to_vec())
+        );
+        assert_eq!(summary.local_deletions, 1);
+        assert!(conflicts.is_empty());
+    }
+
+    #[test]
+    fn detects_uninitialized_content_source() {
+        let empty = ContentSourceFileMap::new();
+        assert!(!is_initialized_content_source(&empty));
+
+        let mut initialized = ContentSourceFileMap::new();
+        initialized.insert("content/site/site.config.json".to_string(), b"{}".to_vec());
+        assert!(is_initialized_content_source(&initialized));
     }
 
     #[test]

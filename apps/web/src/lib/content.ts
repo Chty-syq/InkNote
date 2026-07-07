@@ -13,7 +13,6 @@ import {
   sortDocumentsByOrderAndDate,
 } from '@inknote/site-builder';
 import categoriesData from '../../../../content/site/categories.json';
-import navigationData from '../../../../content/site/navigation.json';
 import siteConfigData from '../../../../content/site/site.config.json';
 
 export interface RoutedDocument<TFrontmatter extends ContentFrontmatter> extends ContentDocument<TFrontmatter> {
@@ -33,13 +32,18 @@ export interface ContentIndex {
 }
 
 export interface RuntimeContentPayload {
-  navigation: NavigationItem[];
+  navigation?: NavigationItem[];
   siteConfig: SiteConfig;
   categories: ContentCategory[];
   markdown: Record<string, string>;
   inknotes: Record<string, string>;
   inknoteProjects?: Record<string, string>;
 }
+
+const navigationModules = import.meta.glob('../../../../content/site/navigation.json', {
+  eager: true,
+  import: 'default',
+}) as Record<string, NavigationItem[]>;
 
 const markdownModules = import.meta.glob('../../../../content/markdown/*/index.md', {
   eager: true,
@@ -79,6 +83,23 @@ function normalizeRawModuleMap(modules: Record<string, string> | undefined): Rec
   }
 
   return Object.fromEntries(Object.entries(modules).map(([id, raw]) => [toContentRelativeId(id), raw]));
+}
+
+function readOptionalNavigation(): NavigationItem[] | undefined {
+  return Object.values(navigationModules)[0];
+}
+
+function normalizeNavigation(navigation: NavigationItem[] | undefined, siteConfig: SiteConfig): NavigationItem[] {
+  if (Array.isArray(navigation) && navigation.length > 0) {
+    return navigation.filter((item) => item.label && item.href);
+  }
+
+  return (siteConfig.channels ?? [])
+    .filter((channel) => channel.label && channel.href)
+    .map((channel) => ({
+      label: channel.label,
+      href: channel.href,
+    }));
 }
 
 function toSlugString(value: unknown): string {
@@ -238,7 +259,7 @@ function buildContentIndex(payload: RuntimeContentPayload): ContentIndex {
   ) as Record<string, Array<RoutedDocument<MarkdownFrontmatter | InkNoteFrontmatter>>>;
 
   return {
-    navigation: payload.navigation,
+    navigation: normalizeNavigation(payload.navigation, payload.siteConfig),
     siteConfig: payload.siteConfig,
     categories,
     markdown,
@@ -251,7 +272,7 @@ function buildContentIndex(payload: RuntimeContentPayload): ContentIndex {
 }
 
 export let contentIndex: ContentIndex = buildContentIndex({
-  navigation: navigationData as NavigationItem[],
+  navigation: readOptionalNavigation(),
   siteConfig: siteConfigData as SiteConfig,
   categories: categoriesData as ContentCategory[],
   markdown: markdownModules,

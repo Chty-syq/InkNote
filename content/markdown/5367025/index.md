@@ -1,7 +1,7 @@
 ---
 type: markdown
 title: 3D Rotations with Quaternion
-slug: 5367025
+slug: "5367025"
 date: 2023-11-27
 updatedAt: 2026-06-23 14:02:59
 tags:

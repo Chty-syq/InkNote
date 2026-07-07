@@ -1,7 +1,7 @@
 ---
 type: markdown
 title: Solid Angle
-slug: 2177534
+slug: "2177534"
 date: 2023-09-01
 updatedAt: 2026-06-23 14:15:11
 tags:

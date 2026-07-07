@@ -21,6 +21,7 @@ export interface FriendLinkConfig {
 
 export interface RepositoryConfig {
   remote: string;
+  contentBranch?: string;
   branch: string;
   pagesUrl: string;
   basePath: string;

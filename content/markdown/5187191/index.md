@@ -1,7 +1,7 @@
 ---
 type: markdown
 title: Spherical Trigonometry
-slug: 5187191
+slug: "5187191"
 date: 2023-12-22
 updatedAt: 2026-06-23 13:10:00
 tags:

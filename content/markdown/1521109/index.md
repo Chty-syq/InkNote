@@ -1,7 +1,7 @@
 ---
 type: markdown
 title: 贝塞尔曲线
-slug: 1521109
+slug: "1521109"
 date: 2023-06-29
 updatedAt: 2026-06-23 15:58:11
 tags:

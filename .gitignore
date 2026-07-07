@@ -30,6 +30,7 @@ lerna-debug.log*
 
 # Local caches and temporary files
 .cache/
+.inknote-sync/
 .tmp/
 tmp/
 temp/

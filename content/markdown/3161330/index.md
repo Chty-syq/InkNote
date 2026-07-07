@@ -1,7 +1,7 @@
 ---
 type: markdown
 title: Quartic Equation
-slug: 3161330
+slug: "3161330"
 date: 2023-09-21
 updatedAt: 2026-06-23 14:40:31
 tags:
