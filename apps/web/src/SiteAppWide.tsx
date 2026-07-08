@@ -103,10 +103,16 @@ type ResolvedCardImageConfig = {
   manifest: string;
 };
 
+type CardGalleryImageFocus = {
+  x: number;
+  y: number;
+};
+
 type CardGalleryImage = {
   id: string;
   path: string;
   name: string;
+  focus?: CardGalleryImageFocus;
 };
 
 type CardImageAssignment = Map<string, CardGalleryImage>;
@@ -346,6 +352,28 @@ function toAssetPath(path: string): string {
   return BASE_PATH ? `${BASE_PATH}${normalized}` : normalized;
 }
 
+function clampCardImageFocus(value: unknown): number {
+  const numeric = typeof value === 'number' && Number.isFinite(value) ? value : 50;
+  return Math.min(100, Math.max(0, Math.round(numeric * 10) / 10));
+}
+
+function normalizeCardImageFocus(value: unknown): CardGalleryImageFocus {
+  const input = value && typeof value === 'object' ? (value as Partial<CardGalleryImageFocus>) : {};
+  return {
+    x: clampCardImageFocus(input.x),
+    y: clampCardImageFocus(input.y),
+  };
+}
+
+function formatCardImageObjectPosition(focus: CardGalleryImageFocus | undefined): string | undefined {
+  if (!focus) {
+    return undefined;
+  }
+
+  const normalized = normalizeCardImageFocus(focus);
+  return `${normalized.x}% ${normalized.y}%`;
+}
+
 function normalizeCardGalleryImages(value: unknown): CardGalleryImage[] {
   const input = value && typeof value === 'object' ? (value as { images?: unknown }) : {};
   if (!Array.isArray(input.images)) {
@@ -359,7 +387,7 @@ function normalizeCardGalleryImages(value: unknown): CardGalleryImage[] {
       if (!image || typeof image !== 'object') {
         return null;
       }
-      const item = image as { id?: unknown; path?: unknown; name?: unknown };
+      const item = image as { id?: unknown; path?: unknown; name?: unknown; focus?: unknown };
       if (typeof item.path !== 'string' || !item.path.trim()) {
         return null;
       }
@@ -369,6 +397,7 @@ function normalizeCardGalleryImages(value: unknown): CardGalleryImage[] {
         id: typeof item.id === 'string' && item.id.trim() ? item.id.trim() : path,
         path,
         name: typeof item.name === 'string' && item.name.trim() ? item.name.trim() : 'cover',
+        focus: normalizeCardImageFocus(item.focus),
       };
     })
     .filter((image): image is CardGalleryImage => {
@@ -777,11 +806,24 @@ function stripMarkdown(source: string): string {
 }
 
 function formatTags(tags: string[] | undefined): string {
-  return tags && tags.length > 0 ? tags.join(' / ') : '未设置标签';
+  return tags && tags.length > 0 ? sortTagList(tags).join(' / ') : '未设置标签';
 }
 
 function normalizeLabel(label: string): string {
   return KNOWN_LABEL_FIXES[label] ?? label;
+}
+
+const TAG_COLLATOR = new Intl.Collator(['zh-Hans-CN', 'en'], { numeric: true, sensitivity: 'base' });
+
+function compareTags(left: string, right: string): number {
+  return (
+    TAG_COLLATOR.compare(left.trim().toLocaleLowerCase(), right.trim().toLocaleLowerCase()) ||
+    left.localeCompare(right)
+  );
+}
+
+function sortTagList(tags: string[]): string[] {
+  return [...tags].sort(compareTags);
 }
 
 function toCategorySubtitle(slug: string): string {
@@ -806,7 +848,7 @@ function toPortalEntry(document: RoutedDocument<MarkdownFrontmatter | InkNoteFro
     categoryLabel,
     typeLabel: document.frontmatter.type === 'inknote' ? 'InkNote' : 'Markdown',
     accentClass: categorySlug ? getCategoryAccentBySlug(categorySlug) : getAccentClass(0),
-    tags: document.frontmatter.tags ?? [],
+    tags: sortTagList(document.frontmatter.tags ?? []),
     summary,
     bodyText,
     searchText: normalizeSearchText(
@@ -1051,7 +1093,7 @@ function buildTagCloud(entries: PortalEntry[]): Array<{ tag: string; count: numb
 
   return [...counts.entries()]
     .map(([tag, count]) => ({ tag, count }))
-    .sort((left, right) => right.count - left.count || left.tag.localeCompare(right.tag))
+    .sort((left, right) => compareTags(left.tag, right.tag))
     .slice(0, 24);
 }
 
@@ -1632,11 +1674,19 @@ function ArticleCard({
   cardImage?: CardGalleryImage | null;
   showCardCover: boolean;
 }) {
+  const cardImageStyle: CSSProperties | undefined = cardImage?.focus
+    ? { objectPosition: formatCardImageObjectPosition(cardImage.focus) }
+    : undefined;
+
   return (
     <article className={`blog-card ${entry.accentClass}${showCardCover ? ' has-cover' : ''}`}>
       {showCardCover ? (
         <SiteLink href={entry.href} navigate={navigate} className="blog-card-cover" aria-label={entry.title}>
-          {cardImage ? <img src={toAssetPath(cardImage.path)} alt="" loading="lazy" /> : <span aria-hidden="true" />}
+          {cardImage ? (
+            <img src={toAssetPath(cardImage.path)} alt="" loading="lazy" style={cardImageStyle} />
+          ) : (
+            <span aria-hidden="true" />
+          )}
         </SiteLink>
       ) : null}
       <div className="blog-card-body">
@@ -2414,7 +2464,7 @@ export default function SiteAppWide() {
         document={note}
         meta={[
           { type: 'date', label: note.frontmatter.date },
-          ...(note.frontmatter.tags ?? []).map((tag) => ({ type: 'tag' as const, label: tag })),
+          ...sortTagList(note.frontmatter.tags ?? []).map((tag) => ({ type: 'tag' as const, label: tag })),
         ]}
         showComments
       />
@@ -2433,7 +2483,7 @@ export default function SiteAppWide() {
           document={note}
           meta={[
             { type: 'date', label: note.frontmatter.date },
-            ...(note.frontmatter.tags ?? []).map((tag) => ({ type: 'tag' as const, label: tag })),
+            ...sortTagList(note.frontmatter.tags ?? []).map((tag) => ({ type: 'tag' as const, label: tag })),
           ]}
           headings={inknoteHeadings}
           content={

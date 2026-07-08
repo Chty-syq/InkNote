@@ -171,7 +171,20 @@ function toDateBadge(date: string): { day: string; month: string } {
 }
 
 function formatTags(tags: string[] | undefined): string {
-  return tags && tags.length > 0 ? tags.join(' / ') : 'untagged';
+  return tags && tags.length > 0 ? sortTagList(tags).join(' / ') : 'untagged';
+}
+
+const TAG_COLLATOR = new Intl.Collator(['zh-Hans-CN', 'en'], { numeric: true, sensitivity: 'base' });
+
+function compareTags(left: string, right: string): number {
+  return (
+    TAG_COLLATOR.compare(left.trim().toLocaleLowerCase(), right.trim().toLocaleLowerCase()) ||
+    left.localeCompare(right)
+  );
+}
+
+function sortTagList(tags: string[]): string[] {
+  return [...tags].sort(compareTags);
 }
 
 function getPrimaryNavigationLabel(item: NavigationItem): string {
@@ -212,7 +225,7 @@ function toPortalEntry(document: RoutedDocument<MarkdownFrontmatter | InkNoteFro
     accentClass: categorySlug ? getCategoryAccentBySlug(categorySlug) : getAccentClass(0),
     summary: document.frontmatter.summary?.trim() || excerpt[0] || 'This entry is still being polished.',
     excerpt: excerpt.length > 0 ? excerpt : ['This entry is still being polished.'],
-    tags: document.frontmatter.tags ?? [],
+    tags: sortTagList(document.frontmatter.tags ?? []),
   };
 }
 
@@ -226,7 +239,7 @@ function buildTagCloud(entries: PortalEntry[]): Array<{ tag: string; count: numb
 
   return [...counts.entries()]
     .map(([tag, count]) => ({ tag, count }))
-    .sort((left, right) => right.count - left.count || left.tag.localeCompare(right.tag))
+    .sort((left, right) => compareTags(left.tag, right.tag))
     .slice(0, 18);
 }
 
@@ -401,7 +414,7 @@ function PortalArticleCard({
           {entry.tags.length > 0 ? (
             <>
               <strong> Tags:</strong>
-              <span>{entry.tags.join(', ')}</span>
+              <span>{sortTagList(entry.tags).join(', ')}</span>
             </>
           ) : null}
         </p>

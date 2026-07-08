@@ -125,19 +125,28 @@ function normalizeDisplayMathContent(value: string): string {
   return ['\\begin{aligned}', lines.join(' \\\\\n'), '\\end{aligned}'].join('\n');
 }
 
-function pushDisplayMathBlock(output: string[], content: string, quoteWrapped: boolean) {
+function getDisplayMathContinuationIndent(beforeOpening: string): string {
+  const match = beforeOpening.match(/^(\s*)(?:[-+*]|\d+[.)])\s+/);
+  if (!match) {
+    return '';
+  }
+
+  return ' '.repeat(match[0].length);
+}
+
+function pushDisplayMathBlock(output: string[], content: string, quoteWrapped: boolean, indent = '') {
   const normalized = normalizeDisplayMathContent(content);
 
   if (quoteWrapped) {
-    output.push('> $$');
+    output.push(`> ${indent}$$`);
     for (const line of normalized.split('\n')) {
-      output.push(line ? `> ${line}` : '>');
+      output.push(line ? `> ${indent}${line}` : `> ${indent}`);
     }
-    output.push('> $$');
+    output.push(`> ${indent}$$`);
     return;
   }
 
-  output.push('$$', normalized, '$$');
+  output.push(`${indent}$$`, ...normalized.split('\n').map((line) => `${indent}${line}`), `${indent}$$`);
 }
 
 function pushMarkdownTextLine(output: string[], content: string, quoteWrapped: boolean) {
@@ -153,23 +162,28 @@ function pushMarkdownLineWithDisplayMath(
   output: string[],
   content: string,
   quoteWrapped: boolean,
-): string[] | null {
+): PendingDisplayMath | null {
   const openingIndex = content.indexOf('$$');
   if (openingIndex < 0) {
     pushMarkdownTextLine(output, content, quoteWrapped);
     return null;
   }
 
-  pushMarkdownTextLine(output, content.slice(0, openingIndex), quoteWrapped);
+  const beforeOpening = content.slice(0, openingIndex);
+  const continuationIndent = getDisplayMathContinuationIndent(beforeOpening);
+  pushMarkdownTextLine(output, beforeOpening, quoteWrapped);
 
   const afterOpening = content.slice(openingIndex + 2);
   const closingIndex = afterOpening.indexOf('$$');
   if (closingIndex < 0) {
     const initialMath = afterOpening.trimStart();
-    return initialMath ? [initialMath] : [];
+    return {
+      lines: initialMath ? [initialMath] : [],
+      indent: continuationIndent,
+    };
   }
 
-  pushDisplayMathBlock(output, afterOpening.slice(0, closingIndex), quoteWrapped);
+  pushDisplayMathBlock(output, afterOpening.slice(0, closingIndex), quoteWrapped, continuationIndent);
   return pushMarkdownLineWithDisplayMath(output, afterOpening.slice(closingIndex + 2), quoteWrapped);
 }
 
@@ -228,6 +242,11 @@ type DivComponentProps = ComponentPropsWithoutRef<'div'> & {
   title?: string;
   type?: string;
   'data-inknote-slides'?: string | boolean;
+};
+
+type PendingDisplayMath = {
+  lines: string[];
+  indent: string;
 };
 
 function getSlidesExtension(src: string, type?: string): string {
@@ -533,7 +552,7 @@ export function normalizeMarkdownForPreview(markdown: string): string {
   const lines = normalizeInlineEquationEnvironments(markdown).split('\n');
   const output: string[] = [];
   let inCodeFence = false;
-  let mathBuffer: string[] | null = null;
+  let mathBuffer: PendingDisplayMath | null = null;
   let mathQuoteWrapped = false;
   let quoteContinuationPending = false;
 
@@ -563,10 +582,10 @@ export function normalizeMarkdownForPreview(markdown: string): string {
         const closingQuoteWrapped: boolean = mathQuoteWrapped;
 
         if (beforeClosing) {
-          mathBuffer.push(beforeClosing);
+          mathBuffer.lines.push(beforeClosing);
         }
 
-        pushDisplayMathBlock(output, mathBuffer.join('\n'), mathQuoteWrapped);
+        pushDisplayMathBlock(output, mathBuffer.lines.join('\n'), mathQuoteWrapped, mathBuffer.indent);
         mathBuffer = null;
         mathQuoteWrapped = false;
         quoteContinuationPending = closingQuoteWrapped;
@@ -580,7 +599,7 @@ export function normalizeMarkdownForPreview(markdown: string): string {
         continue;
       }
 
-      mathBuffer.push(contentLine);
+      mathBuffer.lines.push(contentLine);
       continue;
     }
 
@@ -614,7 +633,7 @@ export function normalizeMarkdownForPreview(markdown: string): string {
   }
 
   if (mathBuffer) {
-    pushDisplayMathBlock(output, mathBuffer.join('\n'), mathQuoteWrapped);
+    pushDisplayMathBlock(output, mathBuffer.lines.join('\n'), mathQuoteWrapped, mathBuffer.indent);
   }
 
   return output.join('\n');

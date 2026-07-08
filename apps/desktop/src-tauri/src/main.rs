@@ -4899,7 +4899,7 @@ fn short_commit(value: &str) -> &str {
     value.get(..7).unwrap_or(value)
 }
 
-fn get_workspace_root() -> Result<PathBuf, String> {
+pub(crate) fn get_workspace_root() -> Result<PathBuf, String> {
     WORKSPACE_ROOT
         .get()
         .cloned()

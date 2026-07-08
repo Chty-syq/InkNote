@@ -45,7 +45,7 @@ import {
   IconWriting,
   IconX,
 } from '@tabler/icons-react';
-import { convertFileSrc, invoke } from '@tauri-apps/api/core';
+import { invoke } from '@tauri-apps/api/core';
 import { relaunch } from '@tauri-apps/plugin-process';
 import { Update } from '@tauri-apps/plugin-updater';
 import type { DownloadEvent } from '@tauri-apps/plugin-updater';
@@ -204,6 +204,7 @@ interface ToastMessage {
   id: number;
   message: string;
   tone: ToastTone;
+  expiresAt: number;
 }
 
 interface EditorSelectionState {
@@ -261,6 +262,7 @@ const USER_GALLERY_MANIFEST_PUBLIC_PATH = '/card-images/gallery/manifest.json';
 const USER_GALLERY_UPLOADS_PUBLIC_PREFIX = '/card-images/gallery/uploads/';
 const LOCAL_PUBLIC_ASSET_PREFIXES = ['/content-images/', '/content-slides/', '/card-images/', '/generated/'];
 const IMAGE_MANAGEMENT_PAGE_SIZE = 15;
+const IMAGE_LOCALIZATION_CONCURRENCY = 4;
 const GALLERY_IMAGE_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'webp', 'gif']);
 const SLIDES_FILE_EXTENSIONS = new Set(['ppt', 'pptx', 'pdf']);
 const DEFAULT_SYNC_MESSAGE = 'Update blog content';
@@ -279,7 +281,7 @@ const TABLER_ICON_OVERRIDES = `
 `;
 
 type SettingsSection = 'basic' | 'images' | 'publish' | 'about';
-type SettingsImageTab = 'external' | 'internal' | 'gallery';
+type SettingsImageTab = 'references' | 'gallery';
 type SiteIntegrationPanel = 'repository' | 'goatcounter' | 'giscus';
 type SiteLinkDragKind = 'friend' | 'tool';
 
@@ -331,12 +333,18 @@ interface ManagedImageAsset {
 
 type ImageLocalizationStatus = 'processing' | 'success' | 'error';
 
+interface GalleryImageFocus {
+  x: number;
+  y: number;
+}
+
 interface GalleryImageItem {
   id: string;
   path: string;
   name: string;
   size?: number;
   uploadedAt?: string;
+  focus?: GalleryImageFocus;
 }
 
 interface GalleryImageManifest {
@@ -348,6 +356,8 @@ interface GalleryImageManifest {
 interface ImagePreviewState {
   src: string;
   title: string;
+  galleryImageKey?: string;
+  focus?: GalleryImageFocus;
 }
 
 interface ImagePageData<T> {
@@ -355,6 +365,8 @@ interface ImagePageData<T> {
   pageCount: number;
   safePage: number;
 }
+
+type PaginationItem = number | 'ellipsis-start' | 'ellipsis-end';
 
 function paginateImageItems<T>(items: T[], page: number): ImagePageData<T> {
   const pageCount = Math.max(1, Math.ceil(items.length / IMAGE_MANAGEMENT_PAGE_SIZE));
@@ -366,6 +378,68 @@ function paginateImageItems<T>(items: T[], page: number): ImagePageData<T> {
     pageCount,
     safePage,
   };
+}
+
+function getPaginationItems(currentPage: number, pageCount: number): PaginationItem[] {
+  if (pageCount <= 7) {
+    return Array.from({ length: pageCount }, (_, index) => index + 1);
+  }
+
+  const pages = new Set<number>([1, pageCount]);
+  for (let page = currentPage - 1; page <= currentPage + 1; page += 1) {
+    if (page > 1 && page < pageCount) {
+      pages.add(page);
+    }
+  }
+  if (currentPage <= 3) {
+    pages.add(2);
+    pages.add(3);
+    pages.add(4);
+  }
+  if (currentPage >= pageCount - 2) {
+    pages.add(pageCount - 3);
+    pages.add(pageCount - 2);
+    pages.add(pageCount - 1);
+  }
+
+  const orderedPages = Array.from(pages).sort((left, right) => left - right);
+  const items: PaginationItem[] = [];
+  for (const page of orderedPages) {
+    const previous = items[items.length - 1];
+    if (typeof previous === 'number' && page - previous > 1) {
+      items.push(previous === 1 ? 'ellipsis-start' : 'ellipsis-end');
+    }
+    items.push(page);
+  }
+
+  return items;
+}
+
+function waitForNextFrame(): Promise<void> {
+  if (typeof window === 'undefined' || typeof window.requestAnimationFrame !== 'function') {
+    return Promise.resolve();
+  }
+
+  return new Promise((resolve) => window.requestAnimationFrame(() => resolve()));
+}
+
+async function runWithConcurrency<T>(
+  items: T[],
+  concurrency: number,
+  worker: (item: T, index: number) => Promise<void>,
+): Promise<void> {
+  let cursor = 0;
+  const workerCount = Math.min(Math.max(1, concurrency), items.length);
+
+  await Promise.all(
+    Array.from({ length: workerCount }, async () => {
+      while (cursor < items.length) {
+        const index = cursor;
+        cursor += 1;
+        await worker(items[index], index);
+      }
+    }),
+  );
 }
 
 function padDatePart(value: number, length = 2): string {
@@ -523,7 +597,7 @@ function getDesktopPublicAssetSource(contentRoot: string | null, source: string)
   }
   const filePath = getPublicAssetFilePath(contentRoot, trimmed);
   if (filePath && isTauri()) {
-    return convertFileSrc(filePath);
+    return `${LOCAL_BLOG_PREVIEW_ORIGIN}${trimmed}`;
   }
   if (trimmed.startsWith('/')) {
     return `${LOCAL_BLOG_PREVIEW_ORIGIN}${trimmed}`;
@@ -541,6 +615,34 @@ function createGalleryImageFileName(sourcePath: string, date: Date, index: numbe
   const nonce = Math.random().toString(36).slice(2, 6).padEnd(4, '0');
   const stem = baseName.replace(/\.[a-z0-9]+$/i, '') || 'image';
   return `gallery-${createAssetTimestamp(date)}-${padDatePart(index + 1)}-${nonce}-${stem}.jpg`;
+}
+
+function clampImageFocusValue(value: unknown): number {
+  const numeric = typeof value === 'number' && Number.isFinite(value) ? value : 50;
+  return Math.min(100, Math.max(0, Math.round(numeric * 10) / 10));
+}
+
+function normalizeGalleryImageFocus(value: unknown): GalleryImageFocus {
+  const input = value && typeof value === 'object' ? (value as Partial<GalleryImageFocus>) : {};
+  return {
+    x: clampImageFocusValue(input.x),
+    y: clampImageFocusValue(input.y),
+  };
+}
+
+function getGalleryImageFocus(image: GalleryImageItem): GalleryImageFocus {
+  return normalizeGalleryImageFocus(image.focus);
+}
+
+function formatGalleryImagePosition(focus: GalleryImageFocus): string {
+  const normalized = normalizeGalleryImageFocus(focus);
+  return `${normalized.x}% ${normalized.y}%`;
+}
+
+function isSameGalleryImageFocus(left: GalleryImageFocus, right: GalleryImageFocus): boolean {
+  const normalizedLeft = normalizeGalleryImageFocus(left);
+  const normalizedRight = normalizeGalleryImageFocus(right);
+  return normalizedLeft.x === normalizedRight.x && normalizedLeft.y === normalizedRight.y;
 }
 
 function normalizeGalleryManifest(value: unknown): GalleryImageManifest {
@@ -561,6 +663,7 @@ function normalizeGalleryManifest(value: unknown): GalleryImageManifest {
                     : getFileNameFromPath(image.path),
                 size: typeof image.size === 'number' ? image.size : undefined,
                 uploadedAt: typeof image.uploadedAt === 'string' ? image.uploadedAt : '',
+                focus: normalizeGalleryImageFocus((image as { focus?: unknown }).focus),
               }
             : null,
         )
@@ -892,6 +995,8 @@ function GalleryImageCard({
 }) {
   const [failed, setFailed] = useState(false);
   const previewSource = getGalleryImagePreviewSource(image.path, contentRoot);
+  const focus = getGalleryImageFocus(image);
+  const objectPosition = formatGalleryImagePosition(focus);
   const title = image.name || getFileNameFromPath(image.path) || '图库图片';
 
   useEffect(() => {
@@ -922,13 +1027,28 @@ function GalleryImageCard({
         role={!selectable && previewSource ? 'button' : undefined}
         tabIndex={!selectable && previewSource ? 0 : undefined}
         title={!selectable && previewSource ? '点击放大预览' : undefined}
-        onClick={!selectable && previewSource ? () => onPreview?.({ src: previewSource, title }) : undefined}
+        onClick={
+          !selectable && previewSource
+            ? () =>
+                onPreview?.({
+                  src: previewSource,
+                  title,
+                  galleryImageKey: getGalleryImageKey(image),
+                  focus,
+                })
+            : undefined
+        }
         onKeyDown={
           !selectable && previewSource
             ? (event) => {
                 if (event.key === 'Enter' || event.key === ' ') {
                   event.preventDefault();
-                  onPreview?.({ src: previewSource, title });
+                  onPreview?.({
+                    src: previewSource,
+                    title,
+                    galleryImageKey: getGalleryImageKey(image),
+                    focus,
+                  });
                 }
               }
             : undefined
@@ -940,6 +1060,7 @@ function GalleryImageCard({
             alt={image.name}
             loading="lazy"
             referrerPolicy="no-referrer"
+            style={{ objectPosition }}
             onError={() => setFailed(true)}
           />
         ) : (
@@ -968,6 +1089,102 @@ function GalleryImageCard({
   );
 }
 
+function GalleryCropEditor({
+  src,
+  title,
+  focus,
+  onChange,
+}: {
+  src: string;
+  title: string;
+  focus: GalleryImageFocus;
+  onChange: (focus: GalleryImageFocus) => void;
+}) {
+  const normalizedFocus = normalizeGalleryImageFocus(focus);
+
+  const updateFromPointer = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const rect = event.currentTarget.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) {
+      return;
+    }
+
+    onChange(
+      normalizeGalleryImageFocus({
+        x: ((event.clientX - rect.left) / rect.width) * 100,
+        y: ((event.clientY - rect.top) / rect.height) * 100,
+      }),
+    );
+  };
+
+  const updateAxis = (axis: keyof GalleryImageFocus, value: string) => {
+    onChange(
+      normalizeGalleryImageFocus({
+        ...normalizedFocus,
+        [axis]: Number(value),
+      }),
+    );
+  };
+
+  return (
+    <div className="notes-image-crop-editor">
+      <div
+        className="notes-image-crop-stage"
+        role="slider"
+        tabIndex={0}
+        aria-label="文章卡片裁剪位置"
+        aria-valuetext={`水平 ${Math.round(normalizedFocus.x)}%，垂直 ${Math.round(normalizedFocus.y)}%`}
+        onPointerDown={(event) => {
+          event.currentTarget.setPointerCapture(event.pointerId);
+          updateFromPointer(event);
+        }}
+        onPointerMove={(event) => {
+          if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+            updateFromPointer(event);
+          }
+        }}
+      >
+        <img
+          src={src}
+          alt={title}
+          draggable={false}
+          style={{ objectPosition: formatGalleryImagePosition(normalizedFocus) }}
+        />
+        <div className="notes-image-crop-shade" aria-hidden="true" />
+        <span
+          className="notes-image-crop-focus"
+          style={{ left: `${normalizedFocus.x}%`, top: `${normalizedFocus.y}%` }}
+          aria-hidden="true"
+        />
+      </div>
+
+      <div className="notes-image-crop-controls">
+        <label>
+          <span>水平</span>
+          <input
+            type="range"
+            min="0"
+            max="100"
+            step="1"
+            value={normalizedFocus.x}
+            onChange={(event) => updateAxis('x', event.target.value)}
+          />
+        </label>
+        <label>
+          <span>垂直</span>
+          <input
+            type="range"
+            min="0"
+            max="100"
+            step="1"
+            value={normalizedFocus.y}
+            onChange={(event) => updateAxis('y', event.target.value)}
+          />
+        </label>
+      </div>
+    </div>
+  );
+}
+
 function ImagePagination({
   page,
   pageCount,
@@ -978,15 +1195,32 @@ function ImagePagination({
   onPageChange: (page: number) => void;
 }) {
   const safePage = Math.min(Math.max(page, 1), pageCount);
+  const paginationItems = getPaginationItems(safePage, pageCount);
 
   return (
     <div className="notes-settings-image-pagination">
       <button type="button" onClick={() => onPageChange(Math.max(1, safePage - 1))} disabled={safePage <= 1}>
         上一页
       </button>
-      <span>
-        {safePage} / {pageCount}
-      </span>
+      <div className="notes-settings-image-page-numbers" aria-label={`第 ${safePage} 页，共 ${pageCount} 页`}>
+        {paginationItems.map((item) =>
+          typeof item === 'number' ? (
+            <button
+              key={item}
+              type="button"
+              className={`notes-settings-image-page-number${item === safePage ? ' active' : ''}`}
+              onClick={() => onPageChange(item)}
+              aria-current={item === safePage ? 'page' : undefined}
+            >
+              {item}
+            </button>
+          ) : (
+            <span key={item} className="notes-settings-image-page-ellipsis" aria-hidden="true">
+              ...
+            </span>
+          ),
+        )}
+      </div>
       <button
         type="button"
         onClick={() => onPageChange(Math.min(pageCount, safePage + 1))}
@@ -1872,6 +2106,19 @@ function splitInlineList(value: string): string[] {
     .filter(Boolean);
 }
 
+const TAG_COLLATOR = new Intl.Collator(['zh-Hans-CN', 'en'], { numeric: true, sensitivity: 'base' });
+
+function compareTags(left: string, right: string): number {
+  return (
+    TAG_COLLATOR.compare(left.trim().toLocaleLowerCase(), right.trim().toLocaleLowerCase()) ||
+    left.localeCompare(right)
+  );
+}
+
+function sortTagList(tags: string[]): string[] {
+  return [...tags].sort(compareTags);
+}
+
 function toUniqueTagList(value: string[]): string[] {
   const seen = new Set<string>();
   const tags: string[] = [];
@@ -1891,7 +2138,7 @@ function toUniqueTagList(value: string[]): string[] {
     tags.push(normalized);
   }
 
-  return tags;
+  return sortTagList(tags);
 }
 
 function getFrontmatterTags(value: unknown): string[] {
@@ -2097,9 +2344,8 @@ export default function NotesWorkbench() {
   const [toolIconLoadingIndex, setToolIconLoadingIndex] = useState<number | null>(null);
   const [isLocalizingImages, setIsLocalizingImages] = useState(false);
   const [imageLocalizationStatus, setImageLocalizationStatus] = useState<Record<string, ImageLocalizationStatus>>({});
-  const [imageSettingsTab, setImageSettingsTab] = useState<SettingsImageTab>('external');
-  const [externalImagePage, setExternalImagePage] = useState(1);
-  const [internalImagePage, setInternalImagePage] = useState(1);
+  const [imageSettingsTab, setImageSettingsTab] = useState<SettingsImageTab>('references');
+  const [managedImagePage, setManagedImagePage] = useState(1);
   const [galleryImages, setGalleryImages] = useState<GalleryImageItem[]>([]);
   const [galleryPage, setGalleryPage] = useState(1);
   const [selectedGalleryImageKeys, setSelectedGalleryImageKeys] = useState<string[]>([]);
@@ -2110,6 +2356,7 @@ export default function NotesWorkbench() {
   const [galleryUploadTotal, setGalleryUploadTotal] = useState(0);
   const [isDeletingGalleryImages, setIsDeletingGalleryImages] = useState(false);
   const [imagePreview, setImagePreview] = useState<ImagePreviewState | null>(null);
+  const [imagePreviewFocus, setImagePreviewFocus] = useState<GalleryImageFocus>({ x: 50, y: 50 });
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [settingsSection, setSettingsSection] = useState<SettingsSection>('basic');
   const [siteIntegrationPanel, setSiteIntegrationPanel] = useState<SiteIntegrationPanel | null>(null);
@@ -2170,6 +2417,9 @@ export default function NotesWorkbench() {
   const linkedNotebookSavedSnapshotRef = useRef('');
   const linkedNotebookSessionIdRef = useRef<number | null>(null);
   const previewSyncFrameRef = useRef<number | null>(null);
+  const editorScrollRatioRef = useRef(0);
+  const previewOnlyScrollRatioRef = useRef(0);
+  const wasMarkdownPreviewOnlyRef = useRef(false);
   const siteConfigLoadedRef = useRef(false);
   const siteConfigSnapshotRef = useRef('');
   const siteConfigSaveTimerRef = useRef<number | null>(null);
@@ -2182,7 +2432,7 @@ export default function NotesWorkbench() {
   const pullLogViewRef = useRef<HTMLDivElement | null>(null);
   const pendingDesktopUpdateRef = useRef<Update | null>(null);
   const toastIdRef = useRef(0);
-  const toastTimersRef = useRef<Array<ReturnType<typeof setTimeout>>>([]);
+  const toastSweepTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const dismissToast = (id: number) => {
     setToastMessages((current) => current.filter((toast) => toast.id !== id));
@@ -2202,22 +2452,41 @@ export default function NotesWorkbench() {
         id,
         message: localizedMessage,
         tone: getToastTone(localizedMessage),
+        expiresAt: Date.now() + 5000,
       },
     ]);
-
-    const timer = setTimeout(() => {
-      dismissToast(id);
-    }, 5000);
-    toastTimersRef.current.push(timer);
   };
 
-  useEffect(
-    () => () => {
-      toastTimersRef.current.forEach((timer) => clearTimeout(timer));
-      toastTimersRef.current = [];
-    },
-    [],
-  );
+  useEffect(() => {
+    if (toastSweepTimerRef.current !== null) {
+      clearTimeout(toastSweepTimerRef.current);
+      toastSweepTimerRef.current = null;
+    }
+
+    if (toastMessages.length === 0) {
+      return;
+    }
+
+    const now = Date.now();
+    const activeToasts = toastMessages.filter((toast) => toast.expiresAt > now);
+    if (activeToasts.length !== toastMessages.length) {
+      setToastMessages(activeToasts);
+      return;
+    }
+
+    const nextExpiresAt = Math.min(...activeToasts.map((toast) => toast.expiresAt));
+    toastSweepTimerRef.current = setTimeout(() => {
+      const currentTime = Date.now();
+      setToastMessages((current) => current.filter((toast) => toast.expiresAt > currentTime));
+    }, Math.max(0, nextExpiresAt - now + 20));
+
+    return () => {
+      if (toastSweepTimerRef.current !== null) {
+        clearTimeout(toastSweepTimerRef.current);
+        toastSweepTimerRef.current = null;
+      }
+    };
+  }, [toastMessages]);
 
   useEffect(() => {
     const view = publishLogViewRef.current;
@@ -2812,6 +3081,34 @@ export default function NotesWorkbench() {
     previewArticle.style.transform = `translate3d(0, -${offset}px, 0)`;
   };
 
+  const getScrollRatio = (element: HTMLElement): number => {
+    const scrollable = element.scrollHeight - element.clientHeight;
+    if (scrollable <= 0) {
+      return 0;
+    }
+
+    return clampNumber(element.scrollTop / scrollable, 0, 1);
+  };
+
+  const applyScrollRatio = (element: HTMLElement, ratio: number) => {
+    const scrollable = element.scrollHeight - element.clientHeight;
+    element.scrollTop = scrollable > 0 ? clampNumber(ratio, 0, 1) * scrollable : 0;
+  };
+
+  const updateEditorScrollRatio = () => {
+    const editor = editorRef.current;
+    if (editor) {
+      editorScrollRatioRef.current = getScrollRatio(editor);
+    }
+  };
+
+  const updatePreviewOnlyScrollRatio = () => {
+    const previewPane = previewPaneRef.current;
+    if (previewPane) {
+      previewOnlyScrollRatioRef.current = getScrollRatio(previewPane);
+    }
+  };
+
   const schedulePreviewPositionSync = () => {
     if (previewSyncFrameRef.current !== null) {
       return;
@@ -2821,6 +3118,7 @@ export default function NotesWorkbench() {
   };
 
   const handleEditorScroll = () => {
+    updateEditorScrollRatio();
     schedulePreviewPositionSync();
   };
 
@@ -2833,12 +3131,55 @@ export default function NotesWorkbench() {
 
     event.preventDefault();
     editor.scrollTop += event.deltaY;
+    updateEditorScrollRatio();
     schedulePreviewPositionSync();
   };
 
+  const handlePreviewOnlyScroll = () => {
+    updatePreviewOnlyScrollRatio();
+  };
+
   useEffect(() => {
-    schedulePreviewPositionSync();
-  }, [showPreview, deferredPreviewBody]);
+    const isMarkdownPreviewOnly = Boolean(draft && draft.type !== 'inknote' && showPreview);
+    const wasMarkdownPreviewOnly = wasMarkdownPreviewOnlyRef.current;
+    wasMarkdownPreviewOnlyRef.current = isMarkdownPreviewOnly;
+
+    const frame = window.requestAnimationFrame(() => {
+      const previewPane = previewPaneRef.current;
+      const previewArticle = previewArticleRef.current;
+
+      if (isMarkdownPreviewOnly) {
+        if (previewArticle) {
+          previewArticle.style.transform = 'translate3d(0, 0, 0)';
+        }
+
+        if (previewPane) {
+          applyScrollRatio(
+            previewPane,
+            wasMarkdownPreviewOnly ? previewOnlyScrollRatioRef.current : editorScrollRatioRef.current,
+          );
+          updatePreviewOnlyScrollRatio();
+        }
+        return;
+      }
+
+      if (wasMarkdownPreviewOnly) {
+        const editor = editorRef.current;
+        if (editor) {
+          applyScrollRatio(editor, previewOnlyScrollRatioRef.current);
+          updateEditorScrollRatio();
+        }
+
+        if (previewPane) {
+          previewPane.scrollTop = 0;
+        }
+      }
+
+      schedulePreviewPositionSync();
+    });
+
+    return () => window.cancelAnimationFrame(frame);
+  }, [draft?.type, showPreview, deferredPreviewBody]);
 
   useEffect(() => {
     const previewPane = previewPaneRef.current;
@@ -4791,6 +5132,14 @@ export default function NotesWorkbench() {
   }, [galleryImages]);
 
   useEffect(() => {
+    if (!imagePreview?.galleryImageKey) {
+      return;
+    }
+
+    setImagePreviewFocus(normalizeGalleryImageFocus(imagePreview.focus));
+  }, [imagePreview]);
+
+  useEffect(() => {
     if (!draft || draft.type !== 'inknote' || !linkedNotebookTarget) {
       clearLinkedNotebookState();
       return;
@@ -6594,13 +6943,13 @@ export default function NotesWorkbench() {
     () => managedImages.filter((asset) => asset.kind === 'internal'),
     [managedImages],
   );
-  const externalImagePageData = useMemo(
-    () => paginateImageItems(externalManagedImages, externalImagePage),
-    [externalManagedImages, externalImagePage],
+  const referencedManagedImages = useMemo(
+    () => [...externalManagedImages, ...internalManagedImages],
+    [externalManagedImages, internalManagedImages],
   );
-  const internalImagePageData = useMemo(
-    () => paginateImageItems(internalManagedImages, internalImagePage),
-    [internalManagedImages, internalImagePage],
+  const managedImagePageData = useMemo(
+    () => paginateImageItems(referencedManagedImages, managedImagePage),
+    [referencedManagedImages, managedImagePage],
   );
   const galleryImagePageData = useMemo(
     () => paginateImageItems(galleryImages, galleryPage),
@@ -6632,6 +6981,27 @@ export default function NotesWorkbench() {
     });
     await writeTextFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
     setGalleryImages(manifest.images);
+  };
+
+  const saveGalleryImageFocus = async () => {
+    if (!imagePreview?.galleryImageKey) {
+      return;
+    }
+
+    const nextFocus = normalizeGalleryImageFocus(imagePreviewFocus);
+    const nextImages = galleryImages.map((image) =>
+      getGalleryImageKey(image) === imagePreview.galleryImageKey ? { ...image, focus: nextFocus } : image,
+    );
+
+    await writeUserGalleryManifest(nextImages);
+    setImagePreview((current) => {
+      if (!current || current.galleryImageKey !== imagePreview.galleryImageKey) {
+        return current;
+      }
+
+      return { ...current, focus: nextFocus };
+    });
+    setStatus('已保存文章卡片裁剪位置。');
   };
 
   const loadUserGalleryManifest = async () => {
@@ -6694,6 +7064,7 @@ export default function NotesWorkbench() {
             name: getFileNameFromPath(sourcePath),
             size: compressedSize,
             uploadedAt: now.toISOString(),
+            focus: { x: 50, y: 50 },
           });
         } finally {
           setGalleryUploadProgress(index + 1);
@@ -6848,7 +7219,7 @@ export default function NotesWorkbench() {
     const failures: string[] = [];
 
     try {
-      for (const asset of externalManagedImages) {
+      await runWithConcurrency(externalManagedImages, IMAGE_LOCALIZATION_CONCURRENCY, async (asset) => {
         try {
           const cached = await cacheExternalImage(asset.source);
           replacements.set(asset.source, cached.publicPath);
@@ -6859,7 +7230,8 @@ export default function NotesWorkbench() {
             error instanceof Error ? error.message : typeof error === 'string' ? error : asset.source,
           );
         }
-      }
+        await waitForNextFrame();
+      });
 
       let changedNotes = 0;
       for (const item of items) {
@@ -7291,6 +7663,14 @@ export default function NotesWorkbench() {
                         setWorkspacePanel('write');
                       }
 
+                      if (draft.type !== 'inknote') {
+                        if (showPreview) {
+                          updatePreviewOnlyScrollRatio();
+                        } else {
+                          updateEditorScrollRatio();
+                        }
+                      }
+
                       setShowPreview((current) => !current);
                     }}
                     title="Preview"
@@ -7562,6 +7942,7 @@ export default function NotesWorkbench() {
                     <div
                       ref={previewPaneRef}
                       className={isPreviewOnly ? 'notes-rendered-pane preview-only' : 'notes-rendered-pane'}
+                      onScroll={isPreviewOnly ? handlePreviewOnlyScroll : undefined}
                       onWheel={isPreviewOnly ? undefined : handlePreviewWheel}
                     >
                       {isPreviewRenderPending ? (
@@ -8568,39 +8949,29 @@ export default function NotesWorkbench() {
 
                 {settingsSection === 'images' ? (
                   <section className="notes-settings-section notes-settings-images-section">
-                    <div className="notes-settings-image-tabs" role="tablist" aria-label="图片管理">
-                      <button
-                        type="button"
-                        className={imageSettingsTab === 'external' ? 'active' : ''}
-                        onClick={() => setImageSettingsTab('external')}
-                      >
-                        外链引用
-                        <span>{externalManagedImages.length}</span>
-                      </button>
-                      <button
-                        type="button"
-                        className={imageSettingsTab === 'internal' ? 'active' : ''}
-                        onClick={() => setImageSettingsTab('internal')}
-                      >
-                        本地存储
-                        <span>{internalManagedImages.length}</span>
-                      </button>
-                      <button
-                        type="button"
-                        className={imageSettingsTab === 'gallery' ? 'active' : ''}
-                        onClick={() => setImageSettingsTab('gallery')}
-                      >
-                        图库
-                        <span>{galleryImages.length}</span>
-                      </button>
-                    </div>
+                    <div className="notes-settings-image-toolbar">
+                      <div className="notes-settings-image-tabs" role="tablist" aria-label="图片管理">
+                        <button
+                          type="button"
+                          className={imageSettingsTab === 'references' ? 'active' : ''}
+                          onClick={() => setImageSettingsTab('references')}
+                        >
+                          引用
+                          <span>{referencedManagedImages.length}</span>
+                        </button>
+                        <button
+                          type="button"
+                          className={imageSettingsTab === 'gallery' ? 'active' : ''}
+                          onClick={() => setImageSettingsTab('gallery')}
+                        >
+                          图库
+                          <span>{galleryImages.length}</span>
+                        </button>
+                      </div>
 
-                    <div className="notes-settings-image-groups">
-                      {imageSettingsTab === 'external' ? (
-                        <section className="notes-settings-image-group">
-                          <div className="notes-settings-image-group-head">
-                            <strong>外链引用</strong>
-                            <span>{externalManagedImages.length}</span>
+                      <div className="notes-settings-image-summary-row">
+                        <div className="notes-settings-image-actions">
+                          {imageSettingsTab === 'references' ? (
                             <button
                               type="button"
                               className="notes-settings-primary notes-settings-image-localize"
@@ -8614,68 +8985,10 @@ export default function NotesWorkbench() {
                               )}
                               <span>下载</span>
                             </button>
-                          </div>
-                          {externalManagedImages.length > 0 ? (
-                            <>
-                              <div className="notes-settings-image-grid">
-                                {externalImagePageData.items.map((asset) => (
-                                  <ManagedImageCard
-                                    key={asset.source}
-                                    asset={asset}
-                                    contentRoot={libraryRoot}
-                                    localizationStatus={imageLocalizationStatus[asset.source]}
-                                    onPreview={setImagePreview}
-                                  />
-                                ))}
-                              </div>
-                              <ImagePagination
-                                page={externalImagePageData.safePage}
-                                pageCount={externalImagePageData.pageCount}
-                                onPageChange={setExternalImagePage}
-                              />
-                            </>
-                          ) : (
-                            <div className="notes-settings-image-group-empty">没有外链图片</div>
-                          )}
-                        </section>
-                      ) : null}
+                          ) : null}
 
-                      {imageSettingsTab === 'internal' ? (
-                        <section className="notes-settings-image-group">
-                          <div className="notes-settings-image-group-head">
-                            <strong>本地存储</strong>
-                            <span>{internalManagedImages.length}</span>
-                          </div>
-                          {internalManagedImages.length > 0 ? (
+                          {imageSettingsTab === 'gallery' ? (
                             <>
-                              <div className="notes-settings-image-grid">
-                                {internalImagePageData.items.map((asset) => (
-                                  <ManagedImageCard
-                                    key={asset.source}
-                                    asset={asset}
-                                    contentRoot={libraryRoot}
-                                    onPreview={setImagePreview}
-                                  />
-                                ))}
-                              </div>
-                              <ImagePagination
-                                page={internalImagePageData.safePage}
-                                pageCount={internalImagePageData.pageCount}
-                                onPageChange={setInternalImagePage}
-                              />
-                            </>
-                          ) : (
-                            <div className="notes-settings-image-group-empty">没有本地图片引用</div>
-                          )}
-                        </section>
-                      ) : null}
-
-                      {imageSettingsTab === 'gallery' ? (
-                        <section className="notes-settings-image-group">
-                          <div className="notes-settings-image-group-head">
-                            <strong>图库</strong>
-                            <span>{galleryImages.length}</span>
-                            <div className="notes-settings-gallery-actions">
                               <button
                                 type="button"
                                 className={`notes-settings-secondary notes-settings-image-localize${
@@ -8696,64 +9009,99 @@ export default function NotesWorkbench() {
                                 <IconRefresh aria-hidden="true" />
                                 <span>分配</span>
                               </button>
-                            </div>
-                            <button
-                              type="button"
-                              className="notes-settings-primary notes-settings-image-localize"
-                              onClick={() => void uploadGalleryImages()}
-                              disabled={isUploadingGalleryImages || isGalleryLoading || isBusy}
-                            >
-                              {isUploadingGalleryImages ? (
-                                <IconLoader2 className="spinning" aria-hidden="true" />
-                              ) : (
-                                <IconUpload aria-hidden="true" />
-                              )}
-                              <span>上传</span>
-                            </button>
-                          </div>
-
-                          {isGalleryMultiSelectMode ? (
-                            <div className="notes-settings-gallery-select-bar">
                               <button
                                 type="button"
-                                className="notes-settings-gallery-check-all"
-                                onClick={toggleCurrentGalleryPageSelection}
-                                disabled={galleryImagePageData.items.length === 0 || isDeletingGalleryImages}
+                                className="notes-settings-primary notes-settings-image-localize"
+                                onClick={() => void uploadGalleryImages()}
+                                disabled={isUploadingGalleryImages || isGalleryLoading || isBusy}
                               >
-                                <span className={`notes-settings-gallery-mini-check${isGalleryPageFullySelected ? ' checked' : ''}`}>
-                                  {isGalleryPageFullySelected ? <IconCheck aria-hidden="true" /> : null}
-                                </span>
-                                <span>{isGalleryPageFullySelected ? '取消本页' : '全选'}</span>
-                              </button>
-                              <span className="notes-settings-gallery-select-hint">点击图片以选择</span>
-                              <span className="notes-settings-gallery-select-count">
-                                {selectedGalleryImageKeys.length > 0 ? `已选 ${selectedGalleryImageKeys.length}` : ''}
-                              </span>
-                              <button
-                                type="button"
-                                className="notes-settings-danger notes-settings-image-localize"
-                                onClick={() => void deleteSelectedGalleryImages()}
-                                disabled={selectedGalleryImageKeys.length === 0 || isDeletingGalleryImages || isBusy}
-                              >
-                                {isDeletingGalleryImages ? (
+                                {isUploadingGalleryImages ? (
                                   <IconLoader2 className="spinning" aria-hidden="true" />
                                 ) : (
-                                  <IconTrash aria-hidden="true" />
+                                  <IconUpload aria-hidden="true" />
                                 )}
-                                <span>删除</span>
+                                <span>上传</span>
                               </button>
-                              <button
-                                type="button"
-                                className="notes-settings-secondary notes-settings-image-localize"
-                                onClick={exitGalleryMultiSelectMode}
-                                disabled={isDeletingGalleryImages}
-                              >
-                                <IconX aria-hidden="true" />
-                                <span>取消</span>
-                              </button>
-                            </div>
+                            </>
                           ) : null}
+                        </div>
+                      </div>
 
+                      {imageSettingsTab === 'gallery' && isGalleryMultiSelectMode ? (
+                        <div className="notes-settings-gallery-select-bar">
+                          <button
+                            type="button"
+                            className="notes-settings-gallery-check-all"
+                            onClick={toggleCurrentGalleryPageSelection}
+                            disabled={galleryImagePageData.items.length === 0 || isDeletingGalleryImages}
+                          >
+                            <span className={`notes-settings-gallery-mini-check${isGalleryPageFullySelected ? ' checked' : ''}`}>
+                              {isGalleryPageFullySelected ? <IconCheck aria-hidden="true" /> : null}
+                            </span>
+                            <span>{isGalleryPageFullySelected ? '取消本页' : '全选'}</span>
+                          </button>
+                          <span className="notes-settings-gallery-select-hint">点击图片以选择</span>
+                          <span className="notes-settings-gallery-select-count">
+                            {selectedGalleryImageKeys.length > 0 ? `已选 ${selectedGalleryImageKeys.length}` : ''}
+                          </span>
+                          <button
+                            type="button"
+                            className="notes-settings-danger notes-settings-image-localize"
+                            onClick={() => void deleteSelectedGalleryImages()}
+                            disabled={selectedGalleryImageKeys.length === 0 || isDeletingGalleryImages || isBusy}
+                          >
+                            {isDeletingGalleryImages ? (
+                              <IconLoader2 className="spinning" aria-hidden="true" />
+                            ) : (
+                              <IconTrash aria-hidden="true" />
+                            )}
+                            <span>删除</span>
+                          </button>
+                          <button
+                            type="button"
+                            className="notes-settings-secondary notes-settings-image-localize"
+                            onClick={exitGalleryMultiSelectMode}
+                            disabled={isDeletingGalleryImages}
+                          >
+                            <IconX aria-hidden="true" />
+                            <span>取消</span>
+                          </button>
+                        </div>
+                      ) : null}
+                    </div>
+
+                    <div className="notes-settings-image-groups">
+                      {imageSettingsTab === 'references' ? (
+                        <section className="notes-settings-image-group">
+                          {referencedManagedImages.length > 0 ? (
+                            <>
+                              <div className="notes-settings-image-grid">
+                                {managedImagePageData.items.map((asset) => (
+                                  <ManagedImageCard
+                                    key={asset.source}
+                                    asset={asset}
+                                    contentRoot={libraryRoot}
+                                    localizationStatus={
+                                      asset.kind === 'external' ? imageLocalizationStatus[asset.source] : undefined
+                                    }
+                                    onPreview={setImagePreview}
+                                  />
+                                ))}
+                              </div>
+                              <ImagePagination
+                                page={managedImagePageData.safePage}
+                                pageCount={managedImagePageData.pageCount}
+                                onPageChange={setManagedImagePage}
+                              />
+                            </>
+                          ) : (
+                            <div className="notes-settings-image-group-empty">没有图片引用</div>
+                          )}
+                        </section>
+                      ) : null}
+
+                      {imageSettingsTab === 'gallery' ? (
+                        <section className="notes-settings-image-group">
                           {isUploadingGalleryImages && galleryUploadTotal > 0 ? (
                             <div className="notes-settings-gallery-upload-progress" role="status" aria-live="polite">
                               <div>
@@ -9579,8 +9927,41 @@ export default function NotesWorkbench() {
             >
               <IconX aria-hidden="true" />
             </button>
-            <img src={imagePreview.src} alt={imagePreview.title} onClick={(event) => event.stopPropagation()} />
-            <span>{imagePreview.title}</span>
+            {imagePreview.galleryImageKey ? (
+              <>
+                <GalleryCropEditor
+                  src={imagePreview.src}
+                  title={imagePreview.title}
+                  focus={imagePreviewFocus}
+                  onChange={setImagePreviewFocus}
+                />
+                <div className="notes-image-crop-footer">
+                  <span title={imagePreview.title}>{imagePreview.title}</span>
+                  <div>
+                    <button
+                      type="button"
+                      className="notes-settings-secondary"
+                      onClick={() => setImagePreviewFocus(normalizeGalleryImageFocus(imagePreview.focus))}
+                    >
+                      重置
+                    </button>
+                    <button
+                      type="button"
+                      className="notes-settings-primary"
+                      onClick={() => void saveGalleryImageFocus()}
+                      disabled={isSameGalleryImageFocus(imagePreviewFocus, normalizeGalleryImageFocus(imagePreview.focus))}
+                    >
+                      保存裁剪
+                    </button>
+                  </div>
+                </div>
+              </>
+            ) : (
+              <>
+                <img src={imagePreview.src} alt={imagePreview.title} onClick={(event) => event.stopPropagation()} />
+                <span>{imagePreview.title}</span>
+              </>
+            )}
           </div>
         </div>
       ) : null}

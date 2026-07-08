@@ -14,7 +14,6 @@ use std::{
     fs,
     io::Cursor,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, ToSocketAddrs},
-    path::{Path, PathBuf},
     time::Duration,
 };
 use url::Url;
@@ -537,11 +536,8 @@ fn store_external_image(source_url: &str, extension: &str, bytes: &[u8]) -> Resu
     Ok(format!("/{relative_path}"))
 }
 
-fn get_workspace_root() -> Result<PathBuf, String> {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../..")
-        .canonicalize()
-        .map_err(|error| format!("failed to locate workspace root: {error}"))
+fn get_workspace_root() -> Result<std::path::PathBuf, String> {
+    crate::get_workspace_root()
 }
 
 fn validate_public_url(url: &Url) -> Result<(), String> {
