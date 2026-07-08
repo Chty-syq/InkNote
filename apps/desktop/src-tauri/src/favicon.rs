@@ -2,7 +2,9 @@ use image::{
     imageops::FilterType, DynamicImage, ImageFormat, ImageReader, Limits, Rgba, RgbaImage,
 };
 use reqwest::{
-    header::{CONTENT_LENGTH, CONTENT_TYPE, LOCATION},
+    header::{
+        ACCEPT, ACCEPT_LANGUAGE, CONTENT_LENGTH, CONTENT_TYPE, LOCATION, REFERER,
+    },
     redirect::Policy,
     Client,
 };
@@ -24,6 +26,14 @@ const ICON_BODY_LIMIT: usize = 2 * 1024 * 1024;
 const EXTERNAL_IMAGE_BODY_LIMIT: usize = 25 * 1024 * 1024;
 const MAX_REDIRECTS: usize = 5;
 const ICON_SIZE: u32 = 64;
+const BROWSER_USER_AGENT: &str =
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
+     (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
+const BROWSER_ACCEPT_LANGUAGE: &str = "zh-CN,zh;q=0.9,en;q=0.8";
+const PAGE_ACCEPT: &str =
+    "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8";
+const IMAGE_ACCEPT: &str = "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8";
+const MANIFEST_ACCEPT: &str = "application/manifest+json,application/json,text/plain,*/*;q=0.8";
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -76,11 +86,7 @@ pub async fn fetch_and_cache(page_url: String) -> Result<FriendLinkIconResult, S
     let client = Client::builder()
         .redirect(Policy::none())
         .timeout(Duration::from_secs(if direct_image_mode { 30 } else { 10 }))
-        .user_agent(if direct_image_mode {
-            "InkNote-Image-Resolver/1.0"
-        } else {
-            "InkNote-Favicon-Resolver/1.0"
-        })
+        .user_agent(BROWSER_USER_AGENT)
         .build()
         .map_err(|error| format!("failed to create HTTP client: {error}"))?;
 
@@ -92,6 +98,12 @@ pub async fn fetch_and_cache(page_url: String) -> Result<FriendLinkIconResult, S
         } else {
             PAGE_BODY_LIMIT
         },
+        if direct_image_mode {
+            IMAGE_ACCEPT
+        } else {
+            PAGE_ACCEPT
+        },
+        None,
     )
     .await?;
     if direct_image_mode {
@@ -118,7 +130,7 @@ pub async fn fetch_and_cache(page_url: String) -> Result<FriendLinkIconResult, S
 
     for manifest_url in manifest_urls.into_iter().take(2) {
         if let Ok(mut manifest_candidates) =
-            discover_manifest_candidates(&client, manifest_url).await
+            discover_manifest_candidates(&client, manifest_url, &page.final_url).await
         {
             candidates.append(&mut manifest_candidates);
         }
@@ -132,7 +144,15 @@ pub async fn fetch_and_cache(page_url: String) -> Result<FriendLinkIconResult, S
 
     let mut failures = Vec::new();
     for candidate in candidates.into_iter().take(16) {
-        match fetch_limited(&client, candidate.url.clone(), ICON_BODY_LIMIT).await {
+        match fetch_limited(
+            &client,
+            candidate.url.clone(),
+            ICON_BODY_LIMIT,
+            IMAGE_ACCEPT,
+            Some(&page.final_url),
+        )
+        .await
+        {
             Ok(resource) => match normalize_icon_to_png(&resource) {
                 Ok(png) => {
                     let icon_path = cache_icon(&page.final_url, &png)?;
@@ -196,13 +216,25 @@ async fn fetch_limited(
     client: &Client,
     start_url: Url,
     limit: usize,
+    accept: &'static str,
+    referer: Option<&Url>,
 ) -> Result<FetchedResource, String> {
     let mut current_url = start_url;
 
     for redirect_count in 0..=MAX_REDIRECTS {
         validate_public_url(&current_url)?;
-        let mut response = client
+        let mut request = client
             .get(current_url.clone())
+            .header(ACCEPT, accept)
+            .header(ACCEPT_LANGUAGE, BROWSER_ACCEPT_LANGUAGE)
+            .header("Sec-Fetch-Mode", "no-cors")
+            .header("Sec-Fetch-Site", if referer.is_some() { "same-origin" } else { "none" })
+            .header("Sec-Fetch-Dest", if accept == PAGE_ACCEPT { "document" } else { "image" });
+        if let Some(referer) = referer {
+            request = request.header(REFERER, referer.as_str());
+        }
+
+        let mut response = request
             .send()
             .await
             .map_err(|error| format!("request failed for {current_url}: {error}"))?;
@@ -344,8 +376,16 @@ fn discover_html_candidates(
 async fn discover_manifest_candidates(
     client: &Client,
     manifest_url: Url,
+    page_url: &Url,
 ) -> Result<Vec<IconCandidate>, String> {
-    let resource = fetch_limited(client, manifest_url, MANIFEST_BODY_LIMIT).await?;
+    let resource = fetch_limited(
+        client,
+        manifest_url,
+        MANIFEST_BODY_LIMIT,
+        MANIFEST_ACCEPT,
+        Some(page_url),
+    )
+    .await?;
     let manifest: WebManifest = serde_json::from_slice(&resource.body)
         .map_err(|error| format!("invalid web app manifest: {error}"))?;
     let mut candidates = Vec::new();

@@ -150,8 +150,8 @@ function pushDisplayMathBlock(output: string[], content: string, quoteWrapped: b
 }
 
 function pushMarkdownTextLine(output: string[], content: string, quoteWrapped: boolean) {
-  const normalized = content.trim();
-  if (!normalized) {
+  const normalized = content.trimEnd();
+  if (!normalized.trim()) {
     return;
   }
 
@@ -603,7 +603,7 @@ export function normalizeMarkdownForPreview(markdown: string): string {
       continue;
     }
 
-    const quoteMatch = line.match(/^(\s*>\s*)?(.*)$/);
+    const quoteMatch = line.match(/^(\s*>\s?)?(.*)$/);
     const lineQuoteWrapped = Boolean(quoteMatch?.[1]);
     const content = quoteMatch?.[2] ?? line;
     const effectiveQuoteWrapped: boolean =

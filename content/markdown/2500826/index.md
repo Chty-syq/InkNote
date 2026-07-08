@@ -4,271 +4,178 @@ title: 测试
 slug: "2500826"
 order: 4
 date: 2026-07-08
-updatedAt: 2026-07-08 23:37:08
+updatedAt: 2026-07-09 00:06:21
 published: false
 category: machine-learning
 ---
 
-## *1. Value Function Rewrite(重写价值函数)* 
+## *1. N-Step TD Prediction(多步TD预测)*
 
-我们回忆一下 MDP 的控制过程，从初始状态 $s_{0}$ 出发，遵循策略 $\pi$ 进行决策得到一条轨迹 $(S_{0},A_{0},\cdots,S_{T},A_{T})$，对应的概率为
+回忆我们之前讲到的 *MC* 和 *TD* 方法，*MC* 方法使用完整的采样轨迹来更新价值函数，采样结束时才能进行更新，其收敛速度慢且拥有较大的方差。而 *TD* 方法则是采样下一时刻的状态来更新当前状态的价值函数，这样做减小了方差却引入了偏差。那么有么有一种介于两者之间的方法来平衡偏差与方差呢？
 
-$$\mathbb{P}^{\pi}(S_{0},A_{0},\cdots,S_{T},A_{T}) = \prod_{t=0}^{T}\pi(A_{t}|S_{t})\prod_{t=0}^{T-1}P(S_{t+1}|S_{t},A_{t})$$
+答案是肯定的，我们只需要进行 $n$ 步采样，使用后面 $n$ 个时刻的价值函数来更新当前时刻的状态即可。我们把这样的方法称为 *n-step TD*.
 
-回忆价值函数的表达式
+<center>![](/content-images/external/35c08b8f7293f37a4a89e03a8300bac1.jpg)</center>
 
-$$v_\pi(s)=\mathbb{E}_\pi\left[G_t \mid S_t=s\right]=\mathbb{E}_\pi\left[\sum_{k=0}^{\infty} \gamma^k R_{t+k+1} \mid S_t=s\right]$$
+假设我们从状态 $S_{t}$ 出发采样了一条轨迹 $S_t, R_{t+1}, S_{t+1}, R_{t+2}, \ldots, R_T, S_T$，使用 *MC* 方法更新 $v_{\pi}(S_{t})$ 的式子是
 
-它表示了 $t$ 时刻状态 $s$ 下的期望回报，不失一般性的，我们假设 $s$ 为起始状态，得到
+$$v_\pi(s)=\mathbb{E}_\pi\left[G_t | S_t=s\right]$$
 
-$$\begin{aligned}v_\pi(s_{0})
-&= \mathbb{E}_\pi\left[\sum_{t=0}^{\infty} \gamma^t R_{t+1} ; s_{0}\right] \\
-&= \sum_{A_{0},S_{1},A_{1},\cdots} \mathbb{P}^{\pi}(S_{0},A_{0},S_{1},A_{1},\cdots) \sum_{t=0}^{\infty} \gamma^{t} r(S_{t},A_{t})
+我们的做法是对所有采样轨迹的 $G_{t}$ 求均值来估计这个期望，当我们更新第 $n$ 条轨迹的贡献 $G_{t}^{(n)}$ 时
+
+$$\begin{aligned}v^{(n)}_\pi(s) 
+&= \frac{1}{n}\sum_{i=1}^{n} G_{t}^{(i)} \\
+&= (1-\frac{1}{n})\sum_{i=1}^{n-1} G_{t}^{(i)} + \frac{1}{n}G_{t}^{(n)}\\
+&= v^{(n-1)}_\pi(s) + \frac{1}{n}\left(G_{t}^{(n)} - v^{(n-1)}_\pi(s)\right)
 \end{aligned}$$
 
-这个展开式略显复杂，我们换一种思考方式，不是枚举轨迹，而是枚举状态动作对 $(S_{t},A_{t})$ 的贡献，从而交换求和号的次序。
+我们用步长参数 $\alpha$ 替代式中的 $\frac{1}{n}$ 得到迭代式
 
-首先需要考虑 $(S_{t},A_{t})$ 的访问概率，也就是说从 $s_{0}$ 出发遵循策略 $\pi$ 的设定下，状态动作对 $(s,a)$ 在 $t$ 时刻被访问的概率
+$$v_\pi(s) \leftarrow v_\pi(s) + \alpha(G_{t} - v_\pi(s))$$
 
-$$\begin{aligned}\mathbb{P}_t^\pi\left(s, a ; s_{0}\right) 
-&= \sum_{A_{0},S_{1},A_{1},\cdots,S_{t-1},A_{t-1}} \mathbb{P}^\pi(S_{0},A_{0},\cdots,S_{t-1},A_{t-1},s,a)
-\end{aligned}$$
+因此 $G_{t}$ 就是本次更新的 *target(目标)*，而在 $TD$ 方法中，则是仅采样下一状态，利用 $R_{t+1}+\gamma v_\pi\left(S_{t+1}\right)$ 来估计 $G_{t}$ 进行更新
 
-这样的话，上面的和式就可以变换为
+$$v_\pi\left(S_t\right) \leftarrow v_\pi\left(S_t\right)+\alpha\left(R_{t+1}+\gamma v_\pi\left(S_{t+1}\right)-v_\pi\left(S_t\right)\right)$$
 
-$$v_\pi(s_{0}) = \sum_{s,a}r(s,a)\sum_{t=0}^{\infty}\gamma^{t}\mathbb{P}_t^\pi\left(s, a ; s_0\right)$$
+我们把这种管中窥豹的方法称为 *bootstrap(自举)*，很自然的，我们可以想到采样后 $n$ 个状态来估计 $G_{t}$ 的方法
 
-我们想办法把右边的东西写成一个概率分布，令 
+$$G_{t,n} = R_{t+1}+\gamma R_{t+2}+\cdots+\gamma^{n-1} R_{t+n}+\gamma^n v_{\pi}\left(S_{t+n}\right)$$
 
-$$d_{s_0}^\pi(s, a)=(1-\gamma) \sum_{t=0}^{\infty} \gamma^t \mathbb{P}_t^\pi\left(s, a ; s_0\right)$$
+这里需要注意边界情况，当 $t+n\geq T$ 时算法退化为 *MC*，此时可以计算完整的 $G_{t}$，因此
 
-可以证明它是一个概率分布，我们把它称为 *discounted state-action distribution(折扣状态动作对分布)*，那么
+$$G_{t,n} = \begin{cases}
+\gamma^n v_\pi\left(S_{t+n}\right) + \sum_{i=1}^{n} \gamma^{i-1}R_{t+i}, & \text{if } t+n< T\\
+G_{t},& \text{if } t+n\geq T
+\end{cases}$$
 
-$$v_\pi(s_{0}) = \frac{1}{1-\gamma} \sum_{s, a} d_{s_0}^\pi(s, a) r(s, a) =\frac{1}{1-\gamma} \mathbb{E}_{(s,a)\sim d_{s_0}^\pi}[r(s,a)] $$
+而价值函数的更新则是
 
-我们成功把价值函数写成了一个关于奖励函数 $r(s,a)$ 的期望表达式，这种书写方式在分析强化学习算法的表现中常常用到。
+$$v_\pi(s) \leftarrow v_\pi(s)+\alpha\left(G_{t,n}-v_\pi(s)\right)$$
 
-有些时候我们仅关心状态的分布，也就是 $d_{s_0}^\pi(s, a)$ 的边际分布
+考虑更新 $G_{t,n}$ 时的状态依赖关系，如图所示
 
-$$d_{s_0}^\pi(s)=(1-\gamma) \sum_{t=0}^{\infty} \gamma^t \mathbb{P}_t^\pi\left(s ; s_0\right)$$
+<center>![title](/content-images/external/cb4aacb8a11d22bcfcdb5b811324d6c0.png)</center>
 
----
+我们看到在 $t$ 时刻，想要计算 $G_{t,n}$ 需要知道 $t+1,t+2,\cdots, t+n$ 时刻的状态和奖励，反过来说，当我们采样完成 $t$ 时刻后，可以计算 $G_{t-n+1,n}$ 的值进行更新。
 
-## *2. Performance Difference(性能差异)*
-
-我们定义 *advantage function(优势函数)* 
-
-$$A_{\pi}(s, a)=q_{\pi}(s, a)-v_{\pi}(s)$$
-
-这里的价值函数 $v_{\pi}(s)$ 表达的是在策略 $\pi$ 下状态 $s$ 的所有可能行动的期望价值
-
-$$v_\pi(s)=\sum_a \pi(a | s) q_\pi(s, a)$$
-
-根据定义显然有 $A_{\pi}(s,\pi(s)) = 0$，事实上优势函数评价了选取行动 $a$ 的价值相对于所有行动平均值的大小。我们之前引入 $v_{\pi}(s)$ 作为 *baseline* 的方法，就是把优势函数作为了优化目标。
-
-优势函数可以清晰的度量两个策略的表现差异
-
-> **Theorem 1. Performance Difference Lemma.** 对于策略函数 $\pi_{1},\pi_{2}$，对应的价值函数之差 $$v_{\pi_{1}}(s_{0}) - v_{\pi_{2}}(s_{0})=\frac{1}{1-\gamma} \mathbb{E}_{(s,a)\sim d_{s_{0}}^{\pi_{1}}}\left[A_{\pi_2}(s, a)\right]$$
-
-如图所示，我们的证明思路是把价值函数之差进行分解，图中的曲线$\text{(1)}$表示 $v_{\pi_{1}}(s_{0})$ ，曲线$\text{(3)}$表示 $v_{\pi_{2}}(s_{0})$，曲线$\text{(2)}$则表示从 $s_{0}$ 出发沿 $\pi_{1}$ 策略走一步 $a_{0}$ 后续遵循 $\pi_{2}$ 策略的价值，那么
-
-$$\text{(1)} - \text{(3)} = \text{(1)} - \text{(2)} + \text{(2)} - \text{(3)}$$
-
-这样做的好处是 $\text{(1)} - \text{(2)}$ 的计算和 $\text{(1)} - \text{(3)}$ 如出一辙，可以继续用同样的方法分解，而 $\text{(2)} - \text{(3)}$ 实质上就是优势函数的定义。
-
-<center>![](https://leanote.com/api/file/getImage?fileId=67e6107dab644172f518f713)</center>
-根据这样的思路，我们写一下证明过程： 
-
-$$\begin{aligned} v_{\pi_{1}}(s_{0}) - v_{\pi_{2}}(s_{0})
-&= v_{\pi_{1}}(s_{0}) - \mathbb{E}_{a_{0}\sim\pi_{1},s_{1}\sim P(s_{0},a_{0})}\left[r(s_{0},a_{0}) + \gamma v_{\pi_{2}}(s_{1})\right] + \mathbb{E}_{a_{0}\sim\pi_{1},s_{1}\sim P(s_{0},a_{0})}\left[r(s_{0},a_{0}) + \gamma v_{\pi_{2}}(s_{1})\right] - v_{\pi_{2}}(s_{0}) \\
-&= \gamma\mathbb{E}_{s_{1}\sim P(s_{0},a_{0})} \left[v_{\pi_{1}}(s_{1}) - v_{\pi_{2}}(s_{1}) \right] + \mathbb{E}_{a_0 \sim \pi_{1}}[q_{\pi_{2}}(s_{0},a_{0})] - v_{\pi_{2}}(s_{0}) \\
-&= \gamma\mathbb{E}_{s_{1}\sim P(s_{0},a_{0})} \left[v_{\pi_{1}}(s_{1}) - v_{\pi_{2}}(s_{1}) \right] +\mathbb{E}_{a_0 \sim \pi_{1}}[A_{\pi_{2}}(s_{0},a_{0})]
-\end{aligned}$$
-
-将左边的项不断展开，我们发现状态动作对 $(s_{t},a_{t})$ 的贡献就是 $\gamma^{t}A_{\pi_{2}}(s_{t},a_{t})$，因此
-
-$$v_{\pi_{1}}(s_{0}) - v_{\pi_{2}}(s_{0}) =  \frac{1}{1-\gamma} \mathbb{E}_{(s,a)\sim d_{s_{0}}^{\pi_{1}}}\left[A_{\pi_2}(s, a)\right]$$
-
-这里解释一下，我们做的操作和上一节中变换 $v_{\pi}(s_{0})$ 是一样的，彼时状态动作对 $(s,a)$ 的贡献是 $\gamma^{t} r(s,a)$.
-
-> **Example 2.** 我们展示一个使用 *PDL* 来证明策略迭代 *PI* 的例子，*PI* 方法使用贪心策略进行迭代 $$\pi^{\prime}(s)=\arg \max _a q_{\pi}(s, a)$$ 我们要证明它是 *monotonic improvement(一致提升的)*，即 $$v^{\pi^{\prime}}(s)\geq v^{\pi}(s), \quad \text{for all } s\in \mathcal{S}$$
-
-之前我们是使用策略提升定理来证明它的，现在有了 *PDL* 证明更加简单
-
-$$\begin{aligned}v^{\pi^{\prime}}(s)- v^{\pi}(s)
-&= \frac{1}{1-\gamma} \mathbb{E}_{(s,a)\sim d_{s_{0}}^{\pi^{\prime}}}\left[A_{\pi}(s, a)\right] \\
-&= \frac{1}{1-\gamma} \mathbb{E}_{s\sim d_{s_{0}}^{\pi^{\prime}}}\left[A_{\pi}(s, \pi^{\prime}(s))\right] \\
-&\geq \frac{1}{1-\gamma} \mathbb{E}_{s\sim d_{s_{0}}^{\pi^{\prime}}}\left[A_{\pi}(s, \pi(s))\right]  = 0
-\end{aligned}$$
-
-这里的不等式是因为 $$\pi^{\prime}(s)=\arg \max _a q_{\pi}(s, a) = \arg \max _a A_{\pi}(s, a)$$
-
-即最大化价值函数等价于最大化优势，我们通常更关注后者。
-
----
-
-## *3. Greedy Policy Selector(贪心策略选择)*
-
-根据 *PDL*，我们知道对于初始状态分布 $\mu$ 有
-
-$$v_{\pi^{\prime}} - v_{\pi}=\frac{1}{1-\gamma} \mathbb{E}_{(s,a)\sim d_{\mu}^{\pi^{\prime}}}\left[A_{\pi}(s, a)\right]$$
-
-其中 $d^{\pi}_{\mu}$ 表示 $\mu$ 下的折扣状态动作对分布，如果我们要保证策略 $\pi^{\prime}$ 一致提升，就需要让右边的项尽可能的大。
-
-但是问题来了，新策略 $\pi^{\prime}$ 下的状态分布 $d_{\mu}^{\pi^{\prime}}$ 是未知的。一个自然的想法是如果新旧两个策略相差的不是太远，那么我们可以用旧的状态分布 $d_{\mu}^{\pi}$ 来近似它，即计算
-
-$$\pi^{\prime} = \arg \max _{\pi^{\prime}} \mathbb{E}_{s \sim d_\mu^{\pi}}\left[A^{\pi}(s, \pi^{\prime}(s))\right]$$
-
-我们只需要使用上一节中的策略梯度方法来估计优势函数 $A^{\pi}$ 即可，剩下的问题就是如何保证策略的一致提升。
-
----
-
-## *4. Conservative Policy Iteration(保守策略迭代)*
-
-为了保证新旧策略下的状态分布相近，我们令
-
-$$\pi_{\text{new}} = \alpha \pi^{\prime} + (1-\alpha) \pi$$
-
-通过引入权重 $\alpha \in [0,1]$ 使得新策略 $\pi_{\text{new}}$ 与旧策略 $\pi$ 的距离保持在一定程度之内，这样的话状态动作对的分布也不会差的太远。
-
-> **Lemma 3.** 对于任意状态 $s\in\mathcal{S}$，有 $$\left\|\pi_{\text{new}}(s) - \pi(s)\right\|_{1} \leq 2\alpha$$
-
-这是一个比较关键的观察结果，证明是不难的 
-
-$$\begin{aligned}\left\|\pi_{\text{new}}(s) - \pi(s)\right\|_{1} 
-&= \left\|\alpha\pi^{\prime}(s) - \alpha\pi(s)\right\|_{1} \\
-&\leq \alpha \left\|\pi^{\prime}(s)\right\|_{1} + \alpha \left\|\pi(s)\right\|_{1} = 2\alpha
-\end{aligned}$$
-
-> **Lemma 4.** 对于两个策略函数 $\pi,\pi^{\prime}$，若  $$\left\|\pi^{\prime}(s) - \pi(s)\right\|_{1} \leq \delta,\quad \text{for all } s \in \mathcal{S}$$ 则对应的状态动作对分布满足 $$\left\|d_{\mu}^{\pi^{\prime}}(s)-d_\mu^{\pi}(s)\right\|_1 \leq \frac{\gamma \delta}{1-\gamma}$$
-
-这个引理给出了状态分布的一个差界，我们将在附录中证明它。结合两个引理有
-
-$$\left\|d_{\mu}^{\pi_{\text{new}}}(s)-d_\mu^{\pi}(s)\right\|_1 \leq \frac{2\gamma \alpha}{1-\gamma}$$
-
-接下来要解决一个至关重要的问题，在这样的设定下新的策略 $\pi_{\text{new}}$ 是否一致提升？
-
-我们定义 *policy advantage(策略优势)*  $$\mathbb{A}_{\pi}(\pi^{\prime})=\mathbb{E}_{s\sim d_\mu^{\pi}}\left[A^{\pi}\left(s, \pi^{\prime}(s)\right)\right]$$
-
-为方便书写，我们在接下来的推导中把 $\mathbb{A}_{\pi}(\pi^{\prime})$ 简写为 $\mathbb{A}$.
-
-策略优势函数刻画了在策略 $\pi$ 对应的状态分布 $d_\mu^{\pi}$ 下，使用 $\pi^{\prime}$ 进行决策的优势程度，根据 *PDL* 有
-
-$$\begin{aligned}(1-\gamma)\left[v^{\pi_{\text{new}}}(s)- v^{\pi}(s)\right]
-&= \mathbb{E}_{(s,a)\sim d_{s_{0}}^{\pi_{\text{new}}}}\left[A_{\pi}(s, a)\right]\\
-&= \mathbb{E}_{s\sim d_{s_{0}}^{\pi_{\text{new}}}}\left[\alpha A_{\pi}(s, \pi^{\prime}(s))\right] \\
-&= \alpha\mathbb{A} + \mathbb{E}_{s\sim d_{s_{0}}^{\pi_{\text{new}}}}\left[\alpha A_{\pi}(s, \pi^{\prime}(s))\right] - \alpha\mathbb{A} \\
-&\geq \alpha\mathbb{A} - \frac{\alpha}{1-\gamma}\left\|d_\mu^{\pi_{\text{new}}}-d_\mu^{\pi}\right\|_1 \\
-&= \alpha \mathbb{A}-\frac{2 \gamma \alpha^2}{(1-\gamma)^2}
-\end{aligned}$$
-
-我们需要逐步解释一下推导过程
-
-1. 我们直接拆解 $a\sim \pi_{\text{new}}(s)$ 得到
-$$\begin{aligned}\mathbb{E}_{a\sim \pi_{\text{new}}}\left[A_{\pi}(s, a)\right] 
-&= \sum_{a}\alpha\pi^{\prime}(a|s)A_{\pi}(s, a)+\sum_{a}(1-\alpha)\pi(a|s)A_{\pi}(s, a) \\
-&= \alpha A_{\pi}(s, \pi^{\prime}(s)) + (1-\alpha)A_{\pi}(s, \pi(s))   \\
-&= \alpha A_{\pi}(s, \pi^{\prime}(s))
-\end{aligned}$$
-
-2. 我们引入策略优势函数 $\mathbb{A}_{\pi}(\pi^{\prime})$，利用不等式(见附录)
-$$|\mathbb{E}_{x\sim p} f(x) - \mathbb{E}_{x\sim q}f(x)| \leq \max_{x}|f(x)|\cdot \left\|p-q\right\|_{1}$$ 进行放缩得到
-$$\begin{aligned}\left|\mathbb{E}_{s\sim d_{s_{0}}^{\pi_{\text{new}}}}\left[\alpha A_{\pi}(s, \pi^{\prime}(s))\right] - \alpha\mathbb{A}\right| 
-&=  \left|\mathbb{E}_{s\sim d_{s_{0}}^{\pi_{\text{new}}}}\left[\alpha A_{\pi}(s, \pi^{\prime}(s))\right] - \mathbb{E}_{s\sim d_{s_{0}}^{\pi}}\left[\alpha A_{\pi}(s, \pi^{\prime}(s))\right] \right|\\
-&\leq \alpha \max_{s} |A_{\pi}(s, \pi^{\prime}(s))| \cdot \left\|d_\mu^{\pi_{\text{new}}}(s)-d_\mu^\pi(s)\right\|_1 \\
-&\leq \frac{2 \gamma \alpha^{2}}{1-\gamma} \max_{s} |A_{\pi}(s, \pi^{\prime}(s))| \\
-&\leq \frac{2 \gamma \alpha^{2}}{(1-\gamma)^{2}}
-\end{aligned}$$ 这里我们假设奖励函数 $r(s,a)\in [0,1]$，那么价值函数
-$$0\leq v^{\pi}(s) = \frac{1}{1-\gamma} \mathbb{E}_{(s,a)\sim d_{s_0}^\pi}[r(s,a)] \leq \frac{1}{1-\gamma}$$ 动作价值 $q_{\pi}(s,a)$ 也是一样的，因此式子中的优势函数有上界
-$$A_\pi\left(s, \pi^{\prime}(s)\right) = q_{\pi}(s,\pi^{\prime}(s)) - v_{\pi}(s)\leq \frac{1}{1-\gamma}$$
-
-3. 将绝对值去掉取负号的部分代回去得到下界 $\alpha \mathbb{A}-\frac{2 \gamma \alpha^2}{(1-\gamma)^2}$，注意到这是一个关于 $\alpha$ 的二次函数，取 $\alpha=\frac{(1-\gamma)^2 \mathbb{A}}{4 \gamma}$ 得到
-$$(1-\gamma)\left[v^{\pi_{\text {new }}}(s)-v^\pi(s)\right] \geq \frac{\mathbb{A}^2(1-\gamma)}{8 \gamma}$$ 当策略优势 $\mathbb{A}> \epsilon$ 时，我们就能保证策略一致提升 $$v^{\pi_{\text {new }}}(s)-v^\pi(s) \geq \frac{\epsilon^2}{8 \gamma} > 0$$
-
-> **Method 5. Conservative Policy Iteration(保守策略迭代).** *CPI* 算法流程如下：
+> **Method 1. N-Step TD Prediction.** 对于给定的策略 $\pi$，步长参数 $\alpha \in (0,1]$ 和正整数 $n$，算法流程如下：
 >
-> 1. 初始化策略 $\pi(s)$
-> 2. 枚举 $k=0,1,2,\cdots$
-    - 进行贪心策略选择 $$\pi^{\prime} = \arg \max _{\pi^{\prime}} \mathbb{E}_{s \sim d_\mu^{\pi}}\left[A^{\pi}(s, \pi^{\prime}(s))\right]$$
-    - 计算策略优势 $$\mathbb{A}=\mathbb{E}_{s\sim d_\mu^{\pi}}\left[A^{\pi}\left(s, \pi^{\prime}(s)\right)\right]$$
-    - 若 $\mathbb{A} \leq\epsilon$，终止迭代
-    - 进行增量更新 $$\pi_{\text{new}} = \alpha \pi^{\prime} + (1-\alpha) \pi$$
+> 1. 对于状态 $s\in\mathcal{S}$，初始化 $v_{\pi}(s)$.
+> 2. 枚举轨迹标号 $k = 0, 1,\cdots$
+>   - 随机选取初始状态 $S_{0}$
+>   - 枚举时刻 $t = 0, 1, \cdots$
+>       - 在策略 $\pi(S_{t})$ 下选取行动 $A_{t}$，得到 $R_{t+1},S_{t+1}$
+>       - 记 $\tau = t-n+1$，累加即时回报 $$G_{\tau,n} \leftarrow \sum_{i=1}^{n} \gamma^{i-1} R_{\tau+i}$$
+>       - 若 $S_{t+1}$ 不为终止状态，统计期望回报 $$G_{\tau,n} \leftarrow G_{\tau,n} + \gamma^n v_{\pi}\left(S_{\tau+n}\right)$$
+>       - 更新价值函数 $$v_{\pi}\left(S_t\right) \leftarrow
+v_{\pi}\left(S_t\right)+\alpha\left(G_{\tau,n}-v_{\pi}\left(S_t\right)\right)$$
+>       - 若达到结束状态则退出循环，继续执行下一条轨迹
 
 ---
 
-## *Appendix A: Proof of Lemma 4*
+## *2. N-Step TD Control(多步TD控制)*
 
-> **Lemma 4.** 对于两个策略函数 $\pi,\pi^{\prime}$，若  $$\left\|\pi^{\prime}(s) - \pi(s)\right\|_{1} \leq \delta,\quad \text{for all } s \in \mathcal{S}$$ 则对应的状态动作对分布满足 $$\left\|d_{\mu}^{\pi^{\prime}}(s)-d_\mu^{\pi}(s)\right\|_1 \leq \frac{\gamma \delta}{1-\gamma}$$
+接下来考虑控制问题，我们尝试将 *Sarsa* 算法进行 *n-step bootstrapping*，如图所示
 
-证明：首先我们尝试将 $d_{\mu}^{\pi}$ 的表达式
+<center>![](/content-images/external/e2ea8e1a428a89afc682ea2c08bd9e91.jpg)</center>
 
-$$d_{\mu}^\pi(s)=(1-\gamma) \sum_{t=0}^{\infty} \gamma^t \mathbb{P}_t^\pi\left(s ; \mu\right)$$
+我们之前写过 *Sarsa(0)* 的迭代目标 $$G_{t} = R_{t+1}+\gamma q_\pi\left(S_{t+1}, A_{t+1}\right)$$
 
-写成矩阵形式，沿用之前的方法，记矩阵 $P_{\pi}$ 的 $(i,j)$ 位置元素表示状态转移 $s_{i}\rightarrow s_{j}$ 的概率，我们知道 $\mathbb{P}_t^\pi\left(s ; \mu\right)$ 表示由初始状态经过 $t$ 步转移到 $s$ 的概率，故 $\mathbb{P}_t^\pi\left(s ; \mu\right) = P_{\pi}^{t}\mu$，因此有
+结合上图可以写出 *n-step Sarsa* 的迭代目标
 
-$$\begin{aligned}d^{\pi}_{\mu}
-&= (1-\gamma) \sum_{t=0}^{\infty} \gamma^t P_\pi^t \mu = (1-\gamma) \sum_{t=0}^{\infty}\left(\gamma P_\pi\right)^t \mu \\
-&= (1-\gamma)\left(I-\gamma P_\pi\right)^{-1} \mu
-\end{aligned}$$
+$$G_{t,n} = \gamma^n q_\pi\left(S_{t+n},A_{t+n}\right)+\sum_{i=1}^n \gamma^{i-1} R_{t+i}$$
 
-记 $G(\pi) = (I-\gamma P_{\pi})^{-1}$，则
+且当 $t+n\geq T$ 时，$G_{t,n}=G_{t}$，迭代方程为
 
-$$\begin{aligned}G(\pi^{\prime}) - G(\pi)
-&= G(\pi^{\prime}) \left[G^{-1}(\pi) - G^{-1}(\pi^{\prime})\right] G(\pi)\\
-&= \gamma G(\pi^{\prime})(P_{\pi^{\prime}} - P_{\pi})G(\pi)
-\end{aligned}$$
+$$q_{\pi}\left(S_t, A_t\right) \leftarrow q_{\pi}\left(S_t, A_t\right)+\alpha\left[G_{t,n}- q_{\pi}\left(S_t, A_t\right)\right]$$
 
-因此
+同样的，$t$ 时刻的 $G_{t,n}$ 依赖于 $t+1,t+2,\cdots, t+n$ 时刻的状态、奖励和行动，也就是说当我们采样完成 $t$ 时刻后，可以计算 $G_{t-n+1,n}$ 的值进行更新。
 
-$$\begin{aligned}d_{\mu}^{\pi^{\prime}}-d_\mu^{\pi}
-&= (1-\gamma)\left[G(\pi^{\prime}) - G(\pi)\right] \mu \\
-&= (1-\gamma)\gamma G(\pi^{\prime})(P_{\pi^{\prime}} - P_{\pi})G(\pi) \mu \\
-&= \gamma G(\pi^{\prime})(P_{\pi^{\prime}} - P_{\pi})d_\mu^{\pi}
-\end{aligned}$$
+> **Method 2. N-step Sarsa.** 对于给定的 $n,\epsilon$ 和 $\alpha \in (0,1]$，*n-step Sarsa* 的算法流程如下
+>
+> 1. 对于 $s\in\mathcal{S},a\in\mathcal{A(s)}$，初始化 $Q(s,a), \pi(a|s)$
+> 2. 枚举轨迹标号 $k = 0, 1,\cdots$
+>   - 随机选取初始状态 $S_{0}$，在策略 $\pi(S_{0})$ 下选择行动 $A_{0}$
+>   - 枚举时刻 $t = 0, 1, \cdots$
+>       - 执行行动 $A_{t}$ 得到 $R_{t+1},S_{t+1}$
+>       - 记 $\tau = t-n+1$，累加即时回报 $$G_{\tau,n} \leftarrow \sum_{i=1}^{n} \gamma^{i-1} R_{\tau+i}$$
+>       - 若 $S_{t+1}$ 不为终止状态，在策略 $\pi(S_{t+1})$ 下选取行动 $A_{t+1}$，统计期望回报 $$G_{\tau,n} \leftarrow G_{\tau,n} + \gamma^n Q\left(S_{\tau+n},A_{\tau+n}\right)$$
+>       - 更新价值函数 $$Q(S_{t}, A_{t}) \leftarrow Q(S_{t}, A_{t})+\alpha\left[G_{\tau,n}-Q(S_{t}, A_{t})\right]$$
+>       - 找到最优行动 $$a^{*} = \arg \max _a Q\left(S_t, a\right)$$
+>       - 进行策略提升 $$\pi\left(a | S_t\right) \leftarrow \begin{cases}1-\varepsilon+\frac{\epsilon}{\left|\mathcal{A}\left(S_t\right)\right|} & \text { if } a=a^* \\ \frac{\epsilon}{\left|\mathcal{A}\left(S_t\right)\right|} & \text { if } a \neq a^*\end{cases}$$
 
-因此 $$\left\|d_{\mu}^{\pi^{\prime}}-d_\mu^{\pi}\right\|_{1} \leq \gamma \left\|G(\pi^{\prime})\right\|_{1} \left\|(P_{\pi^{\prime}} - P_{\pi})d_\mu^{\pi}
-\right\|_{1}$$
+对于期望 *Sarsa* 算法来说也是一样的，根据备份图可以写出其迭代目标
 
-首先
+$$G_{t, n}=\gamma^n \sum_a \pi(a | s) q_{\pi}(S_{t}, a)+\sum_{i=1}^n \gamma^{i-1} R_{t+i}$$
 
-$$\|G(\pi^{\prime})\|_1=\left\|\left(I-\gamma P_{\pi^{\prime}}\right)^{-1}\right\|_1 \leq \sum_{t=0}^{\infty} \gamma^t\left\|P_{\pi^{\prime}}\right\|_1^t=(1-\gamma)^{-1}$$
+其它部分都是一样的，不再赘述。
 
-其中 $\left\|P_{\pi^{\prime}}\right\|_1=\sum_{s,s^{\prime}}|P_{\pi}(s^{\prime}|s)|=1$，然后
+值得一提的是，由于 *Q-Learning* 是离线算法，我们不能简单的用 *n-step bootstrap* 对它进行扩展，而是需要用到 [强化学习重学系列(4) Monte Carlo Methods](http://blog.leanote.com/post/chty_syq/1fb4616b281d) 中讲到的重要性采样方法
 
-$$\begin{aligned}\left\|(P_{\pi^{\prime}} - P_{\pi})d_\mu^{\pi}
-\right\|_{1}
-&= \sum_{s,s^{\prime}}\left| \left(P_{\pi^{\prime}}(s|s^{\prime}) - P_{\pi}(s|s^{\prime})\right) d_\mu^{\pi}(s)\right| \\
-&\leq  \sum_{s,s^{\prime}}\left|P_{\pi^{\prime}}(s|s^{\prime}) - P_{\pi}(s|s^{\prime})\right| d_\mu^{\pi}(s) \\
-&\leq \sum_{s,a,s^{\prime}}P(s^{\prime}|s,a)\left|\pi^{\prime}(a|s)-\pi(a|s)\right| d_\mu^{\pi}(s) \\
-&= \sum_{s,a}\left|\pi^{\prime}(a|s)-\pi(a|s)\right| d_\mu^{\pi}(s) \\
-&= \sum_{s}\left\|\pi^{\prime}(s)-\pi(s)\right\|_{1} d_\mu^{\pi}(s) \\
-& \leq \delta \sum_{s}d_\mu^{\pi}(s) = \delta
-\end{aligned}$$
+设 $\pi$ 是一个 *$\epsilon$-greedy* 目标策略，$b$ 是一个探索性更强的行为策略，记重要性采样率
 
-结合起来就是
+$$\rho_{t: T-1} = \prod_{k=t}^{T-1} \frac{\pi\left(A_k | S_k\right)}{b\left(A_k | S_k\right)}$$
 
-$$\left\|d_{\mu}^{\pi^{\prime}}(s)-d_\mu^{\pi}(s)\right\|_1 \leq \frac{\gamma \delta}{1-\gamma}$$
+那么迭代公式应写为
 
----
+$$v_{\pi}\left(S_t\right) \leftarrow v_{\pi}\left(S_t\right)+\alpha \rho_{t: t+n-1}\left[G_{t,n}-v_{\pi}\left(S_t\right)\right]$$
 
-## *Appendix B: Mean Variation Bound*
+写成 $q_{\pi}$ 的形式为
 
-> **Lemma 6.** 设 $p(x),q(x)$ 是定义在相同样本空间 $\mathcal{X}$ 上的概率分布，则对于任意有界函数 $f(x)$ 有 
-> $$\left|\mathbb{E}_{x \sim p} f(x)-\mathbb{E}_{x \sim q} f(x)\right| \leq \max _x|f(x)| \cdot\|p-q\|_1$$
+$$q_{\pi}\left(S_t,A_t\right) \leftarrow q_{\pi}\left(S_t,A_t\right)+\alpha \rho_{t+1: t+n}\left[G_{t,n}-q_{\pi}\left(S_t,A_t\right)\right]$$
 
-证明是不难的，设 $\alpha = \max _x|f(x)|$ 为 $|f|$ 的上界，则
+注意这里的重要性采样率和 $v_{\pi}$ 函数有所不同，这是因为我们在采样 $q_{\pi}(S_t,A_t)$ 时，已经有了确定的 $A_{t}$，但是需要多采样一个 $A_{t+n}$.
 
-$$\begin{aligned}\left|\mathbb{E}_{x \sim p} f(x)-\mathbb{E}_{x \sim q} f(x)\right|
-&= \left|\sum_{x} \left(p(x)-q(x)\right)f(x) \right| \\
-&\leq \sum_{x} \left|p(x)-q(x)\right|\cdot\left|f(x)\right| \\
-&\leq  \alpha \sum_{x} \left|p(x)-q(x)\right| \\
-&=\alpha \left\|p-q \right\|_{1}
-\end{aligned}$$
+> **Method 3. Off-policy N-step Sarsa.** 对于给定的 $n,\epsilon$，行为策略 $b$ 和 $\alpha \in (0,1]$，离线 *n-step Sarsa* 的算法流程如下
+>
+> 1. 对于 $s\in\mathcal{S},a\in\mathcal{A(s)}$，初始化 $Q(s,a), \pi(a|s)$
+> 2. 枚举轨迹标号 $k = 0, 1,\cdots$
+>   - 随机选取初始状态 $S_{0}$，在策略 $b(S_{0})$ 下选择行动 $A_{0}$
+>   - 枚举时刻 $t = 0, 1, \cdots$
+>       - 执行行动 $A_{t}$ 得到 $R_{t+1},S_{t+1}$
+>       - 记 $\tau = t-n+1$，累加即时回报 $$G_{\tau,n} \leftarrow \sum_{i=1}^{n} \gamma^{i-1} R_{\tau+i}$$
+>       - 若 $S_{t+1}$ 不为终止状态，在策略 $b(S_{t+1})$ 下选取行动 $A_{t+1}$，统计期望回报 $$G_{\tau,n} \leftarrow G_{\tau,n} + \gamma^n Q\left(S_{\tau+n},A_{\tau+n}\right)$$
+>       - 计算重要性采样率 $$\rho \leftarrow \prod_{i=\tau+1}^{\tau+n} \frac{\pi\left(A_i | S_i\right)}{b\left(A_i | S_i\right)}$$
+>       - 更新价值函数 $$Q(S_{t}, A_{t}) \leftarrow Q(S_{t}, A_{t})+\alpha\rho\left[G_{\tau,n}-Q(S_{t}, A_{t})\right]$$
+>       - 找到最优行动 $$a^{*} = \arg \max _a Q\left(S_t, a\right)$$
+>       - 进行策略提升 $$\pi\left(a | S_t\right) \leftarrow \begin{cases}1-\varepsilon+\frac{\epsilon}{\left|\mathcal{A}\left(S_t\right)\right|} & \text { if } a=a^* \\ \frac{\epsilon}{\left|\mathcal{A}\left(S_t\right)\right|} & \text { if } a \neq a^*\end{cases}$$
 
 ---
 
-## Reference
+## *3. Tree Backup Algorithm(树形备份算法)*
 
-- https://wensun.github.io/CS4789_data/conservative_policy_iteration_Mar_23_annotated.pdf
-- https://blog.csdn.net/qq_29745719/article/details/127624285
-- https://zhuanlan.zhihu.com/p/445847200
+我们仔细思考一个问题，为什么 *Q-Learning* 这样的离线算法不需要重要性采样？
+
+这是因为 *Q-Learning* 使用 *max* 运算符来估计目标策略的期望值，也就是说在备份图上的每个结点处都考虑了所有子结点的影响，因此价值函数的更新不依赖于采样轨迹的分布。
+
+类似的，期望 *Sarsa* 的备份图则是累加了所有子结点的贡献，因此其离线版本的算法同样不需要重要性采样。
+
+我们考虑将期望 *Sarsa* 扩展到 *n-step* 的版本，如图所示
+
+<center>![](/content-images/external/56d8abbd9b82f56ce3783ce6550181d7.jpg)</center>
+
+对于树上的每个结点，我们统计其所有子结点的贡献，例如在结点 $S_{t+1}$ 处采样了行动 $A_{t+1}$ 后
+
+- $A_{t+1}$ 结点的贡献依赖于后续的采样，可以由 $G_{t+1,n-1}$ 递归计算
+- 其它子结点 $a$ 的贡献由 $q_{\pi}(S_{t+1},a)$ 进行估计
+
+由此我们统计树上所有结点的贡献得到
+
+$$G_{t,n} = R_{t+1}+\gamma \sum_{a \neq A_{t+1}} \pi\left(a | S_{t+1}\right) q_{\pi}\left(S_{t+1}, a\right)+\gamma \pi\left(A_{t+1} | S_{t+1}\right) G_{t+1,n-1}$$
+
+其中递归的边界是计算 $G_{t+n-1,1}$ 时，此时问题退化为 *1-step* 的期望 *Sarsa*，直接利用下式计算即可
+
+$$G_{t,1} = R_{t+1}+\gamma \sum_a \pi\left(a | S_{t+1}\right) q_{\pi}\left(S_{t+1}, a\right)$$
+
+> **Method 4. N-step Tree Backup.** 对于给定的 $n,\epsilon$，行为策略 $b$ 和 $\alpha \in (0,1]$，算法流程如下
+>
+> 1. 对于 $s\in\mathcal{S},a\in\mathcal{A(s)}$，初始化 $Q(s,a), \pi(a|s)$
+> 2. 枚举轨迹标号 $k = 0, 1,\cdots$
+>   - 随机选取初始状态 $S_{0}$，在策略 $b(S_{0})$ 下选择行动 $A_{0}$
+>   - 枚举时刻 $t = 0, 1, \cdots$
+>       - 执行行动 $A_{t}$ 得到 $R_{t+1},S_{t+1}$
+>       - 记 $\tau = t-n+1$，计算 $$G_{t,1} = \begin{cases}R_{t+1}+\gamma \sum_a \pi\left(a | S_{t+1}\right) Q\left(S_{t+1}, a\right), & \text{if } S_{t+1} \text{ is terminal} \\ R_{t+1}, & \text{otherwise}\end{cases}$$
+>       - 枚举 $k = t, t-1,\cdots,\tau+1$ 递推计算 $$G_{k-1, t-k+2} = R_{k} + \gamma \sum_{a \neq A_k} \pi\left(a | S_k\right) Q\left(S_k, a\right)+\gamma \pi\left(A_k | S_k\right) G_{k,t-k+1}$$
+>       - 更新价值函数 $$Q(S_{t}, A_{t}) \leftarrow Q(S_{t}, A_{t})+\alpha\left[G_{\tau,n}-Q(S_{t}, A_{t})\right]$$
+>       - 找到最优行动 $$a^{*} = \arg \max _a Q\left(S_t, a\right)$$
+>       - 进行策略提升 $$\pi\left(a | S_t\right) \leftarrow \begin{cases}1-\varepsilon+\frac{\epsilon}{\left|\mathcal{A}\left(S_t\right)\right|} & \text { if } a=a^* \\ \frac{\epsilon}{\left|\mathcal{A}\left(S_t\right)\right|} & \text { if } a \neq a^*\end{cases}$$
