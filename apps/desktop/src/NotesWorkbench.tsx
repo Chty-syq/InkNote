@@ -153,6 +153,26 @@ interface ContentSyncConflictDialogState {
   resolutions: Partial<ContentSyncConflictResolutions>;
 }
 
+type ConflictDiffSide = 'local' | 'remote';
+type ConflictDiffLineKind = 'same' | 'added' | 'removed' | 'changed' | 'empty';
+
+interface ConflictDiffLine {
+  kind: ConflictDiffLineKind;
+  lineNumber: number | null;
+  text: string;
+  segments?: ConflictDiffSegment[];
+}
+
+interface ConflictDiffPair {
+  local: ConflictDiffLine[];
+  remote: ConflictDiffLine[];
+}
+
+interface ConflictDiffSegment {
+  text: string;
+  changed: boolean;
+}
+
 interface ContentSyncRiskReport {
   code: string;
   title: string;
@@ -173,10 +193,17 @@ interface NoteHistoryEntry {
 }
 
 type PublishRunState = 'idle' | 'running' | 'success' | 'error';
+type ToastTone = 'info' | 'success' | 'error';
 
 interface PublishLogEntry extends PublishProgressEvent {
   id: number;
   receivedAt: string;
+}
+
+interface ToastMessage {
+  id: number;
+  message: string;
+  tone: ToastTone;
 }
 
 interface EditorSelectionState {
@@ -1250,6 +1277,302 @@ function areContentSyncConflictsResolved(
   return conflicts.every((conflict) => resolutions[conflict.path] === 'remote' || resolutions[conflict.path] === 'local');
 }
 
+function splitConflictPreviewLines(value: string): string[] {
+  const normalized = value.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+  return normalized.length ? normalized.split('\n') : [];
+}
+
+function createConflictDiffLine(
+  kind: ConflictDiffLineKind,
+  text: string,
+  lineNumber: number | null,
+  segments?: ConflictDiffSegment[],
+): ConflictDiffLine {
+  return { kind, lineNumber, text, segments };
+}
+
+function appendConflictDiffSegment(
+  segments: ConflictDiffSegment[],
+  text: string,
+  changed: boolean,
+): void {
+  if (!text) {
+    return;
+  }
+  const previous = segments[segments.length - 1];
+  if (previous?.changed === changed) {
+    previous.text += text;
+    return;
+  }
+  segments.push({ text, changed });
+}
+
+function buildConflictInlineSegments(localText: string, remoteText: string): Pick<ConflictDiffPair, 'local' | 'remote'> {
+  const localUnits = Array.from(localText);
+  const remoteUnits = Array.from(remoteText);
+  if (localUnits.length * remoteUnits.length > 18_000) {
+    return {
+      local: [createConflictDiffLine('changed', localText, null, [{ text: localText, changed: true }])],
+      remote: [createConflictDiffLine('changed', remoteText, null, [{ text: remoteText, changed: true }])],
+    };
+  }
+
+  const lcs = Array.from({ length: localUnits.length + 1 }, () => Array(remoteUnits.length + 1).fill(0) as number[]);
+  for (let localIndex = localUnits.length - 1; localIndex >= 0; localIndex -= 1) {
+    for (let remoteIndex = remoteUnits.length - 1; remoteIndex >= 0; remoteIndex -= 1) {
+      lcs[localIndex][remoteIndex] =
+        localUnits[localIndex] === remoteUnits[remoteIndex]
+          ? lcs[localIndex + 1][remoteIndex + 1] + 1
+          : Math.max(lcs[localIndex + 1][remoteIndex], lcs[localIndex][remoteIndex + 1]);
+    }
+  }
+
+  const localSegments: ConflictDiffSegment[] = [];
+  const remoteSegments: ConflictDiffSegment[] = [];
+  let localIndex = 0;
+  let remoteIndex = 0;
+  while (localIndex < localUnits.length || remoteIndex < remoteUnits.length) {
+    if (
+      localIndex < localUnits.length &&
+      remoteIndex < remoteUnits.length &&
+      localUnits[localIndex] === remoteUnits[remoteIndex]
+    ) {
+      appendConflictDiffSegment(localSegments, localUnits[localIndex], false);
+      appendConflictDiffSegment(remoteSegments, remoteUnits[remoteIndex], false);
+      localIndex += 1;
+      remoteIndex += 1;
+      continue;
+    }
+
+    if (
+      remoteIndex < remoteUnits.length &&
+      (localIndex >= localUnits.length || lcs[localIndex][remoteIndex + 1] >= lcs[localIndex + 1][remoteIndex])
+    ) {
+      appendConflictDiffSegment(remoteSegments, remoteUnits[remoteIndex], true);
+      remoteIndex += 1;
+      continue;
+    }
+
+    appendConflictDiffSegment(localSegments, localUnits[localIndex] ?? '', true);
+    localIndex += 1;
+  }
+
+  return {
+    local: [createConflictDiffLine('changed', localText, null, localSegments)],
+    remote: [createConflictDiffLine('changed', remoteText, null, remoteSegments)],
+  };
+}
+
+function buildIndexedConflictDiff(localLines: string[], remoteLines: string[]): ConflictDiffPair {
+  const local: ConflictDiffLine[] = [];
+  const remote: ConflictDiffLine[] = [];
+  const maxLineCount = Math.max(localLines.length, remoteLines.length);
+  for (let index = 0; index < maxLineCount; index += 1) {
+    const localText = localLines[index];
+    const remoteText = remoteLines[index];
+    if (localText !== undefined && remoteText !== undefined) {
+      const kind: ConflictDiffLineKind = localText === remoteText ? 'same' : 'changed';
+      local.push(createConflictDiffLine(kind, localText, index + 1));
+      remote.push(createConflictDiffLine(kind, remoteText, index + 1));
+      continue;
+    }
+    if (localText !== undefined) {
+      local.push(createConflictDiffLine('removed', localText, index + 1));
+      remote.push(createConflictDiffLine('empty', '', null));
+      continue;
+    }
+    local.push(createConflictDiffLine('empty', '', null));
+    remote.push(createConflictDiffLine('added', remoteText ?? '', index + 1));
+  }
+  return { local, remote };
+}
+
+function buildConflictDiff(localText: string, remoteText: string): ConflictDiffPair {
+  const localLines = splitConflictPreviewLines(localText);
+  const remoteLines = splitConflictPreviewLines(remoteText);
+  if (!localLines.length && !remoteLines.length) {
+    return { local: [], remote: [] };
+  }
+
+  if (localLines.length * remoteLines.length > 260_000) {
+    return buildIndexedConflictDiff(localLines, remoteLines);
+  }
+
+  const lcs = Array.from({ length: localLines.length + 1 }, () => Array(remoteLines.length + 1).fill(0) as number[]);
+  for (let localIndex = localLines.length - 1; localIndex >= 0; localIndex -= 1) {
+    for (let remoteIndex = remoteLines.length - 1; remoteIndex >= 0; remoteIndex -= 1) {
+      lcs[localIndex][remoteIndex] =
+        localLines[localIndex] === remoteLines[remoteIndex]
+          ? lcs[localIndex + 1][remoteIndex + 1] + 1
+          : Math.max(lcs[localIndex + 1][remoteIndex], lcs[localIndex][remoteIndex + 1]);
+    }
+  }
+
+  const local: ConflictDiffLine[] = [];
+  const remote: ConflictDiffLine[] = [];
+  let localIndex = 0;
+  let remoteIndex = 0;
+  while (localIndex < localLines.length || remoteIndex < remoteLines.length) {
+    if (
+      localIndex < localLines.length &&
+      remoteIndex < remoteLines.length &&
+      localLines[localIndex] === remoteLines[remoteIndex]
+    ) {
+      local.push(createConflictDiffLine('same', localLines[localIndex], localIndex + 1));
+      remote.push(createConflictDiffLine('same', remoteLines[remoteIndex], remoteIndex + 1));
+      localIndex += 1;
+      remoteIndex += 1;
+      continue;
+    }
+
+    if (
+      localIndex < localLines.length &&
+      remoteIndex < remoteLines.length &&
+      lcs[localIndex + 1][remoteIndex + 1] >= lcs[localIndex + 1][remoteIndex] &&
+      lcs[localIndex + 1][remoteIndex + 1] >= lcs[localIndex][remoteIndex + 1]
+    ) {
+      const inlineDiff = buildConflictInlineSegments(localLines[localIndex], remoteLines[remoteIndex]);
+      local.push({ ...inlineDiff.local[0], lineNumber: localIndex + 1 });
+      remote.push({ ...inlineDiff.remote[0], lineNumber: remoteIndex + 1 });
+      localIndex += 1;
+      remoteIndex += 1;
+      continue;
+    }
+
+    if (
+      remoteIndex < remoteLines.length &&
+      (localIndex >= localLines.length || lcs[localIndex][remoteIndex + 1] >= lcs[localIndex + 1][remoteIndex])
+    ) {
+      local.push(createConflictDiffLine('empty', '', null));
+      remote.push(createConflictDiffLine('added', remoteLines[remoteIndex], remoteIndex + 1));
+      remoteIndex += 1;
+      continue;
+    }
+
+    local.push(createConflictDiffLine('removed', localLines[localIndex] ?? '', localIndex + 1));
+    remote.push(createConflictDiffLine('empty', '', null));
+    localIndex += 1;
+  }
+
+  return { local, remote };
+}
+
+function getConflictDiffMarker(kind: ConflictDiffLineKind, side: ConflictDiffSide): string {
+  if (kind === 'added') {
+    return '+';
+  }
+  if (kind === 'removed') {
+    return '-';
+  }
+  if (kind === 'changed') {
+    return side === 'local' ? '-' : '+';
+  }
+  return '';
+}
+
+function renderConflictDiffLineText(line: ConflictDiffLine) {
+  if (line.segments?.length) {
+    return line.segments.map((segment, segmentIndex) => (
+      <span
+        className={segment.changed ? 'notes-content-conflict-inline-change' : undefined}
+        key={`${segment.changed ? 'changed' : 'same'}-${segmentIndex}`}
+      >
+        {segment.text}
+      </span>
+    ));
+  }
+  return line.text || ' ';
+}
+
+function localizeToastMessage(message: string): string {
+  const trimmed = message.trim();
+  const exactMessages: Record<string, string> = {
+    'Publishing requires the Tauri desktop app.': '发布需要在 Tauri 桌面端中执行。',
+    'Failed to read publish status.': '读取发布状态失败。',
+    'Enter a commit message before publishing.': '发布前请填写提交说明。',
+    'Failed to publish site changes.': '发布站点变更失败。',
+    'Failed to load the selected avatar.': '加载所选头像失败。',
+    'Updated the blog avatar.': '已更新博客头像。',
+    'Stayed on the current note.': '已返回当前笔记。',
+    'Undid the latest editor change.': '已撤销最近一次编辑。',
+    'Reapplied the latest editor change.': '已重做最近一次编辑。',
+    'Undid the latest notebook editor change.': '已撤销最近一次手写笔记编辑。',
+    'Reapplied the latest notebook editor change.': '已重做最近一次手写笔记编辑。',
+    'Loading notes...': '正在加载笔记...',
+    'Content management is only available in the Tauri desktop app.': '内容管理只能在 Tauri 桌面端中使用。',
+    'Failed to load notes.': '加载笔记失败。',
+    'Discarded the unsaved draft.': '已丢弃未保存的草稿。',
+    'Original content could not be found, so the draft cannot be restored.': '找不到原始内容，无法恢复草稿。',
+    'Reverted to the last saved version.': '已恢复到最近保存的版本。',
+    'Writing to content/ requires the Tauri desktop app.': '写入 content/ 需要在 Tauri 桌面端中执行。',
+    'Failed to save note.': '保存笔记失败。',
+    'Exporting notes requires the Tauri desktop app.': '导出笔记需要在 Tauri 桌面端中执行。',
+    'Export cancelled.': '已取消导出。',
+    'Failed to export note.': '导出笔记失败。',
+    'Deleting notes requires the Tauri desktop app.': '删除笔记需要在 Tauri 桌面端中执行。',
+    'Failed to delete note.': '删除笔记失败。',
+  };
+
+  if (exactMessages[trimmed]) {
+    return exactMessages[trimmed];
+  }
+
+  const loadedNotesMatch = trimmed.match(/^Loaded (\d+) notes\.$/);
+  if (loadedNotesMatch) {
+    return `已加载 ${loadedNotesMatch[1]} 篇笔记。`;
+  }
+
+  const savedContentMatch = trimmed.match(/^Saved to content\/(.+)$/);
+  if (savedContentMatch) {
+    return `已保存到 content/${savedContentMatch[1]}`;
+  }
+
+  const targetPathExistsMatch = trimmed.match(/^The target path content\/(.+) already exists\.$/);
+  if (targetPathExistsMatch) {
+    return `目标路径 content/${targetPathExistsMatch[1]} 已存在。`;
+  }
+
+  const exportedMarkdownMatch = trimmed.match(/^Exported Markdown and notebook project to (.+)$/);
+  if (exportedMarkdownMatch) {
+    return `已导出 Markdown 和手写笔记工程到 ${exportedMarkdownMatch[1]}`;
+  }
+
+  const exportedNoteMatch = trimmed.match(/^Exported note to (.+)$/);
+  if (exportedNoteMatch) {
+    return `已导出笔记到 ${exportedNoteMatch[1]}`;
+  }
+
+  const deletedNoteMatch = trimmed.match(/^Deleted "(.+)"\.$/);
+  if (deletedNoteMatch) {
+    return `已删除「${deletedNoteMatch[1]}」。`;
+  }
+
+  if (/^GitHub API \d+/.test(trimmed)) {
+    return `GitHub API 请求失败：${trimmed.replace(/^GitHub API\s*/, '')}`;
+  }
+
+  const httpMatch = trimmed.match(/^HTTP\s+(\d+)(?:\s+.+)?$/i);
+  if (httpMatch) {
+    return `请求失败：HTTP ${httpMatch[1]}。`;
+  }
+
+  if (!/[\u3400-\u9fff]/.test(trimmed) && /[A-Za-z]/.test(trimmed)) {
+    return '操作未完成，请查看详情。';
+  }
+
+  return trimmed;
+}
+
+function getToastTone(message: string): ToastTone {
+  if (/失败|错误|无法|不能|请先|请填写|请输|取消|Failed|failed|Error|error|Forbidden|requires/i.test(message)) {
+    return 'error';
+  }
+  if (/^已|成功|完成|Loaded|Saved|Updated|Exported|Deleted/i.test(message)) {
+    return 'success';
+  }
+  return 'info';
+}
+
 function formatUnknownError(error: unknown): string {
   return error instanceof Error ? error.message : typeof error === 'string' ? error : String(error);
 }
@@ -1733,7 +2056,7 @@ export default function NotesWorkbench() {
   const [categories, setCategories] = useState<ContentCategory[]>([]);
   const [items, setItems] = useState<ContentLibraryItem[]>([]);
   const [draft, setDraft] = useState<ContentDraft | null>(null);
-  const [status, setStatus] = useState('濠电姵顔栭崰妤冩崲閹邦喖绶ら柦妯侯檧閼版寧銇勮箛鎾跺缂佲偓婢舵劖鐓熸俊顖滃帶閸斿绱掓担鐟邦棆缂佽鲸甯掕灃濞达綀顕栧鍨渻?..');
+  const [toastMessages, setToastMessages] = useState<ToastMessage[]>([]);
   const [isBusy, setIsBusy] = useState(false);
   const [draftSessionId, setDraftSessionId] = useState(0);
   const [selectedCategorySlug, setSelectedCategorySlug] = useState<string | null>(null);
@@ -1794,7 +2117,6 @@ export default function NotesWorkbench() {
   const [categoryDeleteDialog, setCategoryDeleteDialog] = useState<CategoryDeleteDialogState | null>(null);
   const [categoryLabelValue, setCategoryLabelValue] = useState('');
   const [categoryLabelEnValue, setCategoryLabelEnValue] = useState('');
-  const [categorySlugValue, setCategorySlugValue] = useState('');
   const [draggingCategorySlug, setDraggingCategorySlug] = useState<string | null>(null);
   const [draggingSiteLink, setDraggingSiteLink] = useState<SiteLinkDragState | null>(null);
   const [draggingNotePath, setDraggingNotePath] = useState<string | null>(null);
@@ -1859,6 +2181,43 @@ export default function NotesWorkbench() {
   const pullLogSequenceRef = useRef(0);
   const pullLogViewRef = useRef<HTMLDivElement | null>(null);
   const pendingDesktopUpdateRef = useRef<Update | null>(null);
+  const toastIdRef = useRef(0);
+  const toastTimersRef = useRef<Array<ReturnType<typeof setTimeout>>>([]);
+
+  const dismissToast = (id: number) => {
+    setToastMessages((current) => current.filter((toast) => toast.id !== id));
+  };
+
+  const setStatus = (message: string) => {
+    const normalizedMessage = String(message ?? '').trim();
+    if (!normalizedMessage) {
+      return;
+    }
+    const localizedMessage = localizeToastMessage(normalizedMessage);
+
+    const id = ++toastIdRef.current;
+    setToastMessages((current) => [
+      ...current.slice(-3),
+      {
+        id,
+        message: localizedMessage,
+        tone: getToastTone(localizedMessage),
+      },
+    ]);
+
+    const timer = setTimeout(() => {
+      dismissToast(id);
+    }, 5000);
+    toastTimersRef.current.push(timer);
+  };
+
+  useEffect(
+    () => () => {
+      toastTimersRef.current.forEach((timer) => clearTimeout(timer));
+      toastTimersRef.current = [];
+    },
+    [],
+  );
 
   useEffect(() => {
     const view = publishLogViewRef.current;
@@ -2846,7 +3205,7 @@ export default function NotesWorkbench() {
 
   const refreshPublishStatus = async () => {
     if (!isTauri()) {
-      setStatus('Publishing requires the Tauri desktop app.');
+      setStatus('发布需要在 Tauri 桌面端中执行。');
       return;
     }
 
@@ -2891,7 +3250,7 @@ export default function NotesWorkbench() {
       const detail = error instanceof Error ? error.message : typeof error === 'string' ? error : String(error);
       const message = `连接失败：${detail || '未知错误'}`;
       setPublishConnectionMessage(message);
-      setStatus(detail || 'Failed to read publish status.');
+      setStatus(detail || '读取发布状态失败。');
       upsertPublishFlowEntry({
         taskId: `connection-${Date.now()}`,
         progress: 100,
@@ -2912,13 +3271,13 @@ export default function NotesWorkbench() {
 
     setIsPublishDialogOpen(true);
     if (!isTauri()) {
-      setStatus('Publishing requires the Tauri desktop app.');
+      setStatus('发布需要在 Tauri 桌面端中执行。');
       return;
     }
 
     const message = publishMessage.trim();
     if (!message) {
-      setStatus('Enter a commit message before publishing.');
+      setStatus('发布前请填写提交说明。');
       return;
     }
 
@@ -3092,7 +3451,7 @@ export default function NotesWorkbench() {
       }
     } catch (error) {
       const detail = formatUnknownError(error);
-      setStatus(detail || 'Failed to publish site changes.');
+      setStatus(detail || '发布站点变更失败。');
       recordProgress({
         taskId,
         progress: currentProgress,
@@ -3143,6 +3502,7 @@ export default function NotesWorkbench() {
     }
 
     const activeConflictStrategy: PullConflictStrategy = 'manual';
+    const isResolvingConflicts = Boolean(conflictResolutions);
     const conflictLabel = '逐项选择';
     if (!strategyOverride) {
       const confirmed = window.confirm(
@@ -3155,9 +3515,12 @@ export default function NotesWorkbench() {
     }
 
     const taskId = globalThis.crypto?.randomUUID?.() ?? `pull-${Date.now()}`;
-    let currentProgress = 2;
+    let currentProgress = isResolvingConflicts ? Math.max(pullProgress, 2) : 2;
     const recordProgress = (event: PublishProgressEvent) => {
-      const normalizedProgress = Math.max(0, Math.min(100, event.progress));
+      const normalizedEventProgress = Math.max(0, Math.min(100, event.progress));
+      const normalizedProgress = isResolvingConflicts
+        ? Math.max(currentProgress, normalizedEventProgress)
+        : normalizedEventProgress;
       currentProgress = normalizedProgress;
       setPullProgress(normalizedProgress);
       setPullRunState(
@@ -3178,8 +3541,10 @@ export default function NotesWorkbench() {
       ].slice(-120));
     };
 
-    setPullLogs([]);
-    setPullProgress(2);
+    if (!isResolvingConflicts) {
+      setPullLogs([]);
+      setPullProgress(2);
+    }
     setPullRunState('running');
     setIsPullingContent(true);
     let stopListening: (() => void) | null = null;
@@ -3190,23 +3555,34 @@ export default function NotesWorkbench() {
           recordProgress(event);
         }
       });
-      recordProgress({
-        taskId,
-        progress: 2,
-        stage: 'prepare',
-        message: '正在准备远端同步',
-        detail: `本次操作会合并远端内容分支；真实冲突会暂停并逐项选择保留哪一侧。`,
-        level: 'info',
-      });
+      if (isResolvingConflicts) {
+        recordProgress({
+          taskId,
+          progress: currentProgress,
+          stage: 'conflict',
+          message: '已选择冲突处理',
+          detail: '正在按选择继续同步。',
+          level: 'info',
+        });
+      } else {
+        recordProgress({
+          taskId,
+          progress: 2,
+          stage: 'prepare',
+          message: '正在准备远端同步',
+          detail: `本次操作会合并远端内容分支；真实冲突会暂停并逐项选择保留哪一侧。`,
+          level: 'info',
+        });
 
-      recordProgress({
-        taskId,
-        progress: 5,
-        stage: 'config',
-        message: '正在保存站点设置',
-        detail: '确保仓库地址和分支配置已经写入本地。',
-        level: 'info',
-      });
+        recordProgress({
+          taskId,
+          progress: 5,
+          stage: 'config',
+          message: '正在保存站点设置',
+          detail: '确保仓库地址和分支配置已经写入本地。',
+          level: 'info',
+        });
+      }
       const savedConfig = await saveSiteConfig();
       if (!savedConfig) {
         recordProgress({
@@ -3347,20 +3723,24 @@ export default function NotesWorkbench() {
     }
 
     const activeConflictStrategy: PullConflictStrategy = 'manual';
+    const isResolvingConflicts = Boolean(conflictResolutions);
     const taskId = globalThis.crypto?.randomUUID?.() ?? `sync-${Date.now()}`;
     const conflictLabel = '逐项选择';
     const selectedSshKeyPath = sshKeyPath.trim();
-    let currentProgress = 2;
+    let currentProgress = isResolvingConflicts ? Math.max(publishProgress, 58) : 2;
 
     const updateRunProgress = (
       rawProgress: number,
       options: { offset?: number; scale?: number; forceRunState?: PublishRunState; level?: PublishProgressEvent['level'] } = {},
     ) => {
       const normalizedProgress = Math.max(0, Math.min(100, rawProgress));
-      const mappedProgress = Math.max(
+      const nextMappedProgress = Math.max(
         0,
         Math.min(100, Math.round((options.offset ?? 0) + normalizedProgress * (options.scale ?? 1))),
       );
+      const mappedProgress = isResolvingConflicts
+        ? Math.max(currentProgress, nextMappedProgress)
+        : nextMappedProgress;
       currentProgress = mappedProgress;
       setPublishProgress(mappedProgress);
       setPublishRunState(
@@ -3413,8 +3793,10 @@ export default function NotesWorkbench() {
       });
     };
 
-    setPublishLogs([]);
-    setPublishProgress(2);
+    if (!isResolvingConflicts) {
+      setPublishLogs([]);
+      setPublishProgress(2);
+    }
     setPublishRunState('running');
     setIsPullingContent(true);
     setIsPublishingSite(true);
@@ -3427,12 +3809,21 @@ export default function NotesWorkbench() {
         }
       });
 
-      recordManualProgress(
-        2,
-        'connection',
-        '测试远程连接',
-        `内容分支：${configuredContentBranch}`,
-      );
+      if (isResolvingConflicts) {
+        recordManualProgress(
+          currentProgress,
+          'conflict',
+          '已选择冲突处理',
+          '正在按选择继续同步。',
+        );
+      } else {
+        recordManualProgress(
+          2,
+          'connection',
+          '测试远程连接',
+          `内容分支：${configuredContentBranch}`,
+        );
+      }
       let remoteStatus: PublishStatusResponse;
       try {
         remoteStatus = await getPublishStatus(configuredRemote, configuredContentBranch, selectedSshKeyPath);
@@ -3448,7 +3839,7 @@ export default function NotesWorkbench() {
         const detail = error instanceof Error ? error.message : typeof error === 'string' ? error : String(error);
         const messageText = `连接失败：${detail || '未知错误'}`;
         setPublishConnectionMessage(messageText);
-        setStatus(detail || 'Failed to read publish status.');
+        setStatus(detail || '读取发布状态失败。');
         recordManualProgress(
           8,
           'connection',
@@ -3650,7 +4041,7 @@ export default function NotesWorkbench() {
     reader.onload = () => {
       const result = typeof reader.result === 'string' ? reader.result : '';
       if (!result) {
-        setStatus('Failed to load the selected avatar.');
+        setStatus('加载所选头像失败。');
         return;
       }
 
@@ -3660,10 +4051,10 @@ export default function NotesWorkbench() {
       } catch {
         // Ignore local storage write failures.
       }
-      setStatus('Updated the blog avatar.');
+      setStatus('已更新博客头像。');
     };
     reader.onerror = () => {
-      setStatus('Failed to load the selected avatar.');
+      setStatus('加载所选头像失败。');
     };
     reader.readAsDataURL(file);
   };
@@ -3695,7 +4086,7 @@ export default function NotesWorkbench() {
 
     const shouldProceed = window.confirm(`${dirtyMessage}\n\nDiscard them and ${nextAction}?`);
     if (!shouldProceed) {
-      setStatus('Stayed on the current note.');
+      setStatus('已返回当前笔记。');
     }
 
     return shouldProceed;
@@ -4108,7 +4499,7 @@ export default function NotesWorkbench() {
     setDraft(preserveAutoSavedMetadata(previousDraft.draft, draft));
     restoreEditorSelection(previousDraft.selection);
     appendHistoryEntry('Undo', draft.title);
-    setStatus('Undid the latest editor change.');
+    setStatus('已撤销最近一次编辑。');
     return true;
   };
 
@@ -4132,7 +4523,7 @@ export default function NotesWorkbench() {
     setDraft(preserveAutoSavedMetadata(nextDraft.draft, draft));
     restoreEditorSelection(nextDraft.selection);
     appendHistoryEntry('Redo', draft.title);
-    setStatus('Reapplied the latest editor change.');
+    setStatus('已重做最近一次编辑。');
     return true;
   };
 
@@ -4168,7 +4559,7 @@ export default function NotesWorkbench() {
     handleLinkedNotebookChange(previousProject.project);
     restoreEditorSelection(previousProject.selection);
     appendHistoryEntry('Undo', draftRef.current?.title ?? 'InkNote');
-    setStatus('Undid the latest notebook editor change.');
+    setStatus('已撤销最近一次手写笔记编辑。');
     return true;
   };
 
@@ -4193,7 +4584,7 @@ export default function NotesWorkbench() {
     handleLinkedNotebookChange(nextProject.project);
     restoreEditorSelection(nextProject.selection);
     appendHistoryEntry('Redo', draftRef.current?.title ?? 'InkNote');
-    setStatus('Reapplied the latest notebook editor change.');
+    setStatus('已重做最近一次手写笔记编辑。');
     return true;
   };
 
@@ -4224,7 +4615,7 @@ export default function NotesWorkbench() {
 
   const loadLibrary = async (preferredPath?: string, replaceCurrentDraft = false) => {
     setIsBusy(true);
-    setStatus('Loading notes...');
+    setStatus('正在加载笔记...');
 
     try {
       if (!isTauri()) {
@@ -4234,7 +4625,7 @@ export default function NotesWorkbench() {
         setSelectedCategorySlug(null);
         activateDraft(null);
         clearLinkedNotebookState();
-        setStatus('Content management is only available in the Tauri desktop app.');
+        setStatus('内容管理只能在 Tauri 桌面端中使用。');
         return;
       }
 
@@ -4293,9 +4684,9 @@ export default function NotesWorkbench() {
         activateDraft(null);
       }
 
-      setStatus(`Loaded ${loadedItems.length} notes.`);
+      setStatus(`已加载 ${loadedItems.length} 篇笔记。`);
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : 'Failed to load notes.');
+      setStatus(error instanceof Error ? error.message : '加载笔记失败。');
     } finally {
       setIsBusy(false);
     }
@@ -4525,14 +4916,12 @@ export default function NotesWorkbench() {
     setCategoryDialog({ mode: 'create' });
     setCategoryLabelValue('');
     setCategoryLabelEnValue('');
-    setCategorySlugValue('');
   };
 
   const openEditCategoryDialog = (category: ContentCategory) => {
     setCategoryDialog({ mode: 'edit', slug: category.slug });
     setCategoryLabelValue(category.label);
     setCategoryLabelEnValue(category.labelEn?.trim() ?? '');
-    setCategorySlugValue(category.slug);
   };
 
   const closeCategoryDialog = () => {
@@ -4550,16 +4939,20 @@ export default function NotesWorkbench() {
 
     const label = categoryLabelValue.trim().replace(/\s+/g, ' ');
     const labelEn = categoryLabelEnValue.trim().replace(/\s+/g, ' ');
-    const routeInput = categorySlugValue.trim();
-    const requestedSlug = routeInput ? slugifyCategoryLabel(routeInput) : '';
+    const requestedSlug = slugifyCategoryLabel(labelEn);
 
     if (!label) {
       setStatus('\u8bf7\u586b\u5199\u7c7b\u76ee\u540d\u79f0\u3002');
       return;
     }
 
-    if (routeInput && !requestedSlug) {
-      setStatus('\u8bf7\u586b\u5199\u6709\u6548\u7684\u7c7b\u76ee\u8def\u7531\u3002');
+    if (!labelEn) {
+      setStatus('请填写类目英文名称。');
+      return;
+    }
+
+    if (!requestedSlug) {
+      setStatus('请填写有效的类目英文名称。');
       return;
     }
 
@@ -4567,18 +4960,18 @@ export default function NotesWorkbench() {
 
     try {
       if (categoryDialog.mode === 'create') {
-        if (requestedSlug && categories.some((category) => category.slug === requestedSlug)) {
-          setStatus(`\u7c7b\u76ee\u8def\u7531\u300c${requestedSlug}\u300d\u5df2\u5b58\u5728\u3002`);
+        if (categories.some((category) => category.slug === requestedSlug)) {
+          setStatus(`英文名称生成的路由「${requestedSlug}」已存在，请更换英文名称。`);
           return;
         }
 
-        const nextSlug = requestedSlug || ensureUniqueCategorySlug(labelEn || label, categories);
+        const nextSlug = requestedSlug;
         const nextCategories = [
           ...categories,
           {
             slug: nextSlug,
             label,
-            ...(labelEn ? { labelEn } : {}),
+            labelEn,
           },
         ];
 
@@ -4593,17 +4986,15 @@ export default function NotesWorkbench() {
         }
 
         if (
-          requestedSlug &&
           categories.some(
             (category) => category.slug === requestedSlug && category.slug !== categoryToEdit.slug,
           )
         ) {
-          setStatus(`\u7c7b\u76ee\u8def\u7531\u300c${requestedSlug}\u300d\u5df2\u5b58\u5728\u3002`);
+          setStatus(`英文名称生成的路由「${requestedSlug}」已存在，请更换英文名称。`);
           return;
         }
 
-        const nextSlug =
-          requestedSlug || ensureUniqueCategorySlug(labelEn || label, categories, categoryToEdit.slug);
+        const nextSlug = requestedSlug;
         const affectedItems = items.filter((item) => getItemCategorySlug(item) === categoryToEdit.slug);
         const isChangingSlug = nextSlug !== categoryToEdit.slug;
         const currentDraftIsAffected =
@@ -4627,7 +5018,7 @@ export default function NotesWorkbench() {
                 ...category,
                 slug: nextSlug,
                 label,
-                labelEn: labelEn || undefined,
+                labelEn,
               }
             : category,
         );
@@ -5171,13 +5562,13 @@ export default function NotesWorkbench() {
 
     if (!draft.sourceRelativePath) {
       activateDraft(null);
-      setStatus('Discarded the unsaved draft.');
+      setStatus('已丢弃未保存的草稿。');
       return;
     }
 
     const source = items.find((item) => item.relativePath === draft.sourceRelativePath);
     if (!source) {
-      setStatus('Original content could not be found, so the draft cannot be restored.');
+      setStatus('找不到原始内容，无法恢复草稿。');
       return;
     }
 
@@ -5186,7 +5577,7 @@ export default function NotesWorkbench() {
     setSelectedCategorySlug(getItemCategorySlug(source) || null);
     setWorkspacePanel(getWorkspacePanelForDraft(nextDraft));
     setHistoryEntries([createHistoryEntry('Reverted note', source.frontmatter.title)]);
-    setStatus('Reverted to the last saved version.');
+    setStatus('已恢复到最近保存的版本。');
   };
 
   const handleLinkedNotebookChange = (nextProject: ProjectData) => {
@@ -5442,12 +5833,12 @@ export default function NotesWorkbench() {
     }
 
     if (nextDuplicateItem) {
-      setStatus(`The target path content/${nextSaveTarget} already exists.`);
+      setStatus(`目标路径 content/${nextSaveTarget} 已存在。`);
       return null;
     }
 
     if (!isTauri()) {
-      setStatus('Writing to content/ requires the Tauri desktop app.');
+      setStatus('写入 content/ 需要在 Tauri 桌面端中执行。');
       return null;
     }
 
@@ -5516,10 +5907,10 @@ export default function NotesWorkbench() {
         }
       }
 
-      setStatus(options?.successMessage ?? `Saved to content/${nextSaveTarget}`);
+      setStatus(options?.successMessage ?? `已保存到 content/${nextSaveTarget}`);
       return savedItem;
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : options?.failureMessage ?? 'Failed to save note.');
+      setStatus(error instanceof Error ? error.message : options?.failureMessage ?? '保存笔记失败。');
       return null;
     } finally {
       setIsBusy(false);
@@ -5532,7 +5923,7 @@ export default function NotesWorkbench() {
     }
 
     return persistDraft(draft, {
-      successMessage: `Saved to content/${getDraftSavePath(draft)}`,
+      successMessage: `已保存到 content/${getDraftSavePath(draft)}`,
       historyLabel: 'Saved note',
       historyDetail: draft.title,
     });
@@ -5603,13 +5994,13 @@ export default function NotesWorkbench() {
     }
 
     if (!isTauri()) {
-      setStatus('Exporting notes requires the Tauri desktop app.');
+      setStatus('导出笔记需要在 Tauri 桌面端中执行。');
       return;
     }
 
     const chosenPath = await chooseFileToSave(`${draft.slug || 'note'}.md`);
     if (!chosenPath) {
-      setStatus('Export cancelled.');
+      setStatus('已取消导出。');
       return;
     }
 
@@ -5624,14 +6015,14 @@ export default function NotesWorkbench() {
         const notebookExportPath = markdownPath.replace(/\.md$/i, '.inknote.json');
         await writeTextFile(notebookExportPath, serializeProject(linkedProject));
         appendHistoryEntry('Exported note', exportableDraft.title);
-        setStatus(`Exported Markdown and notebook project to ${markdownPath}`);
+        setStatus(`已导出 Markdown 和手写笔记工程到 ${markdownPath}`);
         return;
       }
 
       appendHistoryEntry('Exported note', exportableDraft.title);
-      setStatus(`Exported note to ${markdownPath}`);
+      setStatus(`已导出笔记到 ${markdownPath}`);
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : 'Failed to export note.');
+      setStatus(error instanceof Error ? error.message : '导出笔记失败。');
     }
   };
 
@@ -5709,12 +6100,12 @@ export default function NotesWorkbench() {
     if (!draft.sourceRelativePath) {
       activateDraft(null);
       clearLinkedNotebookState();
-      setStatus('Discarded the unsaved draft.');
+      setStatus('已丢弃未保存的草稿。');
       return;
     }
 
     if (!isTauri()) {
-      setStatus('Deleting notes requires the Tauri desktop app.');
+      setStatus('删除笔记需要在 Tauri 桌面端中执行。');
       return;
     }
 
@@ -5741,14 +6132,14 @@ export default function NotesWorkbench() {
       if (nextItem) {
         activateDraft(getDraftFromItem(nextItem));
         setSelectedCategorySlug(getItemCategorySlug(nextItem) || null);
-        setStatus(`Deleted "${draft.title}".`);
+        setStatus(`已删除「${draft.title}」。`);
       } else {
         activateDraft(null);
         clearLinkedNotebookState();
-        setStatus(`Deleted "${draft.title}".`);
+        setStatus(`已删除「${draft.title}」。`);
       }
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : 'Failed to delete note.');
+      setStatus(error instanceof Error ? error.message : '删除笔记失败。');
     } finally {
       setIsBusy(false);
     }
@@ -6567,16 +6958,6 @@ export default function NotesWorkbench() {
       ? linkedNotebookRedoStackRef.current.length > 0
       : activeWorkspacePanel === 'write' && draftRedoStackRef.current.length > 0;
 
-  const saveStateText = draft
-    ? draft.type === 'inknote' && notebookDirty && draftDirty
-      ? 'Markdown and linked notebook both have unsaved changes.'
-      : draft.type === 'inknote' && notebookDirty
-        ? 'The linked notebook has unsaved changes.'
-        : dirty
-          ? 'The current note has unsaved changes.'
-          : 'All changes are saved.'
-    : 'Select a note to start editing.';
-
   const selectedCategory =
     (selectedCategorySlug ? categories.find((category) => category.slug === selectedCategorySlug) : null) ?? null;
   const categoryToDelete =
@@ -6716,12 +7097,6 @@ export default function NotesWorkbench() {
             )}
           </nav>
 
-          <div className="notes-sidebar-footer">
-            <div className="notes-sidebar-status">
-              <span>{saveStateText}</span>
-              <p>{status}</p>
-            </div>
-          </div>
         </aside>
 
         <section className="notes-list-pane">
@@ -7451,6 +7826,20 @@ export default function NotesWorkbench() {
         </section>
       </main>
 
+      {toastMessages.length > 0 ? (
+        <div className="notes-toast-stack" aria-live="polite" aria-atomic="false">
+          {toastMessages.map((toast) => (
+            <article className={`notes-toast ${toast.tone}`} key={toast.id} role="status">
+              <span className="notes-toast-dot" aria-hidden="true" />
+              <p>{toast.message}</p>
+              <button type="button" onClick={() => dismissToast(toast.id)} aria-label="关闭提示">
+                <IconX aria-hidden="true" />
+              </button>
+            </article>
+          ))}
+        </div>
+      ) : null}
+
       {isMetadataDialogOpen && draft ? (
         <div className="notes-dialog-overlay" onClick={() => setIsMetadataDialogOpen(false)}>
           <section
@@ -7629,6 +8018,9 @@ export default function NotesWorkbench() {
             <div className="notes-content-conflict-list">
               {contentSyncConflictDialog.conflicts.map((conflict) => {
                 const resolution = contentSyncConflictDialog.resolutions[conflict.path];
+                const localPreview = conflict.localContent || conflict.local || '';
+                const remotePreview = conflict.remoteContent || conflict.remote || '';
+                const diff = buildConflictDiff(localPreview, remotePreview);
                 return (
                 <article className="notes-content-conflict-item" key={`${conflict.path}-${conflict.kind}`}>
                   <header className="notes-content-conflict-item-head">
@@ -7649,7 +8041,24 @@ export default function NotesWorkbench() {
                           保留本地
                         </button>
                       </header>
-                      <pre>{conflict.localContent || conflict.local || '本地内容为空。'}</pre>
+                      <pre className="notes-content-conflict-diff">
+                        {diff.local.length ? (
+                          diff.local.map((line, lineIndex) => (
+                            <span
+                              className={`notes-content-conflict-diff-line ${line.kind}`}
+                              key={`local-${lineIndex}-${line.lineNumber ?? 'gap'}`}
+                            >
+                              <span className="notes-content-conflict-line-number">{line.lineNumber ?? ''}</span>
+                              <span className="notes-content-conflict-line-marker">
+                                {getConflictDiffMarker(line.kind, 'local')}
+                              </span>
+                              <span className="notes-content-conflict-line-text">{renderConflictDiffLineText(line)}</span>
+                            </span>
+                          ))
+                        ) : (
+                          <span className="notes-content-conflict-empty">本地内容为空。</span>
+                        )}
+                      </pre>
                     </section>
                     <section className={`notes-content-conflict-preview ${resolution === 'remote' ? 'active' : ''}`}>
                       <header>
@@ -7661,7 +8070,24 @@ export default function NotesWorkbench() {
                           保留远端
                         </button>
                       </header>
-                      <pre>{conflict.remoteContent || conflict.remote || '远端内容为空。'}</pre>
+                      <pre className="notes-content-conflict-diff">
+                        {diff.remote.length ? (
+                          diff.remote.map((line, lineIndex) => (
+                            <span
+                              className={`notes-content-conflict-diff-line ${line.kind}`}
+                              key={`remote-${lineIndex}-${line.lineNumber ?? 'gap'}`}
+                            >
+                              <span className="notes-content-conflict-line-number">{line.lineNumber ?? ''}</span>
+                              <span className="notes-content-conflict-line-marker">
+                                {getConflictDiffMarker(line.kind, 'remote')}
+                              </span>
+                              <span className="notes-content-conflict-line-text">{renderConflictDiffLineText(line)}</span>
+                            </span>
+                          ))
+                        ) : (
+                          <span className="notes-content-conflict-empty">远端内容为空。</span>
+                        )}
+                      </pre>
                     </section>
                   </div>
                 </article>
@@ -8590,15 +9016,31 @@ export default function NotesWorkbench() {
                             </div>
                           </section>
                         ) : (
-                          <div className="notes-settings-sync-pending">
-                            <span className="notes-settings-sync-pending-icon">
-                              <IconRefresh aria-hidden="true" />
-                            </span>
-                            <div>
+                          <section
+                            className="notes-sync-flow idle notes-sync-flow-placeholder"
+                            aria-label="站点同步准备状态"
+                          >
+                            <header className="notes-sync-flow-head">
                               <strong>准备同步</strong>
-                              <span>同步会推送内容分支，远端工作流会自动构建并发布站点。</span>
+                              <span>0%</span>
+                            </header>
+                            <div
+                              className="notes-sync-flow-track"
+                              role="progressbar"
+                              aria-valuemin={0}
+                              aria-valuemax={100}
+                              aria-valuenow={0}
+                            >
+                              <span style={{ width: '0%' }} />
                             </div>
-                          </div>
+                            <div className="notes-sync-flow-empty">
+                              <span className="notes-sync-flow-empty-icon" aria-hidden="true">
+                                <IconRefresh />
+                              </span>
+                              <strong>等待同步</strong>
+                              <span>点击下方同步按钮后，进度会在这里显示。</span>
+                            </div>
+                          </section>
                         )}
                       </div>
 
@@ -9159,8 +9601,8 @@ export default function NotesWorkbench() {
                 </h2>
                 <span>
                   {categoryDialog.mode === 'create'
-                    ? '\u586b\u5199\u540d\u79f0\u3001\u82f1\u6587\u540d\u548c\u8def\u7531'
-                    : '\u4fee\u6539\u663e\u793a\u540d\u548c web \u8def\u7531'}
+                    ? '填写中文名称和英文名称'
+                    : '修改类目的中文名称和英文名称'}
                 </span>
               </div>
               <button
@@ -9182,7 +9624,7 @@ export default function NotesWorkbench() {
                   value={categoryLabelValue}
                   onChange={(event) => setCategoryLabelValue(event.target.value)}
                   onKeyDown={(event) => {
-                    if (event.key === 'Enter' && categoryLabelValue.trim()) {
+                    if (event.key === 'Enter' && categoryLabelValue.trim() && categoryLabelEnValue.trim()) {
                       event.preventDefault();
                       void saveCategoryDialog();
                     }
@@ -9197,27 +9639,12 @@ export default function NotesWorkbench() {
                   value={categoryLabelEnValue}
                   onChange={(event) => setCategoryLabelEnValue(event.target.value)}
                   onKeyDown={(event) => {
-                    if (event.key === 'Enter' && categoryLabelValue.trim()) {
+                    if (event.key === 'Enter' && categoryLabelValue.trim() && categoryLabelEnValue.trim()) {
                       event.preventDefault();
                       void saveCategoryDialog();
                     }
                   }}
                   placeholder="Mathematics"
-                />
-              </label>
-
-              <label className="notes-category-dialog-field">
-                <span>{'\u8def\u7531'}</span>
-                <input
-                  value={categorySlugValue}
-                  onChange={(event) => setCategorySlugValue(event.target.value)}
-                  onKeyDown={(event) => {
-                    if (event.key === 'Enter' && categoryLabelValue.trim()) {
-                      event.preventDefault();
-                      void saveCategoryDialog();
-                    }
-                  }}
-                  placeholder="machine-learning"
                 />
               </label>
             </div>
@@ -9230,7 +9657,7 @@ export default function NotesWorkbench() {
                 type="button"
                 className="notes-category-dialog-submit"
                 onClick={() => void saveCategoryDialog()}
-                disabled={isBusy || !categoryLabelValue.trim()}
+                disabled={isBusy || !categoryLabelValue.trim() || !categoryLabelEnValue.trim()}
               >
                 {isBusy
                   ? '\u4fdd\u5b58\u4e2d...'

@@ -1,10 +1,10 @@
 ---
 type: markdown
 title: Generative Adversarial Imitation Learning
-slug: 3187429
+slug: "3187429"
 order: 2
 date: 2026-04-08
-updatedAt: 2026-06-22 22:59:36
+updatedAt: 2026-07-08 17:42:44
 published: true
 category: machine-learning
 ---
