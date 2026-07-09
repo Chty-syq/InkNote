@@ -115,6 +115,11 @@ type CardGalleryImage = {
   focus?: CardGalleryImageFocus;
 };
 
+type CardGalleryManifest = {
+  images: CardGalleryImage[];
+  assignments: Record<string, string>;
+};
+
 type CardImageAssignment = Map<string, CardGalleryImage>;
 
 type ResolvedGitHubRepo = {
@@ -374,15 +379,27 @@ function formatCardImageObjectPosition(focus: CardGalleryImageFocus | undefined)
   return `${normalized.x}% ${normalized.y}%`;
 }
 
-function normalizeCardGalleryImages(value: unknown): CardGalleryImage[] {
+function normalizeCardGalleryAssignments(value: unknown): Record<string, string> {
+  if (!value || typeof value !== 'object') {
+    return {};
+  }
+
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>)
+      .map(([key, imageKey]) => [key.trim(), typeof imageKey === 'string' ? imageKey.trim() : ''] as const)
+      .filter(([key, imageKey]) => key && imageKey),
+  );
+}
+
+function normalizeCardGalleryManifest(value: unknown): CardGalleryManifest {
   const input = value && typeof value === 'object' ? (value as { images?: unknown }) : {};
   if (!Array.isArray(input.images)) {
-    return [];
+    return { images: [], assignments: {} };
   }
 
   const seenPaths = new Set<string>();
 
-  return input.images
+  const images = input.images
     .map((image): CardGalleryImage | null => {
       if (!image || typeof image !== 'object') {
         return null;
@@ -413,14 +430,35 @@ function normalizeCardGalleryImages(value: unknown): CardGalleryImage[] {
       seenPaths.add(key);
       return true;
     });
+
+  return {
+    images,
+    assignments: normalizeCardGalleryAssignments((input as { assignments?: unknown }).assignments),
+  };
 }
 
-function buildCardImageAssignments(entries: PortalEntry[], images: CardGalleryImage[]): CardImageAssignment {
+function buildCardImageAssignments(entries: PortalEntry[], manifest: CardGalleryManifest): CardImageAssignment {
   const assignments: CardImageAssignment = new Map();
-  const assignableCount = Math.min(entries.length, images.length);
+  const imagesByKey = new Map(manifest.images.flatMap((image) => [[image.id, image], [image.path, image]] as const));
+  const usedImageIds = new Set<string>();
 
+  for (const entry of entries) {
+    const image = imagesByKey.get(manifest.assignments[entry.href] ?? '');
+    if (!image || usedImageIds.has(image.id)) {
+      continue;
+    }
+
+    assignments.set(entry.id, image);
+    usedImageIds.add(image.id);
+  }
+
+  if (assignments.size > 0 || Object.keys(manifest.assignments).length > 0) {
+    return assignments;
+  }
+
+  const assignableCount = Math.min(entries.length, manifest.images.length);
   for (let index = 0; index < assignableCount; index += 1) {
-    assignments.set(entries[index].id, images[index]);
+    assignments.set(entries[index].id, manifest.images[index]);
   }
 
   return assignments;
@@ -1628,26 +1666,26 @@ function GiscusThread({ threadKey }: { threadKey: string }) {
   );
 }
 
-function useCardGalleryImages(): CardGalleryImage[] {
-  const [images, setImages] = useState<CardGalleryImage[]>([]);
+function useCardGalleryManifest(): CardGalleryManifest {
+  const [manifest, setManifest] = useState<CardGalleryManifest>({ images: [], assignments: {} });
 
   useEffect(() => {
     if (!ACTIVE_CARD_IMAGE_CONFIG) {
-      setImages([]);
+      setManifest({ images: [], assignments: {} });
       return;
     }
 
     let cancelled = false;
     fetch(toAssetPath(ACTIVE_CARD_IMAGE_CONFIG.manifest), { cache: 'no-store' })
       .then((response) => (response.ok ? response.json() : null))
-      .then((manifest) => {
+      .then((nextManifest) => {
         if (!cancelled) {
-          setImages(normalizeCardGalleryImages(manifest));
+          setManifest(normalizeCardGalleryManifest(nextManifest));
         }
       })
       .catch(() => {
         if (!cancelled) {
-          setImages([]);
+          setManifest({ images: [], assignments: {} });
         }
       });
 
@@ -1656,7 +1694,7 @@ function useCardGalleryImages(): CardGalleryImage[] {
     };
   }, []);
 
-  return images;
+  return manifest;
 }
 
 function ArticleCard({
@@ -1746,7 +1784,7 @@ function ArticleFeed({
   navigate: (href: string) => void;
   emptyTitle: string;
   emptyCopy: string;
-  cardGalleryImages: CardGalleryImage[];
+  cardGalleryImages: CardGalleryManifest;
 }) {
   const viewCounts = useGoatCounterCounts(entries);
   const commentCounts = useGiscusCommentCounts(entries);
@@ -1927,7 +1965,7 @@ function HomePage({
   navigate: (href: string) => void;
   query: string;
   setQuery: (value: string) => void;
-  cardGalleryImages: CardGalleryImage[];
+  cardGalleryImages: CardGalleryManifest;
 }) {
     return (
       <div className="blog-layout">
@@ -1957,7 +1995,7 @@ function CollectionPage<TFrontmatter extends ContentFrontmatter>({
   navigate: (href: string) => void;
   query: string;
   setQuery: (value: string) => void;
-  cardGalleryImages: CardGalleryImage[];
+  cardGalleryImages: CardGalleryManifest;
 }) {
   const publishedEntries = useMemo(
     () =>
@@ -2256,7 +2294,7 @@ export default function SiteAppWide() {
     () => typeof window !== 'undefined' && typeof (window as { goatcounter?: { count?: unknown } }).goatcounter?.count === 'function',
   );
   const goatCounterTrackedPathRef = useRef<string | null>(null);
-  const cardGalleryImages = useCardGalleryImages();
+  const cardGalleryImages = useCardGalleryManifest();
   const route = matchRoute(pathname);
 
   useEffect(() => {

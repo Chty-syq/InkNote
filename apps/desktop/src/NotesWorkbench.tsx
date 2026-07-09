@@ -351,6 +351,7 @@ interface GalleryImageManifest {
   updatedAt: string;
   count: number;
   images: GalleryImageItem[];
+  assignments: Record<string, string>;
 }
 
 interface ImagePreviewState {
@@ -358,6 +359,21 @@ interface ImagePreviewState {
   title: string;
   galleryImageKey?: string;
   focus?: GalleryImageFocus;
+}
+
+interface GalleryDeleteDialogState {
+  images: GalleryImageItem[];
+  affectedCount: number;
+  reassignedCount: number;
+  unassignedCount: number;
+}
+
+interface GalleryDeletePlan {
+  nextImages: GalleryImageItem[];
+  nextAssignments: Record<string, string>;
+  affectedArticleKeys: Set<string>;
+  reassignedCount: number;
+  unassignedCount: number;
 }
 
 interface ImagePageData<T> {
@@ -645,6 +661,18 @@ function isSameGalleryImageFocus(left: GalleryImageFocus, right: GalleryImageFoc
   return normalizedLeft.x === normalizedRight.x && normalizedLeft.y === normalizedRight.y;
 }
 
+function normalizeGalleryAssignments(value: unknown): Record<string, string> {
+  if (!value || typeof value !== 'object') {
+    return {};
+  }
+
+  const entries = Object.entries(value as Record<string, unknown>)
+    .map(([key, imageKey]) => [key.trim(), typeof imageKey === 'string' ? imageKey.trim() : ''] as const)
+    .filter(([key, imageKey]) => key && imageKey);
+
+  return Object.fromEntries(entries);
+}
+
 function normalizeGalleryManifest(value: unknown): GalleryImageManifest {
   const input = value && typeof value === 'object' ? (value as Partial<GalleryImageManifest>) : {};
   const images = Array.isArray(input.images)
@@ -674,6 +702,7 @@ function normalizeGalleryManifest(value: unknown): GalleryImageManifest {
     updatedAt: typeof input.updatedAt === 'string' ? input.updatedAt : new Date().toISOString(),
     count: images.length,
     images,
+    assignments: normalizeGalleryAssignments((input as { assignments?: unknown }).assignments),
   };
 }
 
@@ -683,6 +712,191 @@ function getGalleryImagePreviewSource(path: string, contentRoot: string | null):
 
 function getGalleryImageKey(image: GalleryImageItem): string {
   return image.id || image.path;
+}
+
+function getArticleCardItems(items: ContentLibraryItem[]): ContentLibraryItem[] {
+  return sortLibraryItems(
+    items.filter((item) => {
+      return !(
+        item.frontmatter.type === 'markdown' &&
+        typeof item.frontmatter.permalink === 'string' &&
+        item.frontmatter.permalink.trim()
+      );
+    }),
+  );
+}
+
+function getArticleCardAssignmentKey(item: ContentLibraryItem): string {
+  return getPreviewPathFromItem(item) ?? item.relativePath;
+}
+
+function createSequentialGalleryAssignments(
+  articleItems: ContentLibraryItem[],
+  images: GalleryImageItem[],
+): Record<string, string> {
+  const entries = articleItems.slice(0, images.length);
+  return Object.fromEntries(
+    entries.map((item, index) => [getArticleCardAssignmentKey(item), getGalleryImageKey(images[index])]),
+  );
+}
+
+function getGalleryAssignmentBaseline(
+  articleItems: ContentLibraryItem[],
+  images: GalleryImageItem[],
+  assignments: Record<string, string>,
+): Record<string, string> {
+  return Object.keys(assignments).length > 0
+    ? assignments
+    : createSequentialGalleryAssignments(articleItems, images);
+}
+
+function includeArticleCardItem(
+  articleItems: ContentLibraryItem[],
+  item: ContentLibraryItem | null,
+): ContentLibraryItem[] {
+  if (!item) {
+    return articleItems;
+  }
+
+  const itemKey = getArticleCardAssignmentKey(item);
+  return articleItems.some((articleItem) => getArticleCardAssignmentKey(articleItem) === itemKey)
+    ? articleItems
+    : [...articleItems, item];
+}
+
+function getAssignedGalleryImageForArticle(
+  item: ContentLibraryItem | null,
+  articleItems: ContentLibraryItem[],
+  images: GalleryImageItem[],
+  assignments: Record<string, string>,
+): GalleryImageItem | null {
+  if (!item) {
+    return null;
+  }
+
+  const normalizedAssignments = normalizeArticleGalleryAssignments(
+    articleItems,
+    images,
+    getGalleryAssignmentBaseline(articleItems, images, assignments),
+  );
+  const imageKey = normalizedAssignments[getArticleCardAssignmentKey(item)];
+  return images.find((image) => getGalleryImageKey(image) === imageKey) ?? null;
+}
+
+function areGalleryAssignmentsEqual(left: Record<string, string>, right: Record<string, string>): boolean {
+  const leftKeys = Object.keys(left);
+  const rightKeys = Object.keys(right);
+  return leftKeys.length === rightKeys.length && leftKeys.every((key) => left[key] === right[key]);
+}
+
+function shuffleGalleryImages(images: GalleryImageItem[]): GalleryImageItem[] {
+  const nextImages = [...images];
+  for (let index = nextImages.length - 1; index > 0; index -= 1) {
+    const targetIndex = Math.floor(Math.random() * (index + 1));
+    [nextImages[index], nextImages[targetIndex]] = [nextImages[targetIndex], nextImages[index]];
+  }
+
+  return nextImages;
+}
+
+function normalizeArticleGalleryAssignments(
+  articleItems: ContentLibraryItem[],
+  images: GalleryImageItem[],
+  assignments: Record<string, string>,
+): Record<string, string> {
+  const articleKeys = new Set(articleItems.map(getArticleCardAssignmentKey));
+  const imageKeys = new Set(images.map(getGalleryImageKey));
+  const usedImageKeys = new Set<string>();
+  const nextAssignments: Record<string, string> = {};
+
+  for (const item of articleItems) {
+    const articleKey = getArticleCardAssignmentKey(item);
+    const imageKey = assignments[articleKey];
+    if (!articleKeys.has(articleKey) || !imageKey || !imageKeys.has(imageKey) || usedImageKeys.has(imageKey)) {
+      continue;
+    }
+
+    nextAssignments[articleKey] = imageKey;
+    usedImageKeys.add(imageKey);
+  }
+
+  return nextAssignments;
+}
+
+function assignMissingGalleryCardImages(
+  articleItems: ContentLibraryItem[],
+  images: GalleryImageItem[],
+  assignments: Record<string, string>,
+  targetArticleKeys?: Set<string>,
+): Record<string, string> {
+  const nextAssignments = normalizeArticleGalleryAssignments(articleItems, images, assignments);
+  const targetKeys = targetArticleKeys ?? new Set(articleItems.map(getArticleCardAssignmentKey));
+  const usedImageKeys = new Set(Object.values(nextAssignments));
+  const availableImages = shuffleGalleryImages(images).filter((image) => !usedImageKeys.has(getGalleryImageKey(image)));
+
+  for (const item of articleItems) {
+    const articleKey = getArticleCardAssignmentKey(item);
+    if (!targetKeys.has(articleKey)) {
+      continue;
+    }
+
+    if (nextAssignments[articleKey]) {
+      continue;
+    }
+
+    const nextImage = availableImages.shift();
+    if (!nextImage) {
+      delete nextAssignments[articleKey];
+      continue;
+    }
+
+    const imageKey = getGalleryImageKey(nextImage);
+    nextAssignments[articleKey] = imageKey;
+    usedImageKeys.add(imageKey);
+  }
+
+  return nextAssignments;
+}
+
+function createGalleryDeletePlan(
+  articleItems: ContentLibraryItem[],
+  images: GalleryImageItem[],
+  assignments: Record<string, string>,
+  selectedImages: GalleryImageItem[],
+): GalleryDeletePlan {
+  const selectedImageKeys = new Set(selectedImages.map(getGalleryImageKey));
+  const baselineAssignments = getGalleryAssignmentBaseline(articleItems, images, assignments);
+  const normalizedAssignments = normalizeArticleGalleryAssignments(
+    articleItems,
+    images,
+    baselineAssignments,
+  );
+  const affectedArticleKeys = new Set(
+    articleItems
+      .map(getArticleCardAssignmentKey)
+      .filter((articleKey) => selectedImageKeys.has(normalizedAssignments[articleKey] ?? '')),
+  );
+  const nextImages = images.filter((image) => !selectedImageKeys.has(getGalleryImageKey(image)));
+  const keptAssignments = Object.fromEntries(
+    Object.entries(normalizedAssignments).filter(
+      ([articleKey, imageKey]) => !affectedArticleKeys.has(articleKey) && !selectedImageKeys.has(imageKey),
+    ),
+  );
+  const nextAssignments = assignMissingGalleryCardImages(
+    articleItems,
+    nextImages,
+    keptAssignments,
+    affectedArticleKeys,
+  );
+  const reassignedCount = Array.from(affectedArticleKeys).filter((articleKey) => nextAssignments[articleKey]).length;
+
+  return {
+    nextImages,
+    nextAssignments,
+    affectedArticleKeys,
+    reassignedCount,
+    unassignedCount: affectedArticleKeys.size - reassignedCount,
+  };
 }
 
 function getSlidesTargetPath(
@@ -983,6 +1197,7 @@ function GalleryImageCard({
   contentRoot,
   selected,
   selectable,
+  used,
   onToggle,
   onPreview,
 }: {
@@ -990,6 +1205,7 @@ function GalleryImageCard({
   contentRoot: string | null;
   selected: boolean;
   selectable: boolean;
+  used: boolean;
   onToggle: () => void;
   onPreview?: (preview: ImagePreviewState) => void;
 }) {
@@ -1080,7 +1296,9 @@ function GalleryImageCard({
             {selected ? <IconCheck aria-hidden="true" /> : null}
           </button>
         ) : null}
-        <span className="notes-settings-image-kind gallery">图库</span>
+        <span className={`notes-settings-image-kind gallery${used ? ' used' : ''}`}>
+          {used ? '已用' : '图库'}
+        </span>
       </div>
       <div className="notes-settings-image-copy">
         <strong title={title}>{title}</strong>
@@ -2347,6 +2565,7 @@ export default function NotesWorkbench() {
   const [imageSettingsTab, setImageSettingsTab] = useState<SettingsImageTab>('references');
   const [managedImagePage, setManagedImagePage] = useState(1);
   const [galleryImages, setGalleryImages] = useState<GalleryImageItem[]>([]);
+  const [galleryAssignments, setGalleryAssignments] = useState<Record<string, string>>({});
   const [galleryPage, setGalleryPage] = useState(1);
   const [selectedGalleryImageKeys, setSelectedGalleryImageKeys] = useState<string[]>([]);
   const [isGalleryMultiSelectMode, setIsGalleryMultiSelectMode] = useState(false);
@@ -2355,6 +2574,7 @@ export default function NotesWorkbench() {
   const [galleryUploadProgress, setGalleryUploadProgress] = useState(0);
   const [galleryUploadTotal, setGalleryUploadTotal] = useState(0);
   const [isDeletingGalleryImages, setIsDeletingGalleryImages] = useState(false);
+  const [galleryDeleteDialog, setGalleryDeleteDialog] = useState<GalleryDeleteDialogState | null>(null);
   const [imagePreview, setImagePreview] = useState<ImagePreviewState | null>(null);
   const [imagePreviewFocus, setImagePreviewFocus] = useState<GalleryImageFocus>({ x: 50, y: 50 });
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
@@ -6235,6 +6455,7 @@ export default function NotesWorkbench() {
         ...items.filter((item) => item.relativePath !== draftInput.sourceRelativePath),
         savedItem,
       ]);
+      const isNewDraft = !draftInput.sourceRelativePath;
 
       setItems(nextItems);
       setSelectedCategorySlug(getItemCategorySlug(savedItem) || null);
@@ -6257,6 +6478,10 @@ export default function NotesWorkbench() {
       }
 
       setStatus(options?.successMessage ?? `已保存到 content/${nextSaveTarget}`);
+      if (isNewDraft) {
+        await assignMissingGalleryCardImagesForItems(nextItems, [savedItem]);
+      }
+
       return savedItem;
     } catch (error) {
       setStatus(error instanceof Error ? error.message : options?.failureMessage ?? '保存笔记失败。');
@@ -6951,9 +7176,35 @@ export default function NotesWorkbench() {
     () => paginateImageItems(referencedManagedImages, managedImagePage),
     [referencedManagedImages, managedImagePage],
   );
+  const usedGalleryImageKeys = useMemo(() => {
+    const articleItems = getArticleCardItems(items);
+    const baselineAssignments =
+      Object.keys(galleryAssignments).length > 0
+        ? galleryAssignments
+        : createSequentialGalleryAssignments(articleItems, galleryImages);
+    const normalizedAssignments = normalizeArticleGalleryAssignments(
+      articleItems,
+      galleryImages,
+      baselineAssignments,
+    );
+
+    return new Set(Object.values(normalizedAssignments));
+  }, [galleryAssignments, galleryImages, items]);
+  const sortedGalleryImages = useMemo(
+    () =>
+      galleryImages
+        .map((image, index) => ({
+          image,
+          index,
+          used: usedGalleryImageKeys.has(getGalleryImageKey(image)),
+        }))
+        .sort((left, right) => Number(right.used) - Number(left.used) || left.index - right.index)
+        .map((entry) => entry.image),
+    [galleryImages, usedGalleryImageKeys],
+  );
   const galleryImagePageData = useMemo(
-    () => paginateImageItems(galleryImages, galleryPage),
-    [galleryImages, galleryPage],
+    () => paginateImageItems(sortedGalleryImages, galleryPage),
+    [sortedGalleryImages, galleryPage],
   );
   const selectedGalleryImageSet = useMemo(
     () => new Set(selectedGalleryImageKeys),
@@ -6973,14 +7224,68 @@ export default function NotesWorkbench() {
     }
   };
 
-  const writeUserGalleryManifest = async (images: GalleryImageItem[]) => {
+  const writeUserGalleryManifest = async (
+    images: GalleryImageItem[],
+    assignments: Record<string, string> = galleryAssignments,
+  ) => {
     const manifestPath = getUserGalleryManifestPath(libraryRoot);
     const manifest = normalizeGalleryManifest({
       updatedAt: new Date().toISOString(),
       images,
+      assignments,
     });
     await writeTextFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
     setGalleryImages(manifest.images);
+    setGalleryAssignments(manifest.assignments);
+  };
+
+  const assignMissingGalleryCardImagesForItems = async (
+    allItems: ContentLibraryItem[],
+    targetItems: ContentLibraryItem[],
+  ): Promise<boolean> => {
+    if (!isTauri() || !libraryRoot || targetItems.length === 0) {
+      return false;
+    }
+
+    try {
+      const manifest = await readUserGalleryManifest();
+      if (manifest.images.length === 0) {
+        return false;
+      }
+
+      const articleItems = targetItems.reduce(
+        (currentItems, targetItem) => includeArticleCardItem(currentItems, targetItem),
+        getArticleCardItems(allItems),
+      );
+      const allTargetKeys = new Set(targetItems.map(getArticleCardAssignmentKey));
+      const baselineAssignments = getGalleryAssignmentBaseline(articleItems, manifest.images, manifest.assignments);
+      const persistedAssignments = normalizeArticleGalleryAssignments(
+        articleItems,
+        manifest.images,
+        manifest.assignments,
+      );
+      const normalizedAssignments = normalizeArticleGalleryAssignments(
+        articleItems,
+        manifest.images,
+        baselineAssignments,
+      );
+      const nextAssignments = assignMissingGalleryCardImages(
+        articleItems,
+        manifest.images,
+        normalizedAssignments,
+        allTargetKeys,
+      );
+
+      if (areGalleryAssignmentsEqual(persistedAssignments, nextAssignments)) {
+        return false;
+      }
+
+      await writeUserGalleryManifest(manifest.images, nextAssignments);
+      return true;
+    } catch (error) {
+      console.warn('Failed to assign gallery card image.', error);
+      return false;
+    }
   };
 
   const saveGalleryImageFocus = async () => {
@@ -7007,6 +7312,7 @@ export default function NotesWorkbench() {
   const loadUserGalleryManifest = async () => {
     if (!isTauri() || !libraryRoot) {
       setGalleryImages([]);
+      setGalleryAssignments({});
       return;
     }
 
@@ -7014,9 +7320,11 @@ export default function NotesWorkbench() {
     try {
       const manifest = await readUserGalleryManifest();
       setGalleryImages(manifest.images);
+      setGalleryAssignments(manifest.assignments);
       setGalleryPage(1);
     } catch (error) {
       setGalleryImages([]);
+      setGalleryAssignments({});
       setStatus(error instanceof Error ? error.message : '读取图库失败。');
     } finally {
       setIsGalleryLoading(false);
@@ -7071,7 +7379,13 @@ export default function NotesWorkbench() {
         }
       }
 
-      await writeUserGalleryManifest(nextImages);
+      const nextAssignments = assignMissingGalleryCardImages(
+        getArticleCardItems(itemsRef.current),
+        nextImages,
+        manifest.assignments,
+      );
+
+      await writeUserGalleryManifest(nextImages, nextAssignments);
       setGalleryPage(1);
       setStatus(`已上传 ${nextImages.length - manifest.images.length} 张图片到图库。`);
     } catch (error) {
@@ -7134,15 +7448,18 @@ export default function NotesWorkbench() {
 
     setIsBusy(true);
     try {
-      const nextImages = [...galleryImages];
-      for (let index = nextImages.length - 1; index > 0; index -= 1) {
-        const targetIndex = Math.floor(Math.random() * (index + 1));
-        [nextImages[index], nextImages[targetIndex]] = [nextImages[targetIndex], nextImages[index]];
-      }
+      const manifest = await readUserGalleryManifest();
+      const articleItems = getArticleCardItems(itemsRef.current);
+      const fallbackAssignments = getGalleryAssignmentBaseline(articleItems, manifest.images, manifest.assignments);
+      const nextAssignments = assignMissingGalleryCardImages(
+        articleItems,
+        manifest.images,
+        fallbackAssignments,
+      );
 
-      await writeUserGalleryManifest(nextImages);
+      await writeUserGalleryManifest(manifest.images, nextAssignments);
       setGalleryPage(1);
-      setStatus('已重新分配文章配图，发布站点后生效。');
+      setStatus('已补齐缺失笔记配图。');
     } catch (error) {
       setStatus(error instanceof Error ? error.message : '重新分配文章配图失败。');
     } finally {
@@ -7150,7 +7467,7 @@ export default function NotesWorkbench() {
     }
   };
 
-  const deleteSelectedGalleryImages = async () => {
+  const requestDeleteSelectedGalleryImages = async () => {
     if (!isTauri() || !libraryRoot) {
       setStatus('图库删除需要在 Tauri 桌面端中执行。');
       return;
@@ -7163,28 +7480,59 @@ export default function NotesWorkbench() {
       return;
     }
 
-    const confirmed = window.confirm(`确定删除选中的 ${selectedImages.length} 张图库图片吗？`);
-    if (!confirmed) {
+    try {
+      const manifest = await readUserGalleryManifest();
+      const plan = createGalleryDeletePlan(
+        getArticleCardItems(itemsRef.current),
+        manifest.images,
+        manifest.assignments,
+        selectedImages,
+      );
+      setGalleryDeleteDialog({
+        images: selectedImages,
+        affectedCount: plan.affectedArticleKeys.size,
+        reassignedCount: plan.reassignedCount,
+        unassignedCount: plan.unassignedCount,
+      });
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : '图库图片删除预检失败。');
+    }
+  };
+
+  const confirmDeleteSelectedGalleryImages = async () => {
+    if (!isTauri() || !libraryRoot || !galleryDeleteDialog) {
       return;
     }
 
     setIsDeletingGalleryImages(true);
     setIsBusy(true);
     try {
-      for (const image of selectedImages) {
+      const manifest = await readUserGalleryManifest();
+      const plan = createGalleryDeletePlan(
+        getArticleCardItems(itemsRef.current),
+        manifest.images,
+        manifest.assignments,
+        galleryDeleteDialog.images,
+      );
+
+      for (const image of galleryDeleteDialog.images) {
         if (image.path.startsWith(USER_GALLERY_UPLOADS_PUBLIC_PREFIX)) {
           await deleteGalleryImageFile(image.path);
         }
       }
 
-      const nextImages = galleryImages.filter((image) => !selectedSet.has(getGalleryImageKey(image)));
-      await writeUserGalleryManifest(nextImages);
+      await writeUserGalleryManifest(plan.nextImages, plan.nextAssignments);
       setSelectedGalleryImageKeys([]);
       setIsGalleryMultiSelectMode(false);
+      setGalleryDeleteDialog(null);
       setGalleryPage((current) =>
-        Math.min(current, Math.max(1, Math.ceil(nextImages.length / IMAGE_MANAGEMENT_PAGE_SIZE))),
+        Math.min(current, Math.max(1, Math.ceil(plan.nextImages.length / IMAGE_MANAGEMENT_PAGE_SIZE))),
       );
-      setStatus(`已删除 ${selectedImages.length} 张图库图片。`);
+      setStatus(
+        plan.affectedArticleKeys.size > 0
+          ? `已删除 ${galleryDeleteDialog.images.length} 张图库图片，并只为 ${plan.affectedArticleKeys.size} 篇受影响文章重新分配配图。`
+          : `已删除 ${galleryDeleteDialog.images.length} 张图库图片。`,
+      );
     } catch (error) {
       setStatus(error instanceof Error ? error.message : '图库图片删除失败。');
     } finally {
@@ -7346,7 +7694,108 @@ export default function NotesWorkbench() {
     draft?.category && !categories.some((category) => category.slug === draft.category)
       ? [...categories, { slug: draft.category, label: draft.category }]
       : categories;
+  const currentMetadataItem = useMemo(() => {
+    if (!draft?.sourceRelativePath) {
+      return null;
+    }
+
+    return items.find((item) => item.relativePath === draft.sourceRelativePath) ?? null;
+  }, [draft?.sourceRelativePath, items]);
+  const currentMetadataArticleItems = useMemo(
+    () => includeArticleCardItem(getArticleCardItems(items), currentMetadataItem),
+    [currentMetadataItem, items],
+  );
+  const currentMetadataCardImage = useMemo(
+    () =>
+      getAssignedGalleryImageForArticle(
+        currentMetadataItem,
+        currentMetadataArticleItems,
+        galleryImages,
+        galleryAssignments,
+      ),
+    [currentMetadataArticleItems, currentMetadataItem, galleryAssignments, galleryImages],
+  );
+  const currentMetadataCardImageSource = currentMetadataCardImage
+    ? getGalleryImagePreviewSource(currentMetadataCardImage.path, libraryRoot)
+    : '';
   const createCategoryIsValid = categories.some((category) => category.slug === createCategoryValue);
+
+  const openMetadataCardImagePreview = () => {
+    if (!currentMetadataCardImage || !currentMetadataCardImageSource) {
+      setStatus('当前笔记还没有可预览的配图。');
+      return;
+    }
+
+    setImagePreview({
+      src: currentMetadataCardImageSource,
+      title: currentMetadataCardImage.name,
+      galleryImageKey: getGalleryImageKey(currentMetadataCardImage),
+      focus: getGalleryImageFocus(currentMetadataCardImage),
+    });
+  };
+
+  const reassignCurrentDraftCardImage = async () => {
+    const currentDraft = draftRef.current;
+    if (!isTauri() || !libraryRoot) {
+      setStatus('重新分配配图需要在 Tauri 桌面端中执行。');
+      return;
+    }
+
+    if (!currentDraft?.sourceRelativePath) {
+      setStatus('请先保存笔记后再分配配图。');
+      return;
+    }
+
+    setIsBusy(true);
+    try {
+      const manifest = await readUserGalleryManifest();
+      if (manifest.images.length === 0) {
+        setStatus('图库为空，无法分配配图。');
+        return;
+      }
+
+      const currentItem =
+        itemsRef.current.find((item) => item.relativePath === currentDraft.sourceRelativePath) ?? null;
+      if (!currentItem) {
+        setStatus('没有找到当前笔记条目，请先保存后再试。');
+        return;
+      }
+
+      const articleItems = includeArticleCardItem(getArticleCardItems(itemsRef.current), currentItem);
+      const normalizedAssignments = normalizeArticleGalleryAssignments(
+        articleItems,
+        manifest.images,
+        getGalleryAssignmentBaseline(articleItems, manifest.images, manifest.assignments),
+      );
+      const currentArticleKey = getArticleCardAssignmentKey(currentItem);
+      const currentImageKey = normalizedAssignments[currentArticleKey];
+      const usedByOtherArticles = new Set(
+        Object.entries(normalizedAssignments)
+          .filter(([articleKey]) => articleKey !== currentArticleKey)
+          .map(([, imageKey]) => imageKey),
+      );
+      const nextImage = shuffleGalleryImages(manifest.images).find((image) => {
+        const imageKey = getGalleryImageKey(image);
+        return imageKey !== currentImageKey && !usedByOtherArticles.has(imageKey);
+      });
+
+      if (!nextImage) {
+        setStatus('没有可用于当前笔记的新配图。');
+        return;
+      }
+
+      const nextAssignments = {
+        ...normalizedAssignments,
+        [currentArticleKey]: getGalleryImageKey(nextImage),
+      };
+      await writeUserGalleryManifest(manifest.images, nextAssignments);
+      setStatus(`已为《${currentItem.frontmatter.title}》重新分配配图。`);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : '重新分配当前笔记配图失败。');
+    } finally {
+      setIsBusy(false);
+    }
+  };
 
   return (
     <div className="notes-app-shell">
@@ -8275,6 +8724,54 @@ export default function NotesWorkbench() {
                   aria-label={'\u521b\u5efa\u65f6\u95f4'}
                 />
               </label>
+
+              <div className="notes-metadata-dialog-field notes-metadata-cover-field">
+                <span>{'\u914d\u56fe'}</span>
+                <div className="notes-metadata-cover-row">
+                  <button
+                    type="button"
+                    className={`notes-metadata-cover-preview${currentMetadataCardImage ? '' : ' empty'}`}
+                    onClick={openMetadataCardImagePreview}
+                    disabled={!currentMetadataCardImage}
+                    aria-label="预览并调整配图裁剪"
+                    title="预览并调整配图裁剪"
+                  >
+                    {currentMetadataCardImage && currentMetadataCardImageSource ? (
+                      <img
+                        src={currentMetadataCardImageSource}
+                        alt={currentMetadataCardImage?.name ?? '文章配图'}
+                        style={{
+                          objectPosition: formatGalleryImagePosition(
+                            getGalleryImageFocus(currentMetadataCardImage),
+                          ),
+                        }}
+                      />
+                    ) : (
+                      <IconPhoto aria-hidden="true" />
+                    )}
+                  </button>
+                  <div className="notes-metadata-cover-copy">
+                    <strong title={currentMetadataCardImage?.name ?? ''}>
+                      {currentMetadataCardImage?.name ?? '暂无配图'}
+                    </strong>
+                    <small>
+                      {currentMetadataCardImage
+                        ? '点击缩略图可预览并调整裁剪'
+                        : '点击右侧按钮为当前笔记分配配图'}
+                    </small>
+                  </div>
+                  <button
+                    type="button"
+                    className="notes-metadata-cover-action"
+                    onClick={() => void reassignCurrentDraftCardImage()}
+                    disabled={isBusy || galleryImages.length === 0 || !draft.sourceRelativePath}
+                    aria-label="重新分配当前笔记配图"
+                    title="重新分配当前笔记配图"
+                  >
+                    <IconRefresh aria-hidden="true" />
+                  </button>
+                </div>
+              </div>
             </div>
 
             <footer className="notes-metadata-dialog-actions">
@@ -9047,7 +9544,7 @@ export default function NotesWorkbench() {
                           <button
                             type="button"
                             className="notes-settings-danger notes-settings-image-localize"
-                            onClick={() => void deleteSelectedGalleryImages()}
+                            onClick={() => void requestDeleteSelectedGalleryImages()}
                             disabled={selectedGalleryImageKeys.length === 0 || isDeletingGalleryImages || isBusy}
                           >
                             {isDeletingGalleryImages ? (
@@ -9135,6 +9632,7 @@ export default function NotesWorkbench() {
                                     contentRoot={libraryRoot}
                                     selectable={isGalleryMultiSelectMode}
                                     selected={selectedGalleryImageSet.has(getGalleryImageKey(image))}
+                                    used={usedGalleryImageKeys.has(getGalleryImageKey(image))}
                                     onToggle={() => toggleGalleryImageSelection(image)}
                                     onPreview={setImagePreview}
                                   />
@@ -9906,6 +10404,80 @@ export default function NotesWorkbench() {
                 {isPullingContent ? '同步中...' : pullRunState === 'idle' ? '开始同步' : '重新同步'}
               </button>
             </footer>
+          </section>
+        </div>
+      ) : null}
+
+      {galleryDeleteDialog ? (
+        <div
+          className="notes-dialog-overlay"
+          onClick={() => {
+            if (!isDeletingGalleryImages) {
+              setGalleryDeleteDialog(null);
+            }
+          }}
+        >
+          <section
+            className="notes-unsaved-dialog notes-delete-dialog notes-gallery-delete-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="notes-gallery-delete-dialog-title"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="notes-unsaved-dialog-header">
+              <h2 id="notes-gallery-delete-dialog-title">确认删除图库图片</h2>
+              <p>删除后会从图库中移除图片；已使用这些图片的文章会自动补位，其他文章配图保持不变。</p>
+            </div>
+
+            <div className="notes-unsaved-dialog-body">
+              <span className="notes-unsaved-dialog-target">
+                将要删除
+                <strong>{galleryDeleteDialog.images.length} 张图片</strong>
+              </span>
+              <div className="notes-gallery-delete-impact">
+                <span>
+                  影响文章
+                  <strong>{galleryDeleteDialog.affectedCount}</strong>
+                </span>
+                <span>
+                  可重新分配
+                  <strong>{galleryDeleteDialog.reassignedCount}</strong>
+                </span>
+                <span>
+                  暂无配图
+                  <strong>{galleryDeleteDialog.unassignedCount}</strong>
+                </span>
+              </div>
+              <div className="notes-gallery-delete-list">
+                {galleryDeleteDialog.images.slice(0, 6).map((image) => (
+                  <span key={getGalleryImageKey(image)} title={image.name}>
+                    {image.name}
+                  </span>
+                ))}
+                {galleryDeleteDialog.images.length > 6 ? (
+                  <em>{`还有 ${galleryDeleteDialog.images.length - 6} 张...`}</em>
+                ) : null}
+              </div>
+            </div>
+
+            <div className="notes-unsaved-dialog-actions">
+              <button
+                type="button"
+                className="notes-unsaved-dialog-cancel"
+                onClick={() => setGalleryDeleteDialog(null)}
+                disabled={isDeletingGalleryImages}
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                className="notes-unsaved-dialog-danger"
+                onClick={() => void confirmDeleteSelectedGalleryImages()}
+                disabled={isDeletingGalleryImages}
+              >
+                {isDeletingGalleryImages ? '删除中...' : '确认删除'}
+              </button>
+            </div>
           </section>
         </div>
       ) : null}

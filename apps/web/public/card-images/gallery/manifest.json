@@ -1,6 +1,6 @@
 {
-  "updatedAt": "2026-07-08T15:08:44.751Z",
-  "count": 52,
+  "updatedAt": "2026-07-09T08:27:20.917Z",
+  "count": 50,
   "images": [
     {
       "id": "1782580868464-51-gallery-20260628-011940-52-1lxm-cardcaptor-sakura-363947.jpg",
@@ -73,17 +73,6 @@
       "path": "/card-images/gallery/uploads/gallery-20260628-011940-46-0kiv-cardcaptor-sakura-281066.jpg",
       "name": "cardcaptor-sakura-281066.jpg",
       "size": 54467,
-      "uploadedAt": "2026-06-27T17:19:40.316Z",
-      "focus": {
-        "x": 50,
-        "y": 50
-      }
-    },
-    {
-      "id": "1782580857034-44-gallery-20260628-011940-45-jcbm-cardcaptor-sakura-274723.jpg",
-      "path": "/card-images/gallery/uploads/gallery-20260628-011940-45-jcbm-cardcaptor-sakura-274723.jpg",
-      "name": "cardcaptor-sakura-274723.jpg",
-      "size": 62144,
       "uploadedAt": "2026-06-27T17:19:40.316Z",
       "focus": {
         "x": 50,
@@ -282,17 +271,6 @@
       "path": "/card-images/gallery/uploads/gallery-20260628-011940-27-tmmt-cardcaptor-sakura-226819.jpg",
       "name": "cardcaptor-sakura-226819.jpg",
       "size": 65579,
-      "uploadedAt": "2026-06-27T17:19:40.316Z",
-      "focus": {
-        "x": 50,
-        "y": 50
-      }
-    },
-    {
-      "id": "1782580826390-25-gallery-20260628-011940-26-21in-cardcaptor-sakura-226798.jpg",
-      "path": "/card-images/gallery/uploads/gallery-20260628-011940-26-21in-cardcaptor-sakura-226798.jpg",
-      "name": "cardcaptor-sakura-226798.jpg",
-      "size": 71155,
       "uploadedAt": "2026-06-27T17:19:40.316Z",
       "focus": {
         "x": 50,
@@ -574,5 +552,18 @@
         "y": 50
       }
     }
-  ]
+  ],
+  "assignments": {
+    "/inknote/5369007": "1782580868464-51-gallery-20260628-011940-52-1lxm-cardcaptor-sakura-363947.jpg",
+    "/notes/8043157": "1782580866862-50-gallery-20260628-011940-51-8q1n-cardcaptor-sakura-301988.jpg",
+    "/notes/4488563": "1782580865510-49-gallery-20260628-011940-50-2f7g-cardcaptor-sakura-296684.jpg",
+    "/notes/3187429": "1782580863826-48-gallery-20260628-011940-49-5yb7-cardcaptor-sakura-291914.jpg",
+    "/notes/3822107": "1782580862506-47-gallery-20260628-011940-48-bx1i-cardcaptor-sakura-284390.jpg",
+    "/notes/5187191": "1782580860520-46-gallery-20260628-011940-47-ucnp-cardcaptor-sakura-281780.jpg",
+    "/notes/5367025": "1782580858793-45-gallery-20260628-011940-46-0kiv-cardcaptor-sakura-281066.jpg",
+    "/notes/6237698": "1782580838580-33-gallery-20260628-011940-34-0qge-cardcaptor-sakura-258951.jpg",
+    "/notes/2177534": "1782580855243-43-gallery-20260628-011940-44-42gi-cardcaptor-sakura-272105.jpg",
+    "/notes/1521109": "1782580853698-42-gallery-20260628-011940-43-5grt-cardcaptor-sakura-265091.jpg",
+    "/notes/2500826": "1782580807441-12-gallery-20260628-011940-13-mmqd-cardcaptor-sakura-82086.jpg"
+  }
 }
