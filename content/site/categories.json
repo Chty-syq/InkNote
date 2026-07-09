@@ -1,0 +1,26 @@
+[
+  {
+    "slug": "machine-learning",
+    "label": "机器学习",
+    "labelEn": "Machine Learning",
+    "order": 1
+  },
+  {
+    "slug": "mathmatics",
+    "label": "数学研究",
+    "labelEn": "Mathematics",
+    "order": 2
+  },
+  {
+    "slug": "classics",
+    "label": "古典摘录",
+    "labelEn": "Classics",
+    "order": 3
+  },
+  {
+    "slug": "life-recording",
+    "label": "生活纪事",
+    "labelEn": "Life Recording",
+    "order": 4
+  }
+]

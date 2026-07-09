@@ -1,0 +1,137 @@
+name: Build Web From InkNote Content
+
+on:
+  push:
+    branches:
+      - "web"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: inknote-web-pages
+  cancel-in-progress: true
+
+env:
+  INKNOTE_SOURCE_REPOSITORY: ${{ vars.INKNOTE_SOURCE_REPOSITORY || 'Chty-syq/InkNote' }}
+  INKNOTE_SOURCE_REF: ${{ vars.INKNOTE_SOURCE_REF || 'master' }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      should_deploy: ${{ steps.branch-check.outputs.should_deploy }}
+    steps:
+      - name: Checkout content source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+          path: content-source
+
+      - name: Check deployment branch
+        id: branch-check
+        shell: bash
+        run: |
+          current_branch="${GITHUB_REF_NAME}"
+          if [ ! -f content-source/content/site/site.config.json ]; then
+            echo "should_deploy=false" >> "$GITHUB_OUTPUT"
+            echo "No InkNote site config found on ${current_branch}; skip deployment."
+            exit 0
+          fi
+
+          configured_branch="$(python3 -c 'import json, pathlib; config = json.loads(pathlib.Path("content-source/content/site/site.config.json").read_text(encoding="utf-8-sig")); repository = config.get("repository") or {}; print(str(repository.get("contentBranch") or repository.get("branch") or "").strip(), end="")')"
+          if [ -n "$configured_branch" ] && [ "$configured_branch" != "$current_branch" ]; then
+            echo "should_deploy=false" >> "$GITHUB_OUTPUT"
+            echo "Current branch ${current_branch} is not configured deployment branch ${configured_branch}; skip deployment."
+            exit 0
+          fi
+
+          echo "should_deploy=true" >> "$GITHUB_OUTPUT"
+          echo "Deploying InkNote content from ${current_branch}."
+
+      - name: Checkout web shell source
+        if: steps.branch-check.outputs.should_deploy == 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.INKNOTE_SOURCE_REPOSITORY }}
+          ref: ${{ env.INKNOTE_SOURCE_REF }}
+          path: source
+
+      - name: Setup Node
+        if: steps.branch-check.outputs.should_deploy == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: source/package-lock.json
+
+      - name: Configure GitHub Pages
+        if: steps.branch-check.outputs.should_deploy == 'true'
+        uses: actions/configure-pages@v5
+
+      - name: Prepare content
+        if: steps.branch-check.outputs.should_deploy == 'true'
+        shell: bash
+        run: |
+          rm -rf source/content source/apps/web/public
+          mkdir -p source/apps/web
+          cp -a content-source/content source/content
+          if [ -d content-source/apps/web/public ]; then
+            cp -a content-source/apps/web/public source/apps/web/public
+          else
+            mkdir -p source/apps/web/public
+          fi
+
+      - name: Resolve Pages base
+        if: steps.branch-check.outputs.should_deploy == 'true'
+        id: pages-base
+        shell: bash
+        run: |
+          repo_name="${GITHUB_REPOSITORY#*/}"
+          repo_name_lower="$(echo "$repo_name" | tr '[:upper:]' '[:lower:]')"
+          owner_site="$(echo "${GITHUB_REPOSITORY_OWNER}.github.io" | tr '[:upper:]' '[:lower:]')"
+          if [ "$repo_name_lower" = "$owner_site" ]; then
+            echo "base=/" >> "$GITHUB_OUTPUT"
+          else
+            echo "base=/$repo_name/" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install dependencies
+        if: steps.branch-check.outputs.should_deploy == 'true'
+        working-directory: source
+        run: npm ci
+
+      - name: Build web
+        if: steps.branch-check.outputs.should_deploy == 'true'
+        working-directory: source
+        run: npm run web:build
+        env:
+          VITE_PAGES_BASE: ${{ steps.pages-base.outputs.base }}
+
+      - name: Prepare SPA fallback
+        if: steps.branch-check.outputs.should_deploy == 'true'
+        shell: bash
+        run: |
+          cp source/apps/web/dist/index.html source/apps/web/dist/404.html
+          touch source/apps/web/dist/.nojekyll
+
+      - name: Upload Pages artifact
+        if: steps.branch-check.outputs.should_deploy == 'true'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: source/apps/web/dist
+
+  deploy:
+    needs: build
+    if: needs.build.outputs.should_deploy == 'true'
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
