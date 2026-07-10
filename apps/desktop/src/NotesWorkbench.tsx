@@ -2,6 +2,7 @@ import {
   startTransition,
   useDeferredValue,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -211,6 +212,13 @@ interface EditorSelectionState {
   start: number;
   end: number;
   direction: 'forward' | 'backward' | 'none';
+}
+
+interface PendingEditorViewRestore {
+  selection: EditorSelectionState;
+  scrollTop: number;
+  scrollRatio: number;
+  attempts: number;
 }
 
 interface DraftUndoEntry {
@@ -2623,6 +2631,7 @@ export default function NotesWorkbench() {
   const draftCacheRef = useRef<Map<string, { fingerprint: string; draft: ContentDraft }>>(new Map());
   const cleanDraftsRef = useRef<WeakSet<ContentDraft>>(new WeakSet());
   const editorSelectionRef = useRef<EditorSelectionState | null>(null);
+  const pendingEditorViewRestoreRef = useRef<PendingEditorViewRestore | null>(null);
   const draftRef = useRef<ContentDraft | null>(null);
   const categoriesRef = useRef<ContentCategory[]>([]);
   const itemsRef = useRef<ContentLibraryItem[]>([]);
@@ -3490,6 +3499,58 @@ export default function NotesWorkbench() {
       editorSelectionRef.current = nextSelection;
     });
   };
+
+  const applyPendingEditorViewRestore = () => {
+    const pending = pendingEditorViewRestoreRef.current;
+    const editor = editorRef.current;
+    if (!pending || !editor) {
+      return;
+    }
+
+    const nextSelection = clampEditorSelection(pending.selection, editor.value.length);
+
+    editor.scrollTop = pending.scrollTop;
+    editorScrollRatioRef.current = pending.scrollRatio;
+    editor.focus({ preventScroll: true });
+    editor.setSelectionRange(nextSelection.start, nextSelection.end, nextSelection.direction);
+    editor.scrollTop = pending.scrollTop;
+    editorSelectionRef.current = nextSelection;
+    schedulePreviewPositionSync();
+
+    if (pending.attempts <= 1) {
+      pendingEditorViewRestoreRef.current = null;
+      return;
+    }
+
+    pendingEditorViewRestoreRef.current = {
+      ...pending,
+      selection: nextSelection,
+      attempts: pending.attempts - 1,
+    };
+    requestAnimationFrame(applyPendingEditorViewRestore);
+  };
+
+  const restoreEditorViewAfterTransform = (
+    result: TextTransformResult,
+    scrollTop: number,
+    scrollRatio: number,
+  ) => {
+    pendingEditorViewRestoreRef.current = {
+      selection: {
+        start: result.nextSelectionStart,
+        end: result.nextSelectionEnd,
+        direction: 'none',
+      },
+      scrollTop,
+      scrollRatio,
+      attempts: 16,
+    };
+    requestAnimationFrame(applyPendingEditorViewRestore);
+  };
+
+  useLayoutEffect(() => {
+    applyPendingEditorViewRestore();
+  });
 
   const appendHistoryEntry = (label: string, detail = '') => {
     setHistoryEntries((current) => [createHistoryEntry(label, detail), ...current].slice(0, NOTE_HISTORY_LIMIT));
@@ -6212,27 +6273,11 @@ export default function NotesWorkbench() {
     }
 
     const undoSelection = readEditorSelection();
+    const scrollTop = editor.scrollTop;
+    const scrollRatio = getScrollRatio(editor);
     const result = transform(currentProject.content, editor.selectionStart, editor.selectionEnd);
     updateLinkedNotebookContent(result.nextValue, { undoSelection });
-
-    requestAnimationFrame(() => {
-      if (!editorRef.current) {
-        return;
-      }
-
-      const nextSelection = clampEditorSelection(
-        {
-          start: result.nextSelectionStart,
-          end: result.nextSelectionEnd,
-          direction: 'none',
-        },
-        editorRef.current.value.length,
-      );
-
-      editorRef.current.focus();
-      editorRef.current.setSelectionRange(nextSelection.start, nextSelection.end, nextSelection.direction);
-      editorSelectionRef.current = nextSelection;
-    });
+    restoreEditorViewAfterTransform(result, scrollTop, scrollRatio);
   };
 
   const applyLinkedNotebookInlineWrap = (prefix: string, suffix: string, placeholder: string) => {
@@ -6916,27 +6961,11 @@ export default function NotesWorkbench() {
     }
 
     const undoSelection = readEditorSelection();
+    const scrollTop = editor.scrollTop;
+    const scrollRatio = getScrollRatio(editor);
     const result = transform(draft.body, editor.selectionStart, editor.selectionEnd);
     updateDraft({ body: result.nextValue }, { undoSelection });
-
-    requestAnimationFrame(() => {
-      if (!editorRef.current) {
-        return;
-      }
-
-      const nextSelection = clampEditorSelection(
-        {
-          start: result.nextSelectionStart,
-          end: result.nextSelectionEnd,
-          direction: 'none',
-        },
-        editorRef.current.value.length,
-      );
-
-      editorRef.current.focus();
-      editorRef.current.setSelectionRange(nextSelection.start, nextSelection.end, nextSelection.direction);
-      editorSelectionRef.current = nextSelection;
-    });
+    restoreEditorViewAfterTransform(result, scrollTop, scrollRatio);
   };
 
   const applyInlineWrap = (prefix: string, suffix: string, placeholder: string) => {
@@ -6964,6 +6993,10 @@ export default function NotesWorkbench() {
     targetType: ContentDraft['type'],
   ) => {
     let nextSelection: EditorSelectionState | null = null;
+    let viewRestoreResult: TextTransformResult | null = null;
+    const editor = editorRef.current;
+    const scrollTop = editor?.scrollTop ?? 0;
+    const scrollRatio = editor ? getScrollRatio(editor) : editorScrollRatioRef.current;
 
     if (targetType === 'inknote') {
       const currentDraft = draftRef.current;
@@ -6981,12 +7014,7 @@ export default function NotesWorkbench() {
       const result = insertSnippet(currentProject.content, safeSelection.start, safeSelection.end, snippet, snippet.length);
 
       updateLinkedNotebookContent(result.nextValue, { undoSelection: safeSelection });
-      nextSelection = {
-        start: result.nextSelectionStart,
-        end: result.nextSelectionEnd,
-        direction: 'none',
-      };
-      restoreEditorSelection(nextSelection);
+      restoreEditorViewAfterTransform(result, scrollTop, scrollRatio);
       return;
     }
 
@@ -7009,10 +7037,17 @@ export default function NotesWorkbench() {
         end: result.nextSelectionEnd,
         direction: 'none',
       };
+      viewRestoreResult = result;
       return patchDraft(current, { body: result.nextValue });
     });
 
-    requestAnimationFrame(() => restoreEditorSelection(nextSelection));
+    requestAnimationFrame(() => {
+      if (viewRestoreResult) {
+        restoreEditorViewAfterTransform(viewRestoreResult, scrollTop, scrollRatio);
+        return;
+      }
+      restoreEditorSelection(nextSelection);
+    });
   };
 
   const insertSlidesDocument = async () => {

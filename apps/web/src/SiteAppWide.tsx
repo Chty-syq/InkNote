@@ -2101,6 +2101,43 @@ function ArchivePage({
   );
 }
 
+function AboutPage({
+  document,
+  navigate,
+  query,
+  setQuery,
+}: {
+  document: RoutedDocument<MarkdownFrontmatter>;
+  navigate: (href: string) => void;
+  query: string;
+  setQuery: (value: string) => void;
+}) {
+  return (
+    <div className="blog-layout">
+      <section className="blog-main-column">
+        <section className="blog-panel blog-archive-hero blog-about-hero">
+          <p className="blog-panel-eyebrow">About</p>
+          <div className="blog-panel-head">
+            <div>
+              <h2>{document.frontmatter.title}</h2>
+              <p>{document.frontmatter.summary}</p>
+            </div>
+            <div className="blog-metrics">
+              <span>个人笔记本</span>
+            </div>
+          </div>
+        </section>
+
+        <article className="blog-panel blog-archive-panel blog-about-panel markdown-body">
+          {renderMarkdown(resolveWebContentAssets(document.body))}
+        </article>
+      </section>
+
+      <SiteSidebar navigate={navigate} query={query} setQuery={setQuery} />
+    </div>
+  );
+}
+
 function InkNoteAside({ note }: { note: RoutedDocument<InkNoteFrontmatter> }) {
   return (
     <section className="blog-sidebar-card">
@@ -2543,7 +2580,14 @@ export default function SiteAppWide() {
     );
   } else if (route.type === 'page') {
     const pageDocument = findPage(route.slug);
-    page = pageDocument ? (
+    page = pageDocument && route.slug === 'about' ? (
+      <AboutPage
+        document={pageDocument}
+        navigate={navigate}
+        query={searchQuery}
+        setQuery={setSearchQuery}
+      />
+    ) : pageDocument ? (
       <DetailPage
         eyebrow="Page"
         document={pageDocument}

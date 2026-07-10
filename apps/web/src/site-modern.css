@@ -634,6 +634,35 @@ input {
   text-decoration: underline;
 }
 
+.blog-about-hero .blog-panel-eyebrow::after {
+  content: "(关于)";
+}
+
+.blog-about-panel {
+  padding: 1.18rem 1.9rem 2.1rem;
+}
+
+.blog-about-panel blockquote {
+  margin: 0 0 1.4rem;
+}
+
+.blog-about-panel h2 {
+  margin-top: 1.7rem;
+  color: #314658;
+  font-size: 1.18rem;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+.blog-about-panel h2:first-child {
+  margin-top: 0;
+}
+
+.blog-about-panel p,
+.blog-about-panel li {
+  color: #334b60;
+}
+
 .blog-card {
   position: relative;
   overflow: hidden;

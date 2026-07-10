@@ -6415,6 +6415,10 @@ input[type='range']::-moz-range-thumb {
 }
 
 .notes-list-pane {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
   border-right: 1px solid #d4dce5;
   background: #ffffff;
 }
@@ -6446,9 +6450,12 @@ input[type='range']::-moz-range-thumb {
 }
 
 .notes-list-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
   padding: 0;
   background: #ffffff;
   overflow-x: hidden;
+  overflow-y: auto;
 }
 
 .notes-list-item {

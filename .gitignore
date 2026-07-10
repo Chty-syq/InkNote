@@ -37,6 +37,9 @@ temp/
 *.tmp
 *.temp
 
+# Local content library, managed by the desktop editor / remote content repo
+/content/
+
 # OS files
 .DS_Store
 Thumbs.db
