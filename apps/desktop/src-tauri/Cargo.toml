@@ -1,6 +1,6 @@
 [package]
 name = "inknote-desktop"
-version = "0.3.8"
+version = "0.3.9"
 description = "Pseudo handwriting notebook desktop app"
 authors = ["Codex"]
 edition = "2021"
