@@ -59,7 +59,7 @@ function normalizeMarkdownSegment(segment: string): string {
   return normalizeCenteredMarkdownImages(segment).replace(
     /(?<!\$)\$(?!\$)([^$]*?)\\begin\{(equation\*?)\}([\s\S]*?)\\end\{\2\}([^$]*?)(?<!\\)\$(?!\$)/g,
     (_match, before: string, _environment: string, content: string, after: string) => {
-      const normalized = `${before}${content}${after}`
+      const normalized = normalizeLatexForKatex(`${before}${content}${after}`)
         .replace(/\s*\n\s*/g, ' ')
         .trim();
       return `$${normalized}$`;
@@ -102,7 +102,7 @@ function normalizeInlineEquationEnvironments(markdown: string): string {
 }
 
 function normalizeDisplayMathContent(value: string): string {
-  const normalized = value
+  const normalized = normalizeLatexForKatex(value)
     .replace(/\r/g, '')
     .replace(/\\begin\{equation\*?\}/g, '')
     .replace(/\\end\{equation\*?\}/g, '')
@@ -123,6 +123,34 @@ function normalizeDisplayMathContent(value: string): string {
   }
 
   return ['\\begin{aligned}', lines.join(' \\\\\n'), '\\end{aligned}'].join('\n');
+}
+
+function normalizeLatexForKatex(value: string): string {
+  let normalized = value
+    .replace(/\r/g, '')
+    .replace(/\\_/g, '_')
+    .replace(/\\\\(?=[A-Za-z|,;:!{}\[\]()])/g, '\\');
+
+  normalized = normalized.replace(
+    /\\begin\{eqnarray\*?\}([\s\S]*?)\\end\{eqnarray\*?\}/g,
+    (_match, body: string) => {
+      const rows = removeRepeatedLatexTags(body)
+        .replace(/&\s*=\s*&/g, '&=')
+        .trim();
+      return ['\\begin{aligned}', rows, '\\end{aligned}'].join('\n');
+    },
+  );
+
+  return removeRepeatedLatexTags(normalized);
+}
+
+function removeRepeatedLatexTags(value: string): string {
+  const tags = value.match(/\\tag\{[^}]*\}/g) ?? [];
+  if (tags.length <= 1) {
+    return value;
+  }
+
+  return value.replace(/\s*\\tag\{[^}]*\}/g, '');
 }
 
 function getDisplayMathContinuationIndent(beforeOpening: string): string {
@@ -248,6 +276,157 @@ type PendingDisplayMath = {
   lines: string[];
   indent: string;
 };
+
+type MathCodeMenuState = {
+  latex: string;
+  x: number;
+  y: number;
+  copyStatus: 'idle' | 'copied' | 'error';
+};
+
+const MATH_CODE_MENU_WIDTH = 320;
+const MATH_CODE_MENU_HEIGHT = 210;
+
+function clampMenuCoordinate(value: number, size: number, viewportSize: number): number {
+  return Math.max(8, Math.min(value, Math.max(8, viewportSize - size - 8)));
+}
+
+function getLatexSourceFromTarget(target: EventTarget | null, root: HTMLElement): string {
+  if (!(target instanceof Element)) {
+    return '';
+  }
+
+  const mathElement = target.closest('.katex, .katex-display');
+  if (!mathElement || !root.contains(mathElement)) {
+    return '';
+  }
+
+  const annotation =
+    mathElement.querySelector('annotation[encoding="application/x-tex"]') ??
+    mathElement.closest('.katex-display')?.querySelector('annotation[encoding="application/x-tex"]');
+
+  return annotation?.textContent?.trim() ?? '';
+}
+
+function MarkdownMathCodeMenu({ rootRef }: { rootRef: { current: HTMLElement | null } }) {
+  const [menu, setMenu] = useState<MathCodeMenuState | null>(null);
+  const menuRef = useRef<HTMLDivElement | null>(null);
+  const resetTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    const root = rootRef.current;
+    if (!root) {
+      return;
+    }
+
+    const handleContextMenu = (event: MouseEvent) => {
+      const latex = getLatexSourceFromTarget(event.target, root);
+      if (!latex) {
+        return;
+      }
+
+      event.preventDefault();
+      event.stopPropagation();
+      setMenu({
+        latex,
+        x: clampMenuCoordinate(event.clientX, MATH_CODE_MENU_WIDTH, window.innerWidth),
+        y: clampMenuCoordinate(event.clientY, MATH_CODE_MENU_HEIGHT, window.innerHeight),
+        copyStatus: 'idle',
+      });
+    };
+
+    root.addEventListener('contextmenu', handleContextMenu);
+    return () => root.removeEventListener('contextmenu', handleContextMenu);
+  }, [rootRef]);
+
+  useEffect(() => {
+    if (!menu) {
+      return;
+    }
+
+    const closeMenu = (event: MouseEvent) => {
+      if (menuRef.current?.contains(event.target as Node)) {
+        return;
+      }
+      setMenu(null);
+    };
+    const closeOnEscape = (event: globalThis.KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setMenu(null);
+      }
+    };
+    const closeOnViewportChange = () => setMenu(null);
+
+    window.addEventListener('click', closeMenu);
+    window.addEventListener('keydown', closeOnEscape);
+    window.addEventListener('resize', closeOnViewportChange);
+    window.addEventListener('scroll', closeOnViewportChange, true);
+    return () => {
+      window.removeEventListener('click', closeMenu);
+      window.removeEventListener('keydown', closeOnEscape);
+      window.removeEventListener('resize', closeOnViewportChange);
+      window.removeEventListener('scroll', closeOnViewportChange, true);
+    };
+  }, [menu]);
+
+  useEffect(
+    () => () => {
+      if (resetTimerRef.current !== null) {
+        clearTimeout(resetTimerRef.current);
+      }
+    },
+    [],
+  );
+
+  const copyLatex = async () => {
+    if (!menu) {
+      return;
+    }
+
+    try {
+      await copyTextToClipboard(menu.latex);
+      setMenu({ ...menu, copyStatus: 'copied' });
+    } catch {
+      setMenu({ ...menu, copyStatus: 'error' });
+    }
+
+    if (resetTimerRef.current !== null) {
+      clearTimeout(resetTimerRef.current);
+    }
+    resetTimerRef.current = setTimeout(() => {
+      setMenu((current) => (current ? { ...current, copyStatus: 'idle' } : current));
+    }, 1400);
+  };
+
+  if (!menu) {
+    return null;
+  }
+
+  return (
+    <div
+      ref={menuRef}
+      className="markdown-math-code-menu"
+      style={{ left: menu.x, top: menu.y }}
+      role="dialog"
+      aria-label="LaTeX code"
+      onClick={(event) => event.stopPropagation()}
+      onContextMenu={(event) => event.preventDefault()}
+    >
+      <div className="markdown-math-code-menu-title">
+        <span>LaTeX Code</span>
+        <button type="button" onClick={() => setMenu(null)} aria-label="关闭 LaTeX code 菜单">
+          ×
+        </button>
+      </div>
+      <pre className="markdown-math-code-menu-source">{menu.latex}</pre>
+      <div className="markdown-math-code-menu-actions">
+        <button type="button" onClick={() => void copyLatex()}>
+          {menu.copyStatus === 'copied' ? '已复制' : menu.copyStatus === 'error' ? '复制失败' : '复制'}
+        </button>
+      </div>
+    </div>
+  );
+}
 
 function getSlidesExtension(src: string, type?: string): string {
   const explicitType = (type ?? '').trim().toLowerCase();
@@ -716,6 +895,7 @@ export function extractMarkdownHeadings(
 export const MarkdownPreview = memo(function MarkdownPreview({ markdown }: { markdown: string }) {
   const normalizedMarkdown = useMemo(() => normalizeMarkdownForPreview(markdown), [markdown]);
   const headings = useMemo(() => extractMarkdownHeadings(markdown), [markdown]);
+  const previewRootRef = useRef<HTMLDivElement | null>(null);
   const components = useMemo<Components>(() => {
     const headingsByLine = new Map<number, MarkdownHeading>(headings.map((heading) => [heading.line, heading]));
     const fallbackHeadingIds = new Map<string, number>();
@@ -771,13 +951,16 @@ export const MarkdownPreview = memo(function MarkdownPreview({ markdown }: { mar
   }, [headings]);
 
   return (
-    <ReactMarkdown
-      remarkPlugins={[remarkGfm, remarkMath]}
-      rehypePlugins={[rehypeRaw, rehypeKatex, [rehypeHighlight, { detect: true, ignoreMissing: true }]]}
-      components={components}
-    >
-      {normalizedMarkdown}
-    </ReactMarkdown>
+    <div ref={previewRootRef} className="markdown-preview-root">
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm, remarkMath]}
+        rehypePlugins={[rehypeRaw, rehypeKatex, [rehypeHighlight, { detect: true, ignoreMissing: true }]]}
+        components={components}
+      >
+        {normalizedMarkdown}
+      </ReactMarkdown>
+      <MarkdownMathCodeMenu rootRef={previewRootRef} />
+    </div>
   );
 });
 
@@ -787,40 +970,44 @@ export function renderMarkdownPreview(markdown: string): ReactNode {
 
 export const InlineMarkdownPreview = memo(function InlineMarkdownPreview({ markdown }: { markdown: string }) {
   const normalizedMarkdown = useMemo(() => normalizeInlineMarkdownForPreview(markdown), [markdown]);
+  const previewRootRef = useRef<HTMLSpanElement | null>(null);
 
   return (
-    <ReactMarkdown
-      remarkPlugins={[remarkGfm, remarkMath]}
-      rehypePlugins={[rehypeRaw, rehypeKatex]}
-      components={{
-        p({ node: _node, children }: ParagraphComponentProps) {
-          return <>{children}</>;
-        },
-        a({ node: _node, children }: AnchorComponentProps) {
-          return <>{children}</>;
-        },
-        code({ node: _node, className, children, ...props }: CodeComponentProps) {
-          const codeText = String(children).replace(/\n$/, '');
-          const language = className?.replace(/^language-/, '');
+    <span ref={previewRootRef} className="markdown-inline-preview-root">
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm, remarkMath]}
+        rehypePlugins={[rehypeRaw, rehypeKatex]}
+        components={{
+          p({ node: _node, children }: ParagraphComponentProps) {
+            return <>{children}</>;
+          },
+          a({ node: _node, children }: AnchorComponentProps) {
+            return <>{children}</>;
+          },
+          code({ node: _node, className, children, ...props }: CodeComponentProps) {
+            const codeText = String(children).replace(/\n$/, '');
+            const language = className?.replace(/^language-/, '');
 
-          if (language) {
+            if (language) {
+              return (
+                <code {...props} className={className} data-language={language}>
+                  {codeText}
+                </code>
+              );
+            }
+
             return (
-              <code {...props} className={className} data-language={language}>
+              <code {...props} className="markdown-inline-code">
                 {codeText}
               </code>
             );
-          }
-
-          return (
-            <code {...props} className="markdown-inline-code">
-              {codeText}
-            </code>
-          );
-        },
-      }}
-    >
-      {normalizedMarkdown}
-    </ReactMarkdown>
+          },
+        }}
+      >
+        {normalizedMarkdown}
+      </ReactMarkdown>
+      <MarkdownMathCodeMenu rootRef={previewRootRef} />
+    </span>
   );
 });
 

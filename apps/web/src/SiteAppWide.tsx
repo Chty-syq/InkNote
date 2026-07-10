@@ -36,6 +36,7 @@ type Route =
   | { type: 'home' }
   | { type: 'search' }
   | { type: 'archive' }
+  | { type: 'latex' }
   | { type: 'notes-list' }
   | { type: 'inknote-list' }
   | { type: 'category'; slug: string }
@@ -768,6 +769,10 @@ function matchRoute(pathname: string): Route {
     return { type: 'archive' };
   }
 
+  if (normalized === '/latex') {
+    return { type: 'latex' };
+  }
+
   if (normalized === '/notes' || normalized === '/projects') {
     return { type: 'notes-list' };
   }
@@ -1421,7 +1426,12 @@ function Shell({
   children: ReactNode;
 }) {
   const configuredToolLinks = contentIndex.siteConfig.channels.length > 0 ? contentIndex.siteConfig.channels : DEFAULT_TOOL_LINKS;
-  const toolLinks = configuredToolLinks.map((tool) => {
+  const topbarToolLinks = configuredToolLinks.some(
+    (tool) => tool.href === '/latex' || tool.label.trim().toLowerCase() === 'latex',
+  )
+    ? configuredToolLinks
+    : [...configuredToolLinks, { label: 'LaTeX', href: '/latex', description: '公式语法' }];
+  const toolLinks = topbarToolLinks.map((tool) => {
     if (tool.label === '搜索' && tool.href === '#blog-search') {
       return { ...tool, href: '/search' };
     }
@@ -2138,6 +2148,264 @@ function AboutPage({
   );
 }
 
+type LatexSyntaxItem = {
+  command: string;
+  formula?: string;
+};
+
+type LatexSyntaxGroup = {
+  title: string;
+  description?: string;
+  layout?: 'flow' | 'grid' | 'function-grid';
+  items: LatexSyntaxItem[];
+};
+
+const LATEX_SYNTAX_GROUPS: LatexSyntaxGroup[] = [
+  {
+    title: '小写希腊字母',
+    layout: 'flow',
+    items: [
+      { command: '\\alpha' },
+      { command: '\\beta' },
+      { command: '\\gamma' },
+      { command: '\\delta' },
+      { command: '\\epsilon' },
+      { command: '\\zeta' },
+      { command: '\\eta' },
+      { command: '\\theta' },
+      { command: '\\iota' },
+      { command: '\\kappa' },
+      { command: '\\lambda' },
+      { command: '\\mu' },
+      { command: '\\nu' },
+      { command: '\\xi' },
+      { command: '\\pi' },
+      { command: '\\rho' },
+      { command: '\\sigma' },
+      { command: '\\tau' },
+      { command: '\\upsilon' },
+      { command: '\\phi' },
+      { command: '\\chi' },
+      { command: '\\psi' },
+      { command: '\\omega' },
+      { command: '\\varepsilon' },
+      { command: '\\vartheta' },
+      { command: '\\varphi' },
+      { command: '\\varrho' },
+      { command: '\\varsigma' },
+    ],
+  },
+  {
+    title: '常用二元关系符',
+    layout: 'flow',
+    description: '可以在命令前加 \\not 得到否定形式，例如 \\not\\equiv。',
+    items: [
+      { command: '<', formula: '<' },
+      { command: '\\le' },
+      { command: '\\leq' },
+      { command: '\\ge' },
+      { command: '\\geq' },
+      { command: '=' },
+      { command: '\\neq' },
+      { command: '\\equiv' },
+      { command: '\\not\\equiv' },
+      { command: '\\mid' },
+      { command: '\\nmid' },
+      { command: '\\approx' },
+      { command: '\\sim' },
+      { command: '\\cong' },
+      { command: '\\in' },
+      { command: '\\notin' },
+      { command: '\\subset' },
+      { command: '\\supset' },
+      { command: '\\subseteq' },
+      { command: '\\supseteq' },
+    ],
+  },
+  {
+    title: '常用数学结构',
+    layout: 'grid',
+    items: [
+      { command: '\\frac{abc}{xyz}' },
+      { command: "f'", formula: "f'" },
+      { command: '\\sqrt{abc}' },
+      { command: '\\sqrt[n]{abc}' },
+      { command: '\\overline{abc}' },
+      { command: '\\underline{abc}' },
+      { command: '\\widehat{abc}' },
+      { command: '\\widetilde{abc}' },
+      { command: '\\overrightarrow{abc}' },
+      { command: '\\overleftarrow{abc}' },
+      { command: '\\overbrace{abc}' },
+      { command: '\\underbrace{abc}' },
+    ],
+  },
+  {
+    title: '标准数学函数',
+    layout: 'function-grid',
+    items: [
+      { command: '\\arccos' },
+      { command: '\\arcsin' },
+      { command: '\\arctan' },
+      { command: '\\arg' },
+      { command: '\\cos' },
+      { command: '\\cosh' },
+      { command: '\\cot' },
+      { command: '\\coth' },
+      { command: '\\csc' },
+      { command: '\\deg' },
+      { command: '\\det' },
+      { command: '\\dim' },
+      { command: '\\exp' },
+      { command: '\\gcd' },
+      { command: '\\hom' },
+      { command: '\\inf' },
+      { command: '\\ker' },
+      { command: '\\lg' },
+      { command: '\\lim' },
+      { command: '\\liminf' },
+      { command: '\\limsup' },
+      { command: '\\ln' },
+      { command: '\\log' },
+      { command: '\\max' },
+      { command: '\\min' },
+      { command: '\\Pr' },
+      { command: '\\sec' },
+      { command: '\\sin' },
+      { command: '\\sinh' },
+      { command: '\\sup' },
+      { command: '\\tan' },
+      { command: '\\tanh' },
+    ],
+  },
+  {
+    title: '大型算子与上下标',
+    layout: 'grid',
+    items: [
+      { command: 'x_i^2' },
+      { command: '\\sum_{i=1}^{n} i^2' },
+      { command: '\\prod_{i=1}^{n} x_i' },
+      { command: '\\int_a^b f(x)\\,dx' },
+      { command: '\\lim_{n\\to\\infty} a_n' },
+      { command: '\\underset{x\\in S}{\\operatorname{argmax}}\\ f(x)' },
+    ],
+  },
+];
+
+const LATEX_BLOCK_EXAMPLES = [
+  {
+    title: '矩阵',
+    command: '\\begin{bmatrix} a & b \\\\ c & d \\end{bmatrix}',
+    formula: '\\begin{bmatrix} a & b \\\\ c & d \\end{bmatrix}',
+  },
+  {
+    title: '分段函数',
+    command: '\\begin{cases} x^2, & x \\ge 0 \\\\ -x, & x < 0 \\end{cases}',
+    formula: 'f(x)=\\begin{cases} x^2, & x \\ge 0 \\\\ -x, & x < 0 \\end{cases}',
+  },
+  {
+    title: '多行对齐',
+    command: '\\begin{aligned} a+b&=c \\\\ c+d&=e \\end{aligned}',
+    formula: '\\begin{aligned} a+b&=c \\\\ c+d&=e \\end{aligned}',
+  },
+  {
+    title: '数组',
+    command: '\\begin{array}{cl} \\text{maximize} & f(x) \\\\ \\text{s.t.} & x\\in S \\end{array}',
+    formula: '\\begin{array}{cl} \\text{maximize} & f(x) \\\\ \\text{s.t.} & x\\in S \\end{array}',
+  },
+];
+
+function renderLatexFormula(formula: string): ReactNode {
+  return renderInlineMarkdown(`$${formula}$`);
+}
+
+function LatexSyntaxTable({ group }: { group: LatexSyntaxGroup }) {
+  return (
+    <section className={`blog-latex-section ${group.layout ?? 'grid'}`}>
+      <h3>{group.title}</h3>
+      {group.description ? <p className="blog-latex-note">{group.description}</p> : null}
+      <div className="blog-latex-rule" />
+      <div className="blog-latex-items">
+        {group.items.map((item) => {
+          const formula = item.formula ?? item.command;
+          return (
+            <div className="blog-latex-item" key={`${group.title}-${item.command}`}>
+              <code>{item.command}</code>
+              <span>{renderLatexFormula(formula)}</span>
+            </div>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
+function LatexPage({
+  navigate,
+  query,
+  setQuery,
+}: {
+  navigate: (href: string) => void;
+  query: string;
+  setQuery: (value: string) => void;
+}) {
+  return (
+    <div className="blog-layout">
+      <section className="blog-main-column">
+        <section className="blog-panel blog-archive-hero blog-latex-hero">
+          <p className="blog-panel-eyebrow">LaTeX</p>
+          <div className="blog-panel-head">
+            <div>
+              <h2>LaTeX 语法速查</h2>
+              <p>这里列出本站 Markdown 预览与文章页常用、稳定支持的 KaTeX 公式写法。</p>
+            </div>
+            <div className="blog-metrics">
+              <span>{LATEX_SYNTAX_GROUPS.length + 1} 组示例</span>
+            </div>
+          </div>
+        </section>
+
+        <article className="blog-panel blog-archive-panel blog-latex-panel">
+          <section className="blog-latex-section">
+            <h3>公式写法</h3>
+            <div className="blog-latex-rule" />
+            <div className="blog-latex-usage">
+              <div>
+                <code>$a^2+b^2=c^2$</code>
+                <span>行内公式：{renderLatexFormula('a^2+b^2=c^2')}</span>
+              </div>
+              <div>
+                <code>$$\\sum_&#123;i=1&#125;^n i = \\frac&#123;n(n+1)&#125;&#123;2&#125;$$</code>
+                <span>独立公式会居中显示。</span>
+              </div>
+            </div>
+          </section>
+
+          {LATEX_SYNTAX_GROUPS.map((group) => (
+            <LatexSyntaxTable group={group} key={group.title} />
+          ))}
+
+          <section className="blog-latex-section">
+            <h3>矩阵、分段与对齐环境</h3>
+            <div className="blog-latex-rule" />
+            <div className="blog-latex-blocks">
+              {LATEX_BLOCK_EXAMPLES.map((example) => (
+                <section className="blog-latex-block" key={example.title}>
+                  <h4>{example.title}</h4>
+                  <code>{example.command}</code>
+                  <div className="blog-latex-display">{renderMarkdown(`$$${example.formula}$$`)}</div>
+                </section>
+              ))}
+            </div>
+          </section>
+        </article>
+      </section>
+
+      <SiteSidebar navigate={navigate} query={query} setQuery={setQuery} />
+    </div>
+  );
+}
+
 function InkNoteAside({ note }: { note: RoutedDocument<InkNoteFrontmatter> }) {
   return (
     <section className="blog-sidebar-card">
@@ -2423,6 +2691,8 @@ export default function SiteAppWide() {
       nextTitle = note?.frontmatter.title?.trim() || blogTitle;
     } else if (route.type === 'archive') {
       nextTitle = `归档 | ${blogTitle}`;
+    } else if (route.type === 'latex') {
+      nextTitle = `LaTeX | ${blogTitle}`;
     } else if (route.type === 'search') {
       nextTitle = submittedSearchQuery.trim()
         ? `搜索：${submittedSearchQuery.trim()} | ${blogTitle}`
@@ -2497,6 +2767,8 @@ export default function SiteAppWide() {
     );
   } else if (route.type === 'archive') {
     page = <ArchivePage navigate={navigate} query={searchQuery} setQuery={setSearchQuery} />;
+  } else if (route.type === 'latex') {
+    page = <LatexPage navigate={navigate} query={searchQuery} setQuery={setSearchQuery} />;
   } else if (route.type === 'notes-list') {
     page = (
       <CollectionPage

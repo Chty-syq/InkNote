@@ -663,6 +663,137 @@ input {
   color: #334b60;
 }
 
+.blog-latex-hero .blog-panel-eyebrow::after {
+  content: "(公式速查)";
+}
+
+.blog-latex-panel {
+  padding: 1.15rem 1.65rem 1.8rem;
+}
+
+.blog-latex-section + .blog-latex-section {
+  margin-top: 2rem;
+}
+
+.blog-latex-section h3 {
+  margin: 0;
+  color: #1f3346;
+  font-size: 1.02rem;
+  font-weight: 760;
+  letter-spacing: -0.01em;
+}
+
+.blog-latex-rule {
+  height: 1px;
+  margin: 0.58rem 0 0.72rem;
+  background: #d7dee5;
+}
+
+.blog-latex-note {
+  margin: 0.48rem 0 0;
+  color: #5f7284;
+  font-size: 0.88rem;
+  line-height: 1.7;
+}
+
+.blog-latex-items {
+  display: grid;
+  gap: 0.48rem 1.1rem;
+}
+
+.blog-latex-section.flow .blog-latex-items {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.42rem 1rem;
+}
+
+.blog-latex-section.grid .blog-latex-items {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.blog-latex-section.function-grid .blog-latex-items {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.blog-latex-item {
+  display: inline-grid;
+  grid-template-columns: max-content max-content;
+  align-items: baseline;
+  gap: 0.55rem;
+  min-width: 0;
+  color: #172b3d;
+  line-height: 1.5;
+}
+
+.blog-latex-item code,
+.blog-latex-usage code,
+.blog-latex-block code {
+  color: #15283a;
+  font-family: "Times New Roman", "Noto Serif SC", serif;
+  font-size: 1rem;
+  font-weight: 650;
+  background: transparent;
+}
+
+.blog-latex-item .katex,
+.blog-latex-usage .katex {
+  color: #0647ff;
+  font-size: 1.04em;
+}
+
+.blog-latex-usage {
+  display: grid;
+  gap: 0.74rem;
+}
+
+.blog-latex-usage > div {
+  display: grid;
+  grid-template-columns: minmax(14rem, max-content) minmax(0, 1fr);
+  align-items: baseline;
+  gap: 1rem;
+  color: #3f5366;
+  font-size: 0.94rem;
+}
+
+.blog-latex-blocks {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.85rem;
+}
+
+.blog-latex-block {
+  display: grid;
+  gap: 0.55rem;
+  min-width: 0;
+  padding: 0.78rem 0.9rem;
+  border: 1px solid #d8e1e8;
+  border-radius: 10px;
+  background: #f8fafb;
+}
+
+.blog-latex-block h4 {
+  margin: 0;
+  color: #294357;
+  font-size: 0.92rem;
+  font-weight: 740;
+}
+
+.blog-latex-block code {
+  overflow-x: auto;
+  white-space: nowrap;
+}
+
+.blog-latex-display {
+  display: grid;
+  place-items: center;
+  min-height: 3rem;
+  padding: 0.25rem 0;
+}
+
+.blog-latex-display .katex-display {
+  margin: 0;
+}
+
 .blog-card {
   position: relative;
   overflow: hidden;
@@ -2106,5 +2237,20 @@ input {
   .blog-archive-item-date,
   .blog-archive-item-link {
     grid-column: 2;
+  }
+
+  .blog-latex-panel {
+    padding: 18px 18px 20px;
+  }
+
+  .blog-latex-section.grid .blog-latex-items,
+  .blog-latex-section.function-grid .blog-latex-items,
+  .blog-latex-blocks {
+    grid-template-columns: 1fr;
+  }
+
+  .blog-latex-usage > div {
+    grid-template-columns: 1fr;
+    gap: 0.32rem;
   }
 }
