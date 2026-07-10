@@ -12,8 +12,6 @@ import {
   sortDocumentsByDate,
   sortDocumentsByOrderAndDate,
 } from '@inknote/site-builder';
-import categoriesData from '../../../../content/site/categories.json';
-import siteConfigData from '../../../../content/site/site.config.json';
 
 export interface RoutedDocument<TFrontmatter extends ContentFrontmatter> extends ContentDocument<TFrontmatter> {
   href: string;
@@ -39,6 +37,37 @@ export interface RuntimeContentPayload {
   inknotes: Record<string, string>;
   inknoteProjects?: Record<string, string>;
 }
+
+const DEFAULT_SITE_CONFIG: SiteConfig = {
+  title: "Chty's Blog",
+  tagline: '',
+  description: '',
+  baseUrl: '',
+  language: 'zh-CN',
+  author: '',
+  hero: {
+    eyebrow: '',
+    title: "Chty's Blog",
+    description: '',
+    primaryLink: {
+      label: '文章',
+      href: '/',
+    },
+  },
+  channels: [],
+  friendLinks: [],
+  toolLinks: [],
+};
+
+const categoriesModules = import.meta.glob('../../../../content/site/categories.json', {
+  eager: true,
+  import: 'default',
+}) as Record<string, ContentCategory[]>;
+
+const siteConfigModules = import.meta.glob('../../../../content/site/site.config.json', {
+  eager: true,
+  import: 'default',
+}) as Record<string, SiteConfig>;
 
 const navigationModules = import.meta.glob('../../../../content/site/navigation.json', {
   eager: true,
@@ -87,6 +116,14 @@ function normalizeRawModuleMap(modules: Record<string, string> | undefined): Rec
 
 function readOptionalNavigation(): NavigationItem[] | undefined {
   return Object.values(navigationModules)[0];
+}
+
+function readOptionalCategories(): ContentCategory[] {
+  return Object.values(categoriesModules)[0] ?? [];
+}
+
+function readOptionalSiteConfig(): SiteConfig {
+  return Object.values(siteConfigModules)[0] ?? DEFAULT_SITE_CONFIG;
 }
 
 function normalizeNavigation(navigation: NavigationItem[] | undefined, siteConfig: SiteConfig): NavigationItem[] {
@@ -273,8 +310,8 @@ function buildContentIndex(payload: RuntimeContentPayload): ContentIndex {
 
 export let contentIndex: ContentIndex = buildContentIndex({
   navigation: readOptionalNavigation(),
-  siteConfig: siteConfigData as SiteConfig,
-  categories: categoriesData as ContentCategory[],
+  siteConfig: readOptionalSiteConfig(),
+  categories: readOptionalCategories(),
   markdown: markdownModules,
   inknotes: inknoteModules,
   inknoteProjects: inknoteProjectModules,
