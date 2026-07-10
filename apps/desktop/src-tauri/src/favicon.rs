@@ -2,9 +2,7 @@ use image::{
     imageops::FilterType, DynamicImage, ImageFormat, ImageReader, Limits, Rgba, RgbaImage,
 };
 use reqwest::{
-    header::{
-        ACCEPT, ACCEPT_LANGUAGE, CONTENT_LENGTH, CONTENT_TYPE, LOCATION, REFERER,
-    },
+    header::{ACCEPT, ACCEPT_LANGUAGE, CONTENT_LENGTH, CONTENT_TYPE, LOCATION, REFERER},
     redirect::Policy,
     Client,
 };
@@ -26,8 +24,7 @@ const ICON_BODY_LIMIT: usize = 2 * 1024 * 1024;
 const EXTERNAL_IMAGE_BODY_LIMIT: usize = 25 * 1024 * 1024;
 const MAX_REDIRECTS: usize = 5;
 const ICON_SIZE: u32 = 64;
-const BROWSER_USER_AGENT: &str =
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
+const BROWSER_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
      (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
 const BROWSER_ACCEPT_LANGUAGE: &str = "zh-CN,zh;q=0.9,en;q=0.8";
 const PAGE_ACCEPT: &str =
@@ -228,8 +225,22 @@ async fn fetch_limited(
             .header(ACCEPT, accept)
             .header(ACCEPT_LANGUAGE, BROWSER_ACCEPT_LANGUAGE)
             .header("Sec-Fetch-Mode", "no-cors")
-            .header("Sec-Fetch-Site", if referer.is_some() { "same-origin" } else { "none" })
-            .header("Sec-Fetch-Dest", if accept == PAGE_ACCEPT { "document" } else { "image" });
+            .header(
+                "Sec-Fetch-Site",
+                if referer.is_some() {
+                    "same-origin"
+                } else {
+                    "none"
+                },
+            )
+            .header(
+                "Sec-Fetch-Dest",
+                if accept == PAGE_ACCEPT {
+                    "document"
+                } else {
+                    "image"
+                },
+            );
         if let Some(referer) = referer {
             request = request.header(REFERER, referer.as_str());
         }

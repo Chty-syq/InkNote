@@ -275,8 +275,6 @@ function resolveGoatCounterConfig(config: GoatCounterConfig | undefined): Resolv
 const ACTIVE_GOATCOUNTER_CONFIG = resolveGoatCounterConfig(contentIndex.siteConfig.goatcounter);
 const goatCounterCountCache = new Map<string, string>();
 const goatCounterCountPending = new Map<string, Promise<string>>();
-const goatCounterOptimisticCounts = new Map<string, number>();
-const GOATCOUNTER_COUNT_UPDATED_EVENT = 'inknote:goatcounter-count-updated';
 const gitHubDiscussionListCache = new Map<string, GitHubDiscussionSummary[]>();
 const gitHubDiscussionListPending = new Map<string, Promise<GitHubDiscussionSummary[]>>();
 const giscusCommentCountCache = new Map<string, string>();
@@ -634,64 +632,30 @@ function getGoatCounterLookupPaths(path: string): string[] {
   return [...new Set(paths)];
 }
 
-function canReadGoatCounterPublicCounts(config: ResolvedGoatCounterConfig): boolean {
-  if (typeof window === 'undefined') {
-    return false;
-  }
-
-  try {
-    return new URL(config.baseUrl).origin === window.location.origin;
-  } catch {
-    return false;
-  }
-}
-
 function getGoatCounterDisplayCount(config: ResolvedGoatCounterConfig, path: string): string | undefined {
   const cacheKey = getGoatCounterCacheKey(config.baseUrl, path);
   const cachedCount = goatCounterCountCache.get(cacheKey);
-  const optimisticCount = goatCounterOptimisticCounts.get(cacheKey) ?? 0;
 
   if (cachedCount === undefined) {
-    return optimisticCount > 0 ? formatGoatCounterCount(optimisticCount) : undefined;
+    return undefined;
   }
 
-  if (optimisticCount === 0) {
-    return cachedCount;
-  }
-
-  const baseCount = parseGoatCounterCount(cachedCount);
-  return baseCount === null ? cachedCount : formatGoatCounterCount(baseCount + optimisticCount);
+  return cachedCount;
 }
 
-function notifyGoatCounterCountUpdated() {
-  if (typeof window === 'undefined') {
-    return;
-  }
-
-  window.dispatchEvent(new CustomEvent(GOATCOUNTER_COUNT_UPDATED_EVENT));
+function getGoatCounterCountUrls(config: ResolvedGoatCounterConfig, lookupPath: string): string[] {
+  return [
+    `${config.baseUrl}/counter/${encodeURIComponent(lookupPath)}.json`,
+    `${config.baseUrl}/counter/${lookupPath}.json`,
+  ];
 }
 
-function applyOptimisticGoatCounterCount(config: ResolvedGoatCounterConfig, path: string) {
-  const cacheKey = getGoatCounterCacheKey(config.baseUrl, path);
-  goatCounterOptimisticCounts.set(cacheKey, (goatCounterOptimisticCounts.get(cacheKey) ?? 0) + 1);
-  notifyGoatCounterCountUpdated();
-}
+async function fetchGoatCounterLookupCount(config: ResolvedGoatCounterConfig, lookupPath: string): Promise<number> {
+  let lastError: unknown;
 
-async function fetchGoatCounterCount(config: ResolvedGoatCounterConfig, path: string): Promise<string> {
-  const cacheKey = getGoatCounterCacheKey(config.baseUrl, path);
-  const cachedBase = goatCounterCountCache.get(cacheKey);
-  if (cachedBase !== undefined) {
-    return getGoatCounterDisplayCount(config, path) ?? cachedBase;
-  }
-
-  const pending = goatCounterCountPending.get(cacheKey);
-  if (pending) {
-    return pending;
-  }
-
-  const request = Promise.all(
-    getGoatCounterLookupPaths(path).map(async (lookupPath) => {
-      const response = await fetch(`${config.baseUrl}/counter/${encodeURIComponent(lookupPath)}.json`, {
+  for (const url of getGoatCounterCountUrls(config, lookupPath)) {
+    try {
+      const response = await fetch(url, {
         headers: {
           Accept: 'application/json',
         },
@@ -712,9 +676,41 @@ async function fetchGoatCounterCount(config: ResolvedGoatCounterConfig, path: st
       const payload = (await response.json()) as { count?: number | string };
       const count = parseGoatCounterCount(payload.count === undefined ? undefined : String(payload.count));
       return count ?? 0;
-    }),
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  throw lastError instanceof Error ? lastError : new Error('GoatCounter request failed');
+}
+
+async function fetchGoatCounterCount(config: ResolvedGoatCounterConfig, path: string): Promise<string> {
+  const cacheKey = getGoatCounterCacheKey(config.baseUrl, path);
+  const cachedBase = goatCounterCountCache.get(cacheKey);
+  if (cachedBase !== undefined) {
+    return getGoatCounterDisplayCount(config, path) ?? cachedBase;
+  }
+
+  const pending = goatCounterCountPending.get(cacheKey);
+  if (pending) {
+    return pending;
+  }
+
+  const request = Promise.allSettled(
+    getGoatCounterLookupPaths(path).map((lookupPath) => fetchGoatCounterLookupCount(config, lookupPath)),
   )
-    .then((counts) => formatGoatCounterCount(counts.reduce((total, count) => total + count, 0)))
+    .then((results) => {
+      const counts = results
+        .filter((result): result is PromiseFulfilledResult<number> => result.status === 'fulfilled')
+        .map((result) => result.value);
+
+      if (counts.length === 0) {
+        const firstError = results.find((result): result is PromiseRejectedResult => result.status === 'rejected');
+        throw firstError?.reason instanceof Error ? firstError.reason : new Error('GoatCounter request failed');
+      }
+
+      return formatGoatCounterCount(counts.reduce((total, count) => total + count, 0));
+    })
     .then((count) => {
       goatCounterCountCache.set(cacheKey, count);
       return getGoatCounterDisplayCount(config, path) ?? count;
@@ -1178,14 +1174,6 @@ function useGoatCounterCountsForPaths(paths: string[]): Record<string, string> {
       return next;
     });
 
-    // GoatCounter's public counter endpoint is cross-origin on GitHub Pages and
-    // does not expose permissive CORS headers, so the browser cannot read it
-    // directly. In that case we still keep optimistic in-session counts and
-    // avoid noisy console errors.
-    if (!canReadGoatCounterPublicCounts(ACTIVE_GOATCOUNTER_CONFIG)) {
-      return;
-    }
-
     if (missingPaths.length === 0) {
       return;
     }
@@ -1197,8 +1185,9 @@ function useGoatCounterCountsForPaths(paths: string[]): Record<string, string> {
         try {
           const count = await fetchGoatCounterCount(ACTIVE_GOATCOUNTER_CONFIG, path);
           return [path, count] as const;
-        } catch {
-          return null;
+        } catch (error) {
+          console.warn('GoatCounter count fetch failed:', path, error);
+          return [path, '--'] as const;
         }
       }),
     ).then((results) => {
@@ -1206,14 +1195,9 @@ function useGoatCounterCountsForPaths(paths: string[]): Record<string, string> {
         return;
       }
 
-      const resolvedEntries = results.filter((item): item is readonly [string, string] => item !== null);
-      if (resolvedEntries.length === 0) {
-        return;
-      }
-
       setCounts((current) => {
         const next = { ...current };
-        resolvedEntries.forEach(([path, count]) => {
+        results.forEach(([path, count]) => {
           next[path] = count;
         });
         return next;
@@ -1223,27 +1207,6 @@ function useGoatCounterCountsForPaths(paths: string[]): Record<string, string> {
     return () => {
       cancelled = true;
     };
-  }, [paths]);
-
-  useEffect(() => {
-    if (!ACTIVE_GOATCOUNTER_CONFIG) {
-      return;
-    }
-
-    const handleCountUpdated = () => {
-      const nextCounts: Record<string, string> = {};
-      paths.forEach((path) => {
-        const count = getGoatCounterDisplayCount(ACTIVE_GOATCOUNTER_CONFIG, path);
-        if (count !== undefined) {
-          nextCounts[path] = count;
-        }
-      });
-
-      setCounts((current) => ({ ...current, ...nextCounts }));
-    };
-
-    window.addEventListener(GOATCOUNTER_COUNT_UPDATED_EVENT, handleCountUpdated);
-    return () => window.removeEventListener(GOATCOUNTER_COUNT_UPDATED_EVENT, handleCountUpdated);
   }, [paths]);
 
   return counts;
@@ -2675,7 +2638,6 @@ export default function SiteAppWide() {
       title: document.title,
       no_session: window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1',
     });
-    applyOptimisticGoatCounterCount(ACTIVE_GOATCOUNTER_CONFIG, nextPath);
     goatCounterTrackedPathRef.current = nextPath;
   }, [isGoatCounterReady, route]);
 

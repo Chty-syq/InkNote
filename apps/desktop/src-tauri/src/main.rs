@@ -25,6 +25,7 @@ use std::os::windows::process::CommandExt;
 
 const BLOG_PREVIEW_PORT: u16 = 4321;
 const BLOG_PREVIEW_ORIGIN: &str = "http://localhost:4321";
+const BLOG_PREVIEW_HEALTH_PATH: &str = "/__inknote-preview-health";
 const BLOG_PREVIEW_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
 const BLOG_PREVIEW_WAIT_STEP: Duration = Duration::from_millis(100);
 const BLOG_PREVIEW_HTTP_TIMEOUT: Duration = Duration::from_millis(800);
@@ -1040,7 +1041,8 @@ fn acquire_content_sync_lock(operation: &str) -> Result<ContentSyncLock, String>
             Ok(ContentSyncLock { path: lock_path })
         }
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Err(
-            "已有同步任务正在运行，请稍后再试；如果确认没有同步任务，可重启编辑器后重试。".to_string(),
+            "已有同步任务正在运行，请稍后再试；如果确认没有同步任务，可重启编辑器后重试。"
+                .to_string(),
         ),
         Err(error) => Err(format!("failed to create sync lock: {error}")),
     }
@@ -3575,6 +3577,12 @@ fn ensure_blog_preview_server_state(
         }
     }
 
+    if is_blog_preview_port_occupied() {
+        return Err(format!(
+            "本地博客预览端口 {BLOG_PREVIEW_PORT} 已被其它程序占用，且不是当前源码工作区的预览服务。请关闭已安装版逸仙笔记或释放端口后重试。"
+        ));
+    }
+
     if can_start_npm_preview_server() {
         let mut child_guard = server
             .child
@@ -3642,6 +3650,27 @@ fn create_blog_preview_server_status(
         ready,
         message: message.to_string(),
     }
+}
+
+fn normalize_preview_health_workspace(path: &Path) -> String {
+    path.to_string_lossy()
+        .replace('\\', "/")
+        .trim_end_matches('/')
+        .to_ascii_lowercase()
+}
+
+fn create_blog_preview_health_body() -> String {
+    let workspace = get_workspace_root()
+        .map(|path| normalize_preview_health_workspace(&path))
+        .unwrap_or_default();
+    format!("inknote-preview\nworkspace={workspace}\n")
+}
+
+fn parse_preview_health_workspace(body: &str) -> Option<String> {
+    body.lines()
+        .find_map(|line| line.strip_prefix("workspace="))
+        .map(|workspace| normalize_preview_health_workspace(Path::new(workspace.trim())))
+        .filter(|workspace| !workspace.is_empty())
 }
 
 fn spawn_blog_preview_server() -> Result<Child, String> {
@@ -3724,6 +3753,20 @@ fn handle_static_blog_preview_connection(mut stream: TcpStream) {
             "Method Not Allowed",
             "text/plain; charset=utf-8",
             b"Method Not Allowed",
+            method == "HEAD",
+        );
+        return;
+    }
+
+    let request_path = normalize_preview_request_path(target).unwrap_or_default();
+    if request_path == BLOG_PREVIEW_HEALTH_PATH {
+        let body = create_blog_preview_health_body();
+        let _ = write_http_response(
+            &mut stream,
+            200,
+            "OK",
+            "text/plain; charset=utf-8",
+            body.as_bytes(),
             method == "HEAD",
         );
         return;
@@ -3965,6 +4008,17 @@ fn is_blog_preview_server_ready() -> bool {
     addresses.iter().any(probe_blog_preview_server)
 }
 
+fn is_blog_preview_port_occupied() -> bool {
+    let addresses = [
+        SocketAddr::from(([127, 0, 0, 1], BLOG_PREVIEW_PORT)),
+        SocketAddr::from(([0, 0, 0, 0, 0, 0, 0, 1], BLOG_PREVIEW_PORT)),
+    ];
+
+    addresses
+        .iter()
+        .any(|address| TcpStream::connect_timeout(address, Duration::from_millis(120)).is_ok())
+}
+
 fn probe_blog_preview_server(address: &SocketAddr) -> bool {
     let Ok(mut stream) = TcpStream::connect_timeout(address, Duration::from_millis(120)) else {
         return false;
@@ -3972,16 +4026,31 @@ fn probe_blog_preview_server(address: &SocketAddr) -> bool {
     let _ = stream.set_read_timeout(Some(BLOG_PREVIEW_HTTP_TIMEOUT));
     let _ = stream.set_write_timeout(Some(BLOG_PREVIEW_HTTP_TIMEOUT));
 
-    let request = b"HEAD / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
-    if stream.write_all(request).is_err() || stream.flush().is_err() {
+    let request = format!(
+        "GET {BLOG_PREVIEW_HEALTH_PATH} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+    );
+    if stream.write_all(request.as_bytes()).is_err() || stream.flush().is_err() {
         return false;
     }
 
-    let mut buffer = [0_u8; 96];
+    let mut buffer = [0_u8; 2048];
     match stream.read(&mut buffer) {
         Ok(bytes_read) if bytes_read > 0 => {
             let response = &buffer[..bytes_read];
-            response.starts_with(b"HTTP/1.1 200") || response.starts_with(b"HTTP/1.0 200")
+            if !(response.starts_with(b"HTTP/1.1 200") || response.starts_with(b"HTTP/1.0 200")) {
+                return false;
+            }
+
+            let text = String::from_utf8_lossy(response);
+            let Some((_, body)) = text.split_once("\r\n\r\n") else {
+                return false;
+            };
+            let Some(remote_workspace) = parse_preview_health_workspace(body) else {
+                return false;
+            };
+            get_workspace_root()
+                .map(|path| remote_workspace == normalize_preview_health_workspace(&path))
+                .unwrap_or(false)
         }
         _ => false,
     }

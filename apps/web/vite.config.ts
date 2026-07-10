@@ -6,6 +6,8 @@ import { fileURLToPath, URL } from 'node:url';
 
 const pagesBase = process.env.VITE_PAGES_BASE?.trim() || '/';
 const contentRoot = fileURLToPath(new URL('../../content', import.meta.url));
+const workspaceRoot = fileURLToPath(new URL('../..', import.meta.url));
+const previewHealthPath = '/__inknote-preview-health';
 const contentEntryPattern =
   /[\\/]content[\\/](?:markdown[\\/][^\\/]+[\\/]index\.md|inknotes[\\/][^\\/]+[\\/](?:index\.md|[^\\/]+\.inknote\.json))$/i;
 
@@ -345,14 +347,32 @@ function rssFeedPlugin(): Plugin {
   };
 }
 
+function previewHealthPlugin(): Plugin {
+  return {
+    name: 'inknote-preview-health',
+    configureServer(server: ViteDevServer) {
+      server.middlewares.use((request, response, next) => {
+        if (request.url?.split(/[?#]/, 1)[0] !== previewHealthPath) {
+          next();
+          return;
+        }
+
+        response.statusCode = 200;
+        response.setHeader('content-type', 'text/plain; charset=utf-8');
+        response.end(`inknote-preview\nworkspace=${workspaceRoot}\n`);
+      });
+    },
+  };
+}
+
 export default defineConfig({
   base: pagesBase,
-  plugins: [contentCollectionReloadPlugin(), rssFeedPlugin(), react()],
+  plugins: [contentCollectionReloadPlugin(), rssFeedPlugin(), previewHealthPlugin(), react()],
   server: {
     port: 4321,
     strictPort: true,
     fs: {
-      allow: [fileURLToPath(new URL('../..', import.meta.url))],
+      allow: [workspaceRoot],
     },
   },
   resolve: {
