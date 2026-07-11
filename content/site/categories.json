@@ -12,15 +12,21 @@
     "order": 2
   },
   {
+    "slug": "computer-science",
+    "label": "计算机科学",
+    "labelEn": "Computer Science",
+    "order": 3
+  },
+  {
     "slug": "classics",
     "label": "古典摘录",
     "labelEn": "Classics",
-    "order": 3
+    "order": 4
   },
   {
     "slug": "life-recording",
     "label": "生活纪事",
     "labelEn": "Life Recording",
-    "order": 4
+    "order": 5
   }
 ]

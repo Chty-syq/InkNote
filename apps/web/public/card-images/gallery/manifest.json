@@ -1,5 +1,5 @@
 {
-  "updatedAt": "2026-07-09T09:04:15.674Z",
+  "updatedAt": "2026-07-11T09:44:59.775Z",
   "count": 550,
   "images": [
     {
@@ -856,7 +856,7 @@
       "size": 46479,
       "uploadedAt": "2026-06-29T04:31:59.881Z",
       "focus": {
-        "x": 50,
+        "x": 100,
         "y": 50
       }
     },
@@ -3067,7 +3067,7 @@
       "size": 45606,
       "uploadedAt": "2026-06-29T15:24:22.313Z",
       "focus": {
-        "x": 50,
+        "x": 0,
         "y": 50
       }
     },
@@ -6053,5 +6053,60 @@
       }
     }
   ],
-  "assignments": {}
+  "assignments": {
+    "/notes/3616221": "1782746930565-6-gallery-20260629-232848-07-tkfj-honkai-star-rail-358897.jpg",
+    "/inknote/5369007": "1782580833897-30-gallery-20260628-011940-31-3lk3-cardcaptor-sakura-246382.jpg",
+    "/notes/8043157": "1782746922359-18-gallery-20260629-232837-19-rqbs-azur-lane-305701.jpg",
+    "/notes/3822107": "1782746933563-18-gallery-20260629-232848-19-jqqt-honkai-star-rail-395244.jpg",
+    "/notes/8209333": "1782707522285-7-gallery-20260629-123159-08-fvul-guilty-crown-121419.jpg",
+    "/notes/3187429": "1782746883700-7-gallery-20260629-232801-08-c16x-zero-no-tsukaima-290433.jpg",
+    "/notes/4488563": "1782746861974-25-gallery-20260629-232736-26-fqt3-madoka-magica-195034.jpg",
+    "/notes/1249840": "1782747368677-44-gallery-20260629-233557-45-qncx-shakugan-no-shana-50898.jpg",
+    "/notes/7370323": "1782746919252-6-gallery-20260629-232837-07-mo75-azur-lane-272113.jpg",
+    "/notes/4575204": "1782747359414-7-gallery-20260629-233557-08-tr73-shakugan-no-shana-6167.jpg",
+    "/notes/2859686": "1782746625789-6-gallery-20260629-232343-07-do4z-violet-evergarden-258705.jpg",
+    "/notes/2723756": "1782746624291-0-gallery-20260629-232343-01-vsnl-violet-evergarden-234023.jpg",
+    "/notes/2174514": "1782746691296-11-gallery-20260629-232448-12-6efy-date-a-live-166766.jpg",
+    "/notes/1170948": "1782746797204-22-gallery-20260629-232631-23-hqhi-yosuga-no-sora-82729.jpg",
+    "/notes/6310106": "1782746692364-15-gallery-20260629-232448-16-lbea-date-a-live-171229.jpg",
+    "/notes/4755458": "1782746865029-39-gallery-20260629-232736-40-0i2r-madoka-magica-229445.jpg",
+    "/notes/6576902": "1782580829597-27-gallery-20260628-011940-28-5jf6-cardcaptor-sakura-233450.jpg",
+    "/notes/1364178": "1782746931841-11-gallery-20260629-232848-12-josx-honkai-star-rail-371455.jpg",
+    "/notes/3209674": "1782746814326-11-gallery-20260629-232651-12-ehz3-genshin-impact-335345.jpg",
+    "/notes/7688934": "1782580824767-24-gallery-20260628-011940-25-se8q-cardcaptor-sakura-224653.jpg",
+    "/notes/1864066": "1782746695467-28-gallery-20260629-232448-29-hfjh-date-a-live-208556.jpg",
+    "/notes/7185341": "1782747377358-77-gallery-20260629-233557-78-s3o1-shakugan-no-shana-171502.jpg",
+    "/notes/9571016": "1782746862812-29-gallery-20260629-232736-30-irt2-madoka-magica-202518.jpg",
+    "/notes/6854339": "1782746919679-8-gallery-20260629-232837-09-u84y-azur-lane-282153.jpg",
+    "/notes/5352904": "1782747375764-71-gallery-20260629-233557-72-ans3-shakugan-no-shana-117057.jpg",
+    "/notes/2901263": "1782746882853-4-gallery-20260629-232801-05-m49w-zero-no-tsukaima-61156.jpg",
+    "/notes/1755316": "1782746691100-10-gallery-20260629-232448-11-zvsa-date-a-live-166765.jpg",
+    "/notes/5187191": "1782746918703-4-gallery-20260629-232837-05-wvej-azur-lane-262400.jpg",
+    "/notes/7813428": "1782746667874-21-gallery-20260629-232422-22-bzce-arknights-endfield-400152.jpg",
+    "/notes/5367025": "1782746698135-39-gallery-20260629-232448-40-nqan-date-a-live-286395.jpg",
+    "/notes/6237698": "1782747379471-85-gallery-20260629-233557-86-p5qq-shakugan-no-shana-268986.jpg",
+    "/notes/3161330": "1782746669264-27-gallery-20260629-232422-28-06m0-arknights-endfield-404643.jpg",
+    "/notes/8086478": "1782746898716-0-gallery-20260629-232818-01-2ulo-youkoso-jitsuryoku-228528.jpg",
+    "/notes/2177534": "1782746929993-3-gallery-20260629-232848-04-h40e-honkai-star-rail-356768.jpg",
+    "/notes/1521109": "1782746796672-20-gallery-20260629-232631-21-wrco-yosuga-no-sora-70765.jpg",
+    "/notes/1692166": "1782746667083-18-gallery-20260629-232422-19-asae-arknights-endfield-399056.jpg",
+    "/notes/6854416": "1782746901840-13-gallery-20260629-232818-14-fs2l-youkoso-jitsuryoku-252625.jpg",
+    "/notes/2753002": "1782747360208-10-gallery-20260629-233557-11-xn1y-shakugan-no-shana-7734.jpg",
+    "/notes/4065780": "1782747370360-51-gallery-20260629-233557-52-uwu9-shakugan-no-shana-59716.jpg",
+    "/notes/1039946": "1782746797886-25-gallery-20260629-232631-26-zz2h-yosuga-no-sora-89980.jpg",
+    "/notes/3083238": "1782746821905-3-gallery-20260629-232700-04-ew70-seitokai-no-ichizon-61269.jpg",
+    "/notes/3235973": "1782746851041-7-gallery-20260629-232729-08-p1ge-satsuriku-no-tenshi-314775.jpg",
+    "/notes/3646525": "1782746864811-38-gallery-20260629-232736-39-rsys-madoka-magica-221998.jpg",
+    "/notes/3829026": "1782746662560-0-gallery-20260629-232422-01-hu09-arknights-endfield-364544.jpg",
+    "/notes/8831954": "1782747371232-54-gallery-20260629-233557-55-peew-shakugan-no-shana-61486.jpg",
+    "/notes/3002288": "1782746829866-0-gallery-20260629-232709-01-kby5-gotoubun-no-hanayome-277325.jpg",
+    "/notes/6888484": "1782746845172-0-gallery-20260629-232724-01-azza-seitokai-yakuindomo-82392.jpg",
+    "/notes/5499697": "1782746696514-32-gallery-20260629-232448-33-o3i1-date-a-live-212135.jpg",
+    "/notes/1300659": "1782746795321-14-gallery-20260629-232631-15-ua7g-yosuga-no-sora-60052.jpg",
+    "/notes/1031988": "1782746838264-38-gallery-20260629-232709-39-81xl-gotoubun-no-hanayome-342900.jpg",
+    "/notes/4748532": "1782580853698-42-gallery-20260628-011940-43-5grt-cardcaptor-sakura-265091.jpg",
+    "/notes/4063401": "1782707525985-20-gallery-20260629-123159-21-7lon-guilty-crown-153281.jpg",
+    "/notes/5233085": "1782746863823-34-gallery-20260629-232736-35-mtpm-madoka-magica-213921.jpg",
+    "/notes/5563261": "1782746794437-10-gallery-20260629-232631-11-qmeu-yosuga-no-sora-59344.jpg"
+  }
 }

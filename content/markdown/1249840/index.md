@@ -2,7 +2,7 @@
 type: markdown
 title: 强化学习重学系列(14) Inverse Reinforment Learning
 slug: "1249840"
-order: 4
+order: 5
 date: 2025-04-23
 updatedAt: 2026-07-01 01:26:46
 tags:
