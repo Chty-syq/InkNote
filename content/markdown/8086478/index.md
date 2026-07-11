@@ -3,10 +3,10 @@ type: markdown
 title: Monte Carlo Ray Tracing
 slug: "8086478"
 date: 2023-09-04
-updatedAt: 2026-07-11 17:26:38
+updatedAt: 2026-07-11 17:51:21
 tags:
   - 计算机图形学
-published: false
+published: true
 category: computer-science
 ---
 

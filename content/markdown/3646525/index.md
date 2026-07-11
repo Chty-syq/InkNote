@@ -3,10 +3,10 @@ type: markdown
 title: Modern CMake
 slug: "3646525"
 date: 2023-04-17
-updatedAt: 2026-07-11 17:26:38
+updatedAt: 2026-07-11 17:51:23
 tags:
   - C++
-published: false
+published: true
 category: computer-science
 ---
 
