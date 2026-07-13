@@ -267,12 +267,23 @@ function buildContentIndex(payload: RuntimeContentPayload): ContentIndex {
   const pages = markdown.filter((document) => isMarkdownPage(document.frontmatter));
   const inknotes = parseInkNoteCollection(normalizeRawModuleMap(payload.inknotes));
   const inknoteProjects = normalizeRawModuleMap(payload.inknoteProjects);
+  const categorizedDocuments = [...notes, ...inknotes];
+  const publishedCategorizedDocuments = categorizedDocuments.filter(
+    (document) => document.frontmatter.published,
+  );
   const configuredCategories = payload.categories
-    .filter((category) => category.slug && category.label)
+    .filter(
+      (category) =>
+        category.slug &&
+        category.label &&
+        publishedCategorizedDocuments.some(
+          (document) => getDocumentCategorySlug(document.frontmatter) === category.slug,
+        ),
+    )
     .sort((left, right) => (left.order ?? Number.MAX_SAFE_INTEGER) - (right.order ?? Number.MAX_SAFE_INTEGER));
   const inferredCategories = [
     ...new Set(
-      [...notes, ...inknotes]
+      publishedCategorizedDocuments
         .map((document) => getDocumentCategorySlug(document.frontmatter))
         .filter(Boolean),
     ),
@@ -288,7 +299,7 @@ function buildContentIndex(payload: RuntimeContentPayload): ContentIndex {
     categories.map((category) => [
       category.slug,
       sortDocumentsByOrderAndDate(
-        [...notes, ...inknotes].filter(
+        categorizedDocuments.filter(
           (document) => getDocumentCategorySlug(document.frontmatter) === category.slug,
         ),
       ) as Array<RoutedDocument<MarkdownFrontmatter | InkNoteFrontmatter>>,

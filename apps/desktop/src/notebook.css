@@ -1548,6 +1548,44 @@ input[type='range']::-moz-range-thumb {
   background: #fbf6ee;
 }
 
+.inknote-page-surface {
+  position: relative;
+  display: inline-block;
+  max-width: 100%;
+  line-height: 0;
+}
+
+.inknote-page-surface > img {
+  display: block;
+}
+
+.inknote-text-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  overflow: hidden;
+  line-height: 1;
+  user-select: text;
+  pointer-events: none;
+}
+
+.inknote-text-line {
+  position: absolute;
+  display: block;
+  overflow: hidden;
+  color: rgba(0, 0, 0, 0.01);
+  white-space: pre;
+  line-height: 1.15;
+  cursor: text;
+  user-select: text;
+  pointer-events: auto;
+}
+
+.inknote-text-line::selection {
+  background: rgba(44, 121, 181, 0.24);
+  color: rgba(0, 0, 0, 0.01);
+}
+
 .spread-page span {
   color: #6d5949;
   font-size: 0.88rem;

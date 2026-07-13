@@ -1820,6 +1820,45 @@ input {
     0 16px 42px rgba(70, 52, 32, 0.16);
 }
 
+.inknote-page-surface {
+  position: relative;
+  display: inline-block;
+  width: 100%;
+  max-width: 100%;
+  line-height: 0;
+}
+
+.inknote-page-surface > img {
+  display: block;
+}
+
+.inknote-text-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  overflow: hidden;
+  line-height: 1;
+  user-select: text;
+  pointer-events: none;
+}
+
+.inknote-text-line {
+  position: absolute;
+  display: block;
+  overflow: hidden;
+  color: rgba(0, 0, 0, 0.01);
+  white-space: pre;
+  line-height: 1.15;
+  cursor: text;
+  user-select: text;
+  pointer-events: auto;
+}
+
+.inknote-text-line::selection {
+  background: rgba(44, 121, 181, 0.24);
+  color: rgba(0, 0, 0, 0.01);
+}
+
 .blog-inknote-page-blank {
   width: min(46%, 585px);
   min-height: min(84vh, 1040px);

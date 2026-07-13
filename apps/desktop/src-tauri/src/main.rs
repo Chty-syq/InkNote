@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
     fs::{self, OpenOptions},
-    io::{Read, Write},
+    io::{ErrorKind, Read, Write},
     net::{SocketAddr, TcpListener, TcpStream},
     path::{Component, Path, PathBuf},
     process::{Child, Command, Stdio},
@@ -23,12 +23,16 @@ use tauri::{Emitter, Manager};
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
 
-const BLOG_PREVIEW_PORT: u16 = 4321;
-const BLOG_PREVIEW_ORIGIN: &str = "http://localhost:4321";
+#[cfg(debug_assertions)]
+const BLOG_PREVIEW_DEFAULT_PORT: u16 = 4322;
+#[cfg(not(debug_assertions))]
+const BLOG_PREVIEW_DEFAULT_PORT: u16 = 4321;
+const BLOG_PREVIEW_PORT_FALLBACK_COUNT: u16 = 10;
 const BLOG_PREVIEW_HEALTH_PATH: &str = "/__inknote-preview-health";
 const BLOG_PREVIEW_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
 const BLOG_PREVIEW_WAIT_STEP: Duration = Duration::from_millis(100);
 const BLOG_PREVIEW_HTTP_TIMEOUT: Duration = Duration::from_millis(800);
+const BLOG_PREVIEW_PROBE_TIMEOUT: Duration = Duration::from_millis(160);
 const DEFAULT_CONTENT_BRANCH: &str = "content";
 const CONTENT_SYNC_CACHE_DIR: &str = ".inknote-sync/content-source";
 const CONTENT_GIT_REPOSITORY_DIR: &str = ".inknote-sync/repository";
@@ -290,7 +294,14 @@ struct BlogPreviewServerStatus {
 #[derive(Default)]
 struct BlogPreviewServer {
     child: Mutex<Option<Child>>,
-    static_server: Mutex<Option<JoinHandle<()>>>,
+    static_server: Mutex<Option<StaticBlogPreviewServer>>,
+    port: Mutex<Option<u16>>,
+    lifecycle: Mutex<()>,
+}
+
+struct StaticBlogPreviewServer {
+    port: u16,
+    handle: JoinHandle<()>,
 }
 
 impl BlogPreviewServer {
@@ -300,13 +311,41 @@ impl BlogPreviewServer {
                 terminate_blog_preview_child(child);
             }
         }
+        if let Ok(mut port_guard) = self.port.lock() {
+            *port_guard = None;
+        }
     }
 
-    fn has_static_server(&self) -> bool {
-        self.static_server
+    fn has_static_server(&self, port: u16) -> bool {
+        let Ok(mut server_guard) = self.static_server.lock() else {
+            return false;
+        };
+
+        if server_guard
+            .as_ref()
+            .is_some_and(|server| server.handle.is_finished())
+        {
+            if let Some(server) = server_guard.take() {
+                let _ = server.handle.join();
+            }
+        }
+
+        server_guard
+            .as_ref()
+            .is_some_and(|server| server.port == port)
+    }
+
+    fn get_port(&self) -> Option<u16> {
+        self.port.lock().ok().and_then(|port| *port)
+    }
+
+    fn set_port(&self, port: u16) -> Result<(), String> {
+        let mut port_guard = self
+            .port
             .lock()
-            .ok()
-            .is_some_and(|server| server.is_some())
+            .map_err(|_| "failed to lock local blog preview server port".to_string())?;
+        *port_guard = Some(port);
+        Ok(())
     }
 }
 
@@ -470,132 +509,6 @@ fn delete_gallery_image_file(public_path: String) -> Result<(), String> {
 
     fs::remove_file(&resolved_target)
         .map_err(|error| format!("failed to delete gallery image: {error}"))
-}
-
-#[tauri::command]
-fn convert_slides_to_pdf(source: String, destination: String) -> Result<(), String> {
-    let source_path = PathBuf::from(&source);
-    if !source_path.is_file() {
-        return Err(format!("slides file does not exist: {source}"));
-    }
-
-    let extension = source_path
-        .extension()
-        .and_then(|value| value.to_str())
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    if !matches!(extension.as_str(), "ppt" | "pptx") {
-        return Err("only PPT and PPTX files need conversion".to_string());
-    }
-
-    let destination_path = PathBuf::from(&destination);
-    ensure_parent_directory(&destination)?;
-    if destination_path.exists() {
-        fs::remove_file(&destination_path)
-            .map_err(|error| format!("failed to replace existing PDF: {error}"))?;
-    }
-
-    let outdir = destination_path
-        .parent()
-        .ok_or_else(|| "invalid PDF destination path".to_string())?;
-    let expected_output = outdir.join(format!(
-        "{}.pdf",
-        source_path
-            .file_stem()
-            .and_then(|value| value.to_str())
-            .ok_or_else(|| "invalid slides file name".to_string())?
-    ));
-    if expected_output.exists() {
-        fs::remove_file(&expected_output)
-            .map_err(|error| format!("failed to clear existing converted PDF: {error}"))?;
-    }
-
-    let mut errors = Vec::new();
-    for candidate in libreoffice_candidates() {
-        if candidate.is_absolute() && !candidate.is_file() {
-            continue;
-        }
-
-        let mut command = Command::new(&candidate);
-        command
-            .args(["--headless", "--convert-to", "pdf", "--outdir"])
-            .arg(outdir)
-            .arg(&source_path)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-
-        #[cfg(target_os = "windows")]
-        command.creation_flags(CREATE_NO_WINDOW);
-
-        match command.output() {
-            Ok(output) if output.status.success() => {
-                if !expected_output.is_file() {
-                    errors.push(format!(
-                        "{} finished but did not create {}",
-                        candidate.display(),
-                        expected_output.display()
-                    ));
-                    continue;
-                }
-
-                if expected_output != destination_path {
-                    fs::rename(&expected_output, &destination_path).map_err(|error| {
-                        format!("failed to move converted PDF into place: {error}")
-                    })?;
-                }
-                return Ok(());
-            }
-            Ok(output) => {
-                let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-                errors.push(format!(
-                    "{} exited with {}{}{}",
-                    candidate.display(),
-                    output.status,
-                    if stdout.is_empty() { "" } else { "\nstdout: " },
-                    stdout
-                ));
-                if !stderr.is_empty() {
-                    errors.push(format!("stderr: {stderr}"));
-                }
-            }
-            Err(error) => errors.push(format!("{}: {error}", candidate.display())),
-        }
-    }
-
-    Err(format!(
-        "PPT 转 PDF 失败，请确认已安装 LibreOffice。{}",
-        if errors.is_empty() {
-            String::new()
-        } else {
-            format!("\n{}", errors.join("\n"))
-        }
-    ))
-}
-
-fn libreoffice_candidates() -> Vec<PathBuf> {
-    let mut candidates = vec![PathBuf::from("soffice"), PathBuf::from("libreoffice")];
-
-    #[cfg(target_os = "windows")]
-    {
-        candidates.insert(0, PathBuf::from("soffice.com"));
-        candidates.insert(1, PathBuf::from("soffice.exe"));
-        candidates.push(PathBuf::from(
-            "C:\\Program Files\\LibreOffice\\program\\soffice.com",
-        ));
-        candidates.push(PathBuf::from(
-            "C:\\Program Files\\LibreOffice\\program\\soffice.exe",
-        ));
-        candidates.push(PathBuf::from(
-            "C:\\Program Files (x86)\\LibreOffice\\program\\soffice.com",
-        ));
-        candidates.push(PathBuf::from(
-            "C:\\Program Files (x86)\\LibreOffice\\program\\soffice.exe",
-        ));
-    }
-
-    candidates
 }
 
 #[tauri::command]
@@ -3395,10 +3308,15 @@ fn validate_desktop_installer_url(value: &str) -> Result<url::Url, String> {
 }
 
 #[tauri::command]
-fn ensure_blog_preview_server(
-    server: tauri::State<'_, BlogPreviewServer>,
+async fn ensure_blog_preview_server(
+    app: tauri::AppHandle,
 ) -> Result<BlogPreviewServerStatus, String> {
-    ensure_blog_preview_server_state(server.inner(), true)
+    tauri::async_runtime::spawn_blocking(move || {
+        let server = app.state::<BlogPreviewServer>();
+        ensure_blog_preview_server_state(server.inner(), true)
+    })
+    .await
+    .map_err(|error| format!("failed to join local blog preview startup task: {error}"))?
 }
 
 fn ensure_parent_directory(path: &str) -> Result<(), String> {
@@ -3522,12 +3440,46 @@ fn is_allowed_local_preview_url(url: &str) -> bool {
     })
 }
 
+fn blog_preview_origin(port: u16) -> String {
+    format!("http://localhost:{port}")
+}
+
+fn blog_preview_candidate_ports() -> impl Iterator<Item = u16> {
+    (0..BLOG_PREVIEW_PORT_FALLBACK_COUNT).map(|offset| BLOG_PREVIEW_DEFAULT_PORT + offset)
+}
+
+fn find_ready_blog_preview_server_port() -> Option<u16> {
+    blog_preview_candidate_ports().find(|port| is_blog_preview_server_ready(*port))
+}
+
+fn find_available_blog_preview_port() -> Option<u16> {
+    blog_preview_candidate_ports().find(|port| is_blog_preview_port_available(*port))
+}
+
 fn ensure_blog_preview_server_state(
     server: &BlogPreviewServer,
     wait_for_ready: bool,
 ) -> Result<BlogPreviewServerStatus, String> {
-    if is_blog_preview_server_ready() {
+    let _lifecycle_guard = server
+        .lifecycle
+        .lock()
+        .map_err(|_| "failed to lock local blog preview server lifecycle".to_string())?;
+
+    if let Some(port) = server.get_port() {
+        if is_blog_preview_server_ready(port) {
+            return Ok(create_blog_preview_server_status(
+                port,
+                false,
+                true,
+                "Local blog preview server is already running.",
+            ));
+        }
+    }
+
+    if let Some(port) = find_ready_blog_preview_server_port() {
+        server.set_port(port)?;
         return Ok(create_blog_preview_server_status(
+            port,
             false,
             true,
             "Local blog preview server is already running.",
@@ -3559,9 +3511,11 @@ fn ensure_blog_preview_server_state(
     };
 
     if has_running_child {
-        let ready = wait_for_blog_preview_server(wait_for_ready);
+        let port = server.get_port().unwrap_or(BLOG_PREVIEW_DEFAULT_PORT);
+        let ready = wait_for_blog_preview_server(port, wait_for_ready);
         if ready {
             return Ok(create_blog_preview_server_status(
+                port,
                 false,
                 true,
                 "Local blog preview server is ready.",
@@ -3577,25 +3531,29 @@ fn ensure_blog_preview_server_state(
         }
     }
 
-    if is_blog_preview_port_occupied() {
+    let Some(port) = find_available_blog_preview_port() else {
         return Err(format!(
-            "本地博客预览端口 {BLOG_PREVIEW_PORT} 已被其它程序占用，且不是当前源码工作区的预览服务。请关闭已安装版逸仙笔记或释放端口后重试。"
+            "本地博客预览端口 {}-{} 均已被其它程序占用，且没有找到当前工作区的预览服务。请释放其中一个端口后重试。",
+            BLOG_PREVIEW_DEFAULT_PORT,
+            BLOG_PREVIEW_DEFAULT_PORT + BLOG_PREVIEW_PORT_FALLBACK_COUNT - 1
         ));
-    }
+    };
+    server.set_port(port)?;
 
     if can_start_npm_preview_server() {
         let mut child_guard = server
             .child
             .lock()
             .map_err(|_| "failed to lock local blog preview server state".to_string())?;
-        match spawn_blog_preview_server() {
+        match spawn_blog_preview_server(port) {
             Ok(child) => {
                 *child_guard = Some(child);
                 drop(child_guard);
 
-                let ready = wait_for_blog_preview_server(wait_for_ready);
+                let ready = wait_for_blog_preview_server(port, wait_for_ready);
                 if ready {
                     return Ok(create_blog_preview_server_status(
+                        port,
                         true,
                         true,
                         "Local blog preview server has started.",
@@ -3616,8 +3574,11 @@ fn ensure_blog_preview_server_state(
         }
     }
 
-    if !server.has_static_server() {
-        let static_server = spawn_static_blog_preview_server()?;
+    if !server.has_static_server(port) {
+        let static_server = StaticBlogPreviewServer {
+            port,
+            handle: spawn_static_blog_preview_server(port)?,
+        };
         let mut static_guard = server
             .static_server
             .lock()
@@ -3625,8 +3586,15 @@ fn ensure_blog_preview_server_state(
         *static_guard = Some(static_server);
     }
 
-    let ready = wait_for_blog_preview_server(wait_for_ready);
+    let ready = wait_for_blog_preview_server(port, wait_for_ready);
+    if !ready && wait_for_ready {
+        return Err(format!(
+            "本地博客预览服务未能在端口 {port} 上启动，请关闭残留的逸仙笔记或 Node 进程后重试。"
+        ));
+    }
+
     Ok(create_blog_preview_server_status(
+        port,
         true,
         ready,
         if ready {
@@ -3638,13 +3606,14 @@ fn ensure_blog_preview_server_state(
 }
 
 fn create_blog_preview_server_status(
+    port: u16,
     started: bool,
     ready: bool,
     message: &str,
 ) -> BlogPreviewServerStatus {
     BlogPreviewServerStatus {
-        origin: BLOG_PREVIEW_ORIGIN.to_string(),
-        port: BLOG_PREVIEW_PORT,
+        origin: blog_preview_origin(port),
+        port,
         running: true,
         started,
         ready,
@@ -3653,10 +3622,17 @@ fn create_blog_preview_server_status(
 }
 
 fn normalize_preview_health_workspace(path: &Path) -> String {
-    path.to_string_lossy()
+    let normalized = path
+        .to_string_lossy()
         .replace('\\', "/")
         .trim_end_matches('/')
-        .to_ascii_lowercase()
+        .to_ascii_lowercase();
+
+    normalized
+        .strip_prefix("//?/unc/")
+        .map(|path| format!("//{path}"))
+        .or_else(|| normalized.strip_prefix("//?/").map(str::to_string))
+        .unwrap_or(normalized)
 }
 
 fn create_blog_preview_health_body() -> String {
@@ -3673,7 +3649,7 @@ fn parse_preview_health_workspace(body: &str) -> Option<String> {
         .filter(|workspace| !workspace.is_empty())
 }
 
-fn spawn_blog_preview_server() -> Result<Child, String> {
+fn spawn_blog_preview_server(port: u16) -> Result<Child, String> {
     let mut command = Command::new(if cfg!(target_os = "windows") {
         "npm.cmd"
     } else {
@@ -3682,6 +3658,7 @@ fn spawn_blog_preview_server() -> Result<Child, String> {
     command
         .args(["run", "web:dev"])
         .current_dir(get_workspace_root()?)
+        .env("INKNOTE_WEB_DEV_PORT", port.to_string())
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -3702,10 +3679,11 @@ fn can_start_npm_preview_server() -> bool {
     })
 }
 
-fn spawn_static_blog_preview_server() -> Result<JoinHandle<()>, String> {
-    let listener = TcpListener::bind(("127.0.0.1", BLOG_PREVIEW_PORT)).map_err(|error| {
+fn spawn_static_blog_preview_server(port: u16) -> Result<JoinHandle<()>, String> {
+    let listener = TcpListener::bind(("127.0.0.1", port)).map_err(|error| {
         format!(
-            "failed to start static local blog preview server on {BLOG_PREVIEW_ORIGIN}: {error}"
+            "failed to start static local blog preview server on {}: {error}",
+            blog_preview_origin(port)
         )
     })?;
 
@@ -3953,8 +3931,6 @@ fn content_type_for_path(path: &Path) -> &'static str {
         "svg" => "image/svg+xml",
         "ico" => "image/x-icon",
         "pdf" => "application/pdf",
-        "ppt" => "application/vnd.ms-powerpoint",
-        "pptx" => "application/vnd.openxmlformats-officedocument.presentationml.presentation",
         "woff" => "font/woff",
         "woff2" => "font/woff2",
         "ttf" => "font/ttf",
@@ -3982,49 +3958,49 @@ fn write_http_response(
     stream.flush()
 }
 
-fn wait_for_blog_preview_server(should_wait: bool) -> bool {
+fn wait_for_blog_preview_server(port: u16, should_wait: bool) -> bool {
     if !should_wait {
-        return is_blog_preview_server_ready();
+        return is_blog_preview_server_ready(port);
     }
 
     let deadline = Instant::now() + BLOG_PREVIEW_WAIT_TIMEOUT;
     while Instant::now() < deadline {
-        if is_blog_preview_server_ready() {
+        if is_blog_preview_server_ready(port) {
             return true;
         }
 
         thread::sleep(BLOG_PREVIEW_WAIT_STEP);
     }
 
-    is_blog_preview_server_ready()
+    is_blog_preview_server_ready(port)
 }
 
-fn is_blog_preview_server_ready() -> bool {
+fn is_blog_preview_server_ready(port: u16) -> bool {
     let addresses = [
-        SocketAddr::from(([127, 0, 0, 1], BLOG_PREVIEW_PORT)),
-        SocketAddr::from(([0, 0, 0, 0, 0, 0, 0, 1], BLOG_PREVIEW_PORT)),
+        SocketAddr::from(([127, 0, 0, 1], port)),
+        SocketAddr::from(([0, 0, 0, 0, 0, 0, 0, 1], port)),
     ];
 
     addresses.iter().any(probe_blog_preview_server)
 }
 
-fn is_blog_preview_port_occupied() -> bool {
-    let addresses = [
-        SocketAddr::from(([127, 0, 0, 1], BLOG_PREVIEW_PORT)),
-        SocketAddr::from(([0, 0, 0, 0, 0, 0, 0, 1], BLOG_PREVIEW_PORT)),
-    ];
+fn is_blog_preview_port_available(port: u16) -> bool {
+    can_bind_loopback("127.0.0.1", port) && can_bind_loopback("::1", port)
+}
 
-    addresses
-        .iter()
-        .any(|address| TcpStream::connect_timeout(address, Duration::from_millis(120)).is_ok())
+fn can_bind_loopback(host: &str, port: u16) -> bool {
+    match TcpListener::bind((host, port)) {
+        Ok(_) => true,
+        Err(error) => matches!(error.kind(), ErrorKind::AddrNotAvailable),
+    }
 }
 
 fn probe_blog_preview_server(address: &SocketAddr) -> bool {
-    let Ok(mut stream) = TcpStream::connect_timeout(address, Duration::from_millis(120)) else {
+    let Ok(mut stream) = TcpStream::connect_timeout(address, BLOG_PREVIEW_PROBE_TIMEOUT) else {
         return false;
     };
-    let _ = stream.set_read_timeout(Some(BLOG_PREVIEW_HTTP_TIMEOUT));
-    let _ = stream.set_write_timeout(Some(BLOG_PREVIEW_HTTP_TIMEOUT));
+    let _ = stream.set_read_timeout(Some(BLOG_PREVIEW_PROBE_TIMEOUT));
+    let _ = stream.set_write_timeout(Some(BLOG_PREVIEW_PROBE_TIMEOUT));
 
     let request = format!(
         "GET {BLOG_PREVIEW_HEALTH_PATH} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
@@ -4033,27 +4009,43 @@ fn probe_blog_preview_server(address: &SocketAddr) -> bool {
         return false;
     }
 
-    let mut buffer = [0_u8; 2048];
-    match stream.read(&mut buffer) {
-        Ok(bytes_read) if bytes_read > 0 => {
-            let response = &buffer[..bytes_read];
-            if !(response.starts_with(b"HTTP/1.1 200") || response.starts_with(b"HTTP/1.0 200")) {
-                return false;
+    let mut response = Vec::with_capacity(2048);
+    let mut buffer = [0_u8; 1024];
+    loop {
+        match stream.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(bytes_read) => {
+                response.extend_from_slice(&buffer[..bytes_read]);
+                if response.len() >= 8192 {
+                    break;
+                }
             }
-
-            let text = String::from_utf8_lossy(response);
-            let Some((_, body)) = text.split_once("\r\n\r\n") else {
-                return false;
-            };
-            let Some(remote_workspace) = parse_preview_health_workspace(body) else {
-                return false;
-            };
-            get_workspace_root()
-                .map(|path| remote_workspace == normalize_preview_health_workspace(&path))
-                .unwrap_or(false)
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    ErrorKind::WouldBlock | ErrorKind::TimedOut | ErrorKind::Interrupted
+                ) =>
+            {
+                break;
+            }
+            Err(_) => return false,
         }
-        _ => false,
     }
+
+    if !(response.starts_with(b"HTTP/1.1 200") || response.starts_with(b"HTTP/1.0 200")) {
+        return false;
+    }
+
+    let text = String::from_utf8_lossy(&response);
+    let Some((_, body)) = text.split_once("\r\n\r\n") else {
+        return false;
+    };
+    let Some(remote_workspace) = parse_preview_health_workspace(body) else {
+        return false;
+    };
+    get_workspace_root()
+        .map(|path| remote_workspace == normalize_preview_health_workspace(&path))
+        .unwrap_or(false)
 }
 
 struct TemporaryPublishDirectory {
@@ -5496,6 +5488,15 @@ fn ensure_git_success(result: GitCommandResult, action: &str) -> Result<GitComma
 mod tests {
     use super::*;
 
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn normalizes_windows_extended_preview_workspace_paths() {
+        assert_eq!(
+            normalize_preview_health_workspace(Path::new(r"\\?\F:\projects\notebook")),
+            normalize_preview_health_workspace(Path::new(r"F:\projects\notebook"))
+        );
+    }
+
     #[test]
     fn normalizes_pages_base_paths() {
         assert_eq!(normalize_pages_base("").unwrap(), "/");
@@ -5709,16 +5710,6 @@ fn main() {
                 .map_err(|error| std::io::Error::new(std::io::ErrorKind::Other, error))?;
             app.manage(BlogPreviewServer::default());
 
-            let app_handle = app.handle().clone();
-            thread::spawn(move || {
-                thread::sleep(Duration::from_millis(800));
-                let preview_server = app_handle.state::<BlogPreviewServer>();
-                if let Err(error) = ensure_blog_preview_server_state(preview_server.inner(), false)
-                {
-                    eprintln!("failed to start local blog preview server: {error}");
-                }
-            });
-
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -5728,7 +5719,6 @@ fn main() {
             copy_file_to_path,
             compress_gallery_image_file,
             delete_gallery_image_file,
-            convert_slides_to_pdf,
             get_content_index,
             read_content_file,
             write_content_file,

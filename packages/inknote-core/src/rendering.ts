@@ -47,6 +47,22 @@ interface LayoutPage {
   lines: LayoutLine[];
 }
 
+export interface NotebookTextLayerLine {
+  text: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  fontSize: number;
+  fontWeight: number;
+}
+
+export interface NotebookTextLayerPage {
+  width: number;
+  height: number;
+  lines: NotebookTextLayerLine[];
+}
+
 interface HandwritingPreset {
   label: string;
   fontFamily: string;
@@ -1051,6 +1067,84 @@ function renderPage(
 export function renderNotebookPages(project: ProjectData, scale = 1): HTMLCanvasElement[] {
   const layout = buildLayout(project);
   return layout.map((page, pageIndex) => renderPage(page, pageIndex, layout.length, project, scale));
+}
+
+function getTextLayerLineTop(line: LayoutLine): number {
+  if (line.textBaseline === 'middle') {
+    return line.y - line.fontSize * 0.56;
+  }
+
+  if (line.textBaseline === 'top' || line.textBaseline === 'hanging') {
+    return line.y;
+  }
+
+  if (line.textBaseline === 'bottom' || line.textBaseline === 'ideographic') {
+    return line.y - line.fontSize;
+  }
+
+  return line.y - line.fontSize * 0.88;
+}
+
+export function getNotebookTextLayers(project: ProjectData): NotebookTextLayerPage[] {
+  const layout = buildLayout(project);
+  const preset = PRESETS[project.handwritingStyle];
+  const paper = getPaperMetrics(project);
+  const context = createMeasureContext();
+
+  return layout.map((page, pageIndex) => ({
+    width: PAGE_WIDTH,
+    height: PAGE_HEIGHT,
+    lines: page.lines
+      .map<NotebookTextLayerLine | null>((line) => {
+        const runWidth = measureRunWidth(
+          context,
+          line.text,
+          line.fontSize,
+          preset.fontFamily,
+          line.charSpacing,
+          line.fontWeight,
+        );
+        const blockWidth = paper.contentRight - paper.contentLeft;
+        const driftRandom = mulberry32(mixSeed(project.seed, pageIndex, line.serial, 311));
+        const drift = (driftRandom() - 0.5) * preset.lineDrift * line.jitterIntensity * 2;
+        const startX =
+          typeof line.manualX === 'number'
+            ? line.manualX
+            : line.align === 'center'
+              ? paper.contentLeft + (blockWidth - runWidth) / 2
+              : line.align === 'centerLongest'
+                ? paper.contentLeft + (blockWidth - (line.groupWidth ?? runWidth)) / 2
+                : line.align === 'right'
+                  ? paper.contentRight - runWidth - line.indent
+                  : paper.contentLeft + line.indent;
+
+        const prefix = line.prefix && typeof line.prefixOffset === 'number' ? `${line.prefix} ` : '';
+        const prefixWidth = prefix
+          ? measureRunWidth(context, line.prefix ?? '', line.fontSize, preset.fontFamily, line.charSpacing, line.fontWeight)
+          : 0;
+        const prefixX = prefix
+          ? line.align === 'left'
+            ? paper.contentLeft + (line.prefixOffset ?? 0)
+            : startX - prefixWidth - 24
+          : startX;
+        const text = `${prefix}${line.text}`.trimEnd();
+
+        if (!text.trim()) {
+          return null;
+        }
+
+        return {
+          text,
+          x: prefixX,
+          y: getTextLayerLineTop({ ...line, y: line.y + drift }),
+          width: Math.max(1, startX + runWidth - prefixX),
+          height: Math.max(line.fontSize, line.lineHeight || line.fontSize),
+          fontSize: line.fontSize,
+          fontWeight: line.fontWeight,
+        };
+      })
+      .filter((line): line is NotebookTextLayerLine => Boolean(line)),
+  }));
 }
 
 export function renderNotebookStrip(project: ProjectData, scale = 1): HTMLCanvasElement {

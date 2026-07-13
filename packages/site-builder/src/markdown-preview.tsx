@@ -440,8 +440,6 @@ function getSlidesExtension(src: string, type?: string): string {
 
 function formatSlidesType(extension: string): string {
   if (extension === 'pdf') return 'PDF';
-  if (extension === 'pptx') return 'PPTX';
-  if (extension === 'ppt') return 'PPT';
   return 'SLIDES';
 }
 
@@ -457,6 +455,7 @@ function MarkdownSlidesBlock({ src, original, title, type, children }: DivCompon
   const [pageCount, setPageCount] = useState(0);
   const [containerWidth, setContainerWidth] = useState(0);
   const [loadError, setLoadError] = useState('');
+  const sourceLinkVisible = hasSource && (!originalSource || !loadError);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const pageWidth = containerWidth > 0 ? Math.max(260, Math.min(containerWidth - 24, 980)) : undefined;
 
@@ -513,11 +512,17 @@ function MarkdownSlidesBlock({ src, original, title, type, children }: DivCompon
         </span>
         <div className="markdown-slides-copy">
           <strong>{heading}</strong>
-          <span>{isPdf ? 'PDF slides preview' : 'Slides file saved in blog assets'}</span>
+          <span>
+            {isPdf
+              ? originalSource
+                ? '源文件已保存，PDF 预览暂未生成'
+                : 'PDF slides preview'
+              : 'Slides file saved in blog assets'}
+          </span>
         </div>
-        {hasSource ? (
+        {sourceLinkVisible ? (
           <a className="markdown-slides-link" href={source} target="_blank" rel="noreferrer">
-            打开
+            PDF
           </a>
         ) : null}
         {originalSource ? (
@@ -541,7 +546,9 @@ function MarkdownSlidesBlock({ src, original, title, type, children }: DivCompon
             loading={<div className="markdown-slides-status">正在加载 slides...</div>}
             error={
               <div className="markdown-slides-status error">
-                PDF slides 加载失败，请点击打开查看。{loadError ? ` (${loadError})` : ''}
+                {originalSource
+                  ? 'PDF 预览暂未生成，可先打开源文件。'
+                  : `PDF slides 加载失败，请点击打开查看。${loadError ? ` (${loadError})` : ''}`}
               </div>
             }
             onLoadSuccess={handleLoadSuccess}
@@ -551,7 +558,7 @@ function MarkdownSlidesBlock({ src, original, title, type, children }: DivCompon
               pageNumber={pageNumber}
               width={pageWidth}
               renderAnnotationLayer={false}
-              renderTextLayer={false}
+              renderTextLayer
             />
           </Document>
           {pageCount > 1 ? (

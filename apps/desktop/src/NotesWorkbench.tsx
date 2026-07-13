@@ -103,7 +103,6 @@ import {
   chooseSlidesFile,
   cacheExternalImage,
   compressGalleryImageFile,
-  convertSlidesToPdf,
   copyFileToPath,
   deleteContentFile,
   deleteGalleryImageFile,
@@ -251,7 +250,8 @@ const NOTE_HISTORY_LIMIT = 24;
 const BRAND_AVATAR_STORAGE_KEY = 'inknote.desktop.brandAvatar';
 const SSH_KEY_PATH_STORAGE_KEY = 'inknote.desktop.sshKeyPath';
 const SITE_CONFIG_PATH = 'site/site.config.json';
-const LOCAL_BLOG_PREVIEW_ORIGIN = 'http://localhost:4321';
+const LOCAL_BLOG_PREVIEW_PORT = import.meta.env.DEV ? 4322 : 4321;
+const LOCAL_BLOG_PREVIEW_ORIGIN = `http://localhost:${LOCAL_BLOG_PREVIEW_PORT}`;
 const DESKTOP_FALLBACK_VERSION = desktopPackage.version || '0.0.0';
 const DESKTOP_RELEASE_REPOSITORY = 'Chty-syq/InkNote';
 const DESKTOP_LATEST_RELEASE_API_URL = `https://api.github.com/repos/${DESKTOP_RELEASE_REPOSITORY}/releases/latest`;
@@ -272,7 +272,7 @@ const LOCAL_PUBLIC_ASSET_PREFIXES = ['/content-images/', '/content-slides/', '/c
 const IMAGE_MANAGEMENT_PAGE_SIZE = 15;
 const IMAGE_LOCALIZATION_CONCURRENCY = 4;
 const GALLERY_IMAGE_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'webp', 'gif']);
-const SLIDES_FILE_EXTENSIONS = new Set(['ppt', 'pptx', 'pdf']);
+const SLIDES_FILE_EXTENSIONS = new Set(['pdf']);
 const DEFAULT_SYNC_MESSAGE = 'Update blog content';
 const TABLER_ICON_OVERRIDES = `
   .notes-settings-close::before,
@@ -527,14 +527,10 @@ function escapeHtmlAttribute(value: string): string {
 }
 
 function createSlidesFileName(sourcePath: string, date: Date): string {
-  const extension = getSlidesFileExtension(sourcePath) ?? 'pptx';
+  const extension = getSlidesFileExtension(sourcePath) ?? 'pdf';
   const baseName = sanitizeAssetName(getFileNameFromPath(sourcePath)) || 'slides';
   const nonce = Math.random().toString(36).slice(2, 6).padEnd(4, '0');
   return `slides-${createAssetTimestamp(date)}-${nonce}-${baseName}.${extension}`;
-}
-
-function replaceFileExtension(fileName: string, nextExtension: string): string {
-  return `${fileName.replace(/\.[^.]+$/i, '')}.${nextExtension.replace(/^\./, '')}`;
 }
 
 function getPastedImageTargetPath(
@@ -611,7 +607,7 @@ function getPublicAssetFilePath(contentRoot: string | null, publicPath: string):
   return getProjectPath(contentRoot, ['apps', 'web', 'public', ...normalized.split('/').filter(Boolean)]);
 }
 
-function getDesktopPublicAssetSource(contentRoot: string | null, source: string): string {
+function getDesktopPublicAssetSource(contentRoot: string | null, source: string, previewOrigin: string): string {
   const trimmed = source.trim();
   if (!trimmed) {
     return '';
@@ -621,10 +617,10 @@ function getDesktopPublicAssetSource(contentRoot: string | null, source: string)
   }
   const filePath = getPublicAssetFilePath(contentRoot, trimmed);
   if (filePath && isTauri()) {
-    return `${LOCAL_BLOG_PREVIEW_ORIGIN}${trimmed}`;
+    return `${previewOrigin}${trimmed}`;
   }
   if (trimmed.startsWith('/')) {
-    return `${LOCAL_BLOG_PREVIEW_ORIGIN}${trimmed}`;
+    return `${previewOrigin}${trimmed}`;
   }
   return '';
 }
@@ -714,8 +710,8 @@ function normalizeGalleryManifest(value: unknown): GalleryImageManifest {
   };
 }
 
-function getGalleryImagePreviewSource(path: string, contentRoot: string | null): string {
-  return getDesktopPublicAssetSource(contentRoot, path);
+function getGalleryImagePreviewSource(path: string, contentRoot: string | null, previewOrigin: string): string {
+  return getDesktopPublicAssetSource(contentRoot, path, previewOrigin);
 }
 
 function getGalleryImageKey(image: GalleryImageItem): string {
@@ -977,16 +973,16 @@ async function checkTauriDesktopUpdate(): Promise<Update | null> {
   return metadata ? new Update({ ...metadata, available: true }) : null;
 }
 
-function resolveDesktopContentImages(markdown: string, contentRoot: string | null): string {
+function resolveDesktopContentImages(markdown: string, contentRoot: string | null, previewOrigin: string): string {
   return markdown
     .replace(/(\]\(\s*)(\/(?:content-images|content-slides|card-images|generated)\/[^\s)\r\n]+)/g, (_match, prefix, source) => {
-      const resolved = getDesktopPublicAssetSource(contentRoot, source);
+      const resolved = getDesktopPublicAssetSource(contentRoot, source, previewOrigin);
       return resolved ? `${prefix}${resolved}` : `${prefix}${source}`;
     })
     .replace(
       /(\b(?:src|original|href)\s*=\s*["'])(\/(?:content-images|content-slides|card-images|generated)\/[^"']+)/gi,
       (_match, prefix, source) => {
-        const resolved = getDesktopPublicAssetSource(contentRoot, source);
+        const resolved = getDesktopPublicAssetSource(contentRoot, source, previewOrigin);
         return resolved ? `${prefix}${resolved}` : `${prefix}${source}`;
       },
     );
@@ -1046,8 +1042,8 @@ function isExternalImageSource(source: string): boolean {
   return /^https?:\/\//i.test(source.trim());
 }
 
-function getManagedImagePreviewSource(source: string, contentRoot: string | null): string {
-  return getDesktopPublicAssetSource(contentRoot, source);
+function getManagedImagePreviewSource(source: string, contentRoot: string | null, previewOrigin: string): string {
+  return getDesktopPublicAssetSource(contentRoot, source, previewOrigin);
 }
 
 function collectManagedImages(items: ContentLibraryItem[], draft: ContentDraft | null): ManagedImageAsset[] {
@@ -1116,16 +1112,18 @@ function collectManagedImages(items: ContentLibraryItem[], draft: ContentDraft |
 function ManagedImageCard({
   asset,
   contentRoot,
+  previewOrigin,
   localizationStatus,
   onPreview,
 }: {
   asset: ManagedImageAsset;
   contentRoot: string | null;
+  previewOrigin: string;
   localizationStatus?: ImageLocalizationStatus;
   onPreview?: (preview: ImagePreviewState) => void;
 }) {
   const [failed, setFailed] = useState(false);
-  const previewSource = getManagedImagePreviewSource(asset.source, contentRoot);
+  const previewSource = getManagedImagePreviewSource(asset.source, contentRoot, previewOrigin);
   const title = asset.alt || getFileNameFromPath(asset.source) || '图片';
 
   useEffect(() => {
@@ -1203,6 +1201,7 @@ function ManagedImageCard({
 function GalleryImageCard({
   image,
   contentRoot,
+  previewOrigin,
   selected,
   selectable,
   used,
@@ -1211,6 +1210,7 @@ function GalleryImageCard({
 }: {
   image: GalleryImageItem;
   contentRoot: string | null;
+  previewOrigin: string;
   selected: boolean;
   selectable: boolean;
   used: boolean;
@@ -1218,7 +1218,7 @@ function GalleryImageCard({
   onPreview?: (preview: ImagePreviewState) => void;
 }) {
   const [failed, setFailed] = useState(false);
-  const previewSource = getGalleryImagePreviewSource(image.path, contentRoot);
+  const previewSource = getGalleryImagePreviewSource(image.path, contentRoot, previewOrigin);
   const focus = getGalleryImageFocus(image);
   const objectPosition = formatGalleryImagePosition(focus);
   const title = image.name || getFileNameFromPath(image.path) || '图库图片';
@@ -2502,7 +2502,17 @@ function insertSnippet(
   };
 }
 
-function FriendLinkAvatar({ label, icon, fetchedAt }: { label: string; icon?: string; fetchedAt?: string }) {
+function FriendLinkAvatar({
+  label,
+  icon,
+  fetchedAt,
+  previewOrigin,
+}: {
+  label: string;
+  icon?: string;
+  fetchedAt?: string;
+  previewOrigin: string;
+}) {
   const [failed, setFailed] = useState(false);
 
   useEffect(() => {
@@ -2511,7 +2521,7 @@ function FriendLinkAvatar({ label, icon, fetchedAt }: { label: string; icon?: st
 
   const cacheKey = fetchedAt?.trim() ? `?v=${encodeURIComponent(fetchedAt)}` : '';
   const source = icon?.trim()
-    ? `${LOCAL_BLOG_PREVIEW_ORIGIN}${icon.startsWith('/') ? icon : `/${icon}`}${cacheKey}`
+    ? `${previewOrigin}${icon.startsWith('/') ? icon : `/${icon}`}${cacheKey}`
     : '';
 
   return (
@@ -2531,6 +2541,7 @@ export default function NotesWorkbench() {
   const [draft, setDraft] = useState<ContentDraft | null>(null);
   const [toastMessages, setToastMessages] = useState<ToastMessage[]>([]);
   const [isBusy, setIsBusy] = useState(false);
+  const [isOpeningBlogPreview, setIsOpeningBlogPreview] = useState(false);
   const [draftSessionId, setDraftSessionId] = useState(0);
   const [selectedCategorySlug, setSelectedCategorySlug] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
@@ -2570,6 +2581,7 @@ export default function NotesWorkbench() {
   const [toolIconLoadingIndex, setToolIconLoadingIndex] = useState<number | null>(null);
   const [isLocalizingImages, setIsLocalizingImages] = useState(false);
   const [imageLocalizationStatus, setImageLocalizationStatus] = useState<Record<string, ImageLocalizationStatus>>({});
+  const [localBlogPreviewOrigin, setLocalBlogPreviewOrigin] = useState(LOCAL_BLOG_PREVIEW_ORIGIN);
   const [imageSettingsTab, setImageSettingsTab] = useState<SettingsImageTab>('references');
   const [managedImagePage, setManagedImagePage] = useState(1);
   const [galleryImages, setGalleryImages] = useState<GalleryImageItem[]>([]);
@@ -2716,6 +2728,24 @@ export default function NotesWorkbench() {
       }
     };
   }, [toastMessages]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    ensureBlogPreviewServer()
+      .then((server) => {
+        if (!cancelled && server.origin) {
+          setLocalBlogPreviewOrigin(server.origin);
+        }
+      })
+      .catch(() => {
+        // Keep the default origin; opening preview will surface the actionable error.
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     const view = publishLogViewRef.current;
@@ -3259,8 +3289,10 @@ export default function NotesWorkbench() {
   const previewBody = draft?.body ?? '';
   const deferredPreviewBody = useDeferredValue(previewRenderBody);
   const renderedPreview = useMemo(
-    () => <MarkdownPreview markdown={resolveDesktopContentImages(deferredPreviewBody, libraryRoot)} />,
-    [deferredPreviewBody, libraryRoot],
+    () => (
+      <MarkdownPreview markdown={resolveDesktopContentImages(deferredPreviewBody, libraryRoot, localBlogPreviewOrigin)} />
+    ),
+    [deferredPreviewBody, libraryRoot, localBlogPreviewOrigin],
   );
 
   useEffect(() => {
@@ -6849,6 +6881,11 @@ export default function NotesWorkbench() {
   };
 
   const openLocalBlogPreview = async () => {
+    if (isOpeningBlogPreview) {
+      return;
+    }
+
+    setIsOpeningBlogPreview(true);
     let path = getLocalBlogPreviewPath();
 
     if (draft?.sourceRelativePath && isTauri()) {
@@ -6871,14 +6908,16 @@ export default function NotesWorkbench() {
       }
 
       const origin = server.origin || LOCAL_BLOG_PREVIEW_ORIGIN;
+      setLocalBlogPreviewOrigin(origin);
       const url = `${origin}${path}`;
       await openExternalUrl(url);
       setStatus(`\u5df2\u6253\u5f00\u672c\u5730\u535a\u5ba2\u9884\u89c8\uff1a${url}`);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      const url = `${LOCAL_BLOG_PREVIEW_ORIGIN}${path}`;
+      const url = `${localBlogPreviewOrigin}${path}`;
       setStatus(`\u65e0\u6cd5\u6253\u5f00\u672c\u5730\u535a\u5ba2\u9884\u89c8\uff1a${url}\uff08${message}\uff09`);
-      return;
+    } finally {
+      setIsOpeningBlogPreview(false);
     }
   };
 
@@ -7079,7 +7118,7 @@ export default function NotesWorkbench() {
 
     const extension = getSlidesFileExtension(selectedPath);
     if (!extension) {
-      setStatus('仅支持插入 PPT、PPTX 或 PDF 文件。');
+      setStatus('仅支持插入 PDF 文件。');
       return;
     }
 
@@ -7089,22 +7128,13 @@ export default function NotesWorkbench() {
     try {
       setStatus(`正在处理演示文稿：${fileTitle}...`);
       const fileName = createSlidesFileName(selectedPath, new Date());
-      const originalTarget = getSlidesTargetPath(libraryRoot, draft.type, noteSlug, fileName);
-      const renderTarget =
-        extension === 'pdf'
-          ? originalTarget
-          : getSlidesTargetPath(libraryRoot, draft.type, noteSlug, replaceFileExtension(fileName, 'pdf'));
+      const renderTarget = getSlidesTargetPath(libraryRoot, draft.type, noteSlug, fileName);
 
-      if (extension !== 'pdf') {
-        setStatus(`正在转换为 PDF：${fileTitle}...`);
-        await convertSlidesToPdf(selectedPath, renderTarget.filePath);
-      }
-      await copyFileToPath(selectedPath, originalTarget.filePath);
+      await copyFileToPath(selectedPath, renderTarget.filePath);
 
       insertPastedImageReferences(
         [
           `<div data-inknote-slides src="${renderTarget.publicPath}"`,
-          extension === 'pdf' ? '' : ` original="${originalTarget.publicPath}"`,
           ` title="${escapeHtmlAttribute(fileTitle)}" type="pdf"></div>`,
         ].join(''),
         selection,
@@ -7112,7 +7142,7 @@ export default function NotesWorkbench() {
         draft.type,
       );
       appendHistoryEntry('Inserted slides', fileTitle);
-      setStatus(`已插入演示文稿：${fileTitle}`);
+      setStatus(`已插入 PDF 演示文稿：${fileTitle}`);
     } catch (error) {
       setStatus(error instanceof Error ? error.message : '插入演示文稿失败。');
     }
@@ -7751,7 +7781,7 @@ export default function NotesWorkbench() {
     [currentMetadataArticleItems, currentMetadataItem, galleryAssignments, galleryImages],
   );
   const currentMetadataCardImageSource = currentMetadataCardImage
-    ? getGalleryImagePreviewSource(currentMetadataCardImage.path, libraryRoot)
+    ? getGalleryImagePreviewSource(currentMetadataCardImage.path, libraryRoot, localBlogPreviewOrigin)
     : '';
   const createCategoryIsValid = categories.some((category) => category.slug === createCategoryValue);
 
@@ -7916,8 +7946,9 @@ export default function NotesWorkbench() {
             type="button"
             className="notes-topbar-button"
             onClick={() => void openLocalBlogPreview()}
+            disabled={isOpeningBlogPreview}
           >
-            {'\u9884\u89c8'}
+            {isOpeningBlogPreview ? '\u542f\u52a8\u4e2d' : '\u9884\u89c8'}
           </button>
         </div>
       </header>
@@ -9287,7 +9318,12 @@ export default function NotesWorkbench() {
                               >
                                 <IconGripVertical aria-hidden="true" />
                               </span>
-                              <FriendLinkAvatar label={link.label} icon={link.icon} fetchedAt={link.iconFetchedAt} />
+                              <FriendLinkAvatar
+                                label={link.label}
+                                icon={link.icon}
+                                fetchedAt={link.iconFetchedAt}
+                                previewOrigin={localBlogPreviewOrigin}
+                              />
 
                               <div className="notes-settings-friend-fields">
                                 <input
@@ -9411,7 +9447,12 @@ export default function NotesWorkbench() {
                               >
                                 <IconGripVertical aria-hidden="true" />
                               </span>
-                              <FriendLinkAvatar label={link.label} icon={link.icon} fetchedAt={link.iconFetchedAt} />
+                              <FriendLinkAvatar
+                                label={link.label}
+                                icon={link.icon}
+                                fetchedAt={link.iconFetchedAt}
+                                previewOrigin={localBlogPreviewOrigin}
+                              />
 
                               <div className="notes-settings-friend-fields">
                                 <input
@@ -9613,6 +9654,7 @@ export default function NotesWorkbench() {
                                     key={asset.source}
                                     asset={asset}
                                     contentRoot={libraryRoot}
+                                    previewOrigin={localBlogPreviewOrigin}
                                     localizationStatus={
                                       asset.kind === 'external' ? imageLocalizationStatus[asset.source] : undefined
                                     }
@@ -9665,6 +9707,7 @@ export default function NotesWorkbench() {
                                     key={getGalleryImageKey(image)}
                                     image={image}
                                     contentRoot={libraryRoot}
+                                    previewOrigin={localBlogPreviewOrigin}
                                     selectable={isGalleryMultiSelectMode}
                                     selected={selectedGalleryImageSet.has(getGalleryImageKey(image))}
                                     used={usedGalleryImageKeys.has(getGalleryImageKey(image))}
@@ -9717,6 +9760,7 @@ export default function NotesWorkbench() {
                                   key={asset.source}
                                   asset={asset}
                                   contentRoot={libraryRoot}
+                                  previewOrigin={localBlogPreviewOrigin}
                                   localizationStatus={imageLocalizationStatus[asset.source]}
                                 />
                               ))}
@@ -9734,7 +9778,12 @@ export default function NotesWorkbench() {
                           {internalManagedImages.length > 0 ? (
                             <div className="notes-settings-image-grid">
                               {internalManagedImages.map((asset) => (
-                                <ManagedImageCard key={asset.source} asset={asset} contentRoot={libraryRoot} />
+                                <ManagedImageCard
+                                  key={asset.source}
+                                  asset={asset}
+                                  contentRoot={libraryRoot}
+                                  previewOrigin={localBlogPreviewOrigin}
+                                />
                               ))}
                             </div>
                           ) : (

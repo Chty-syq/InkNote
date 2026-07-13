@@ -3,6 +3,9 @@ import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { getVersion as getTauriAppVersion } from '@tauri-apps/api/app';
 import { open, save } from '@tauri-apps/plugin-dialog';
 
+const DEFAULT_BLOG_PREVIEW_PORT = import.meta.env.DEV ? 4322 : 4321;
+const DEFAULT_BLOG_PREVIEW_ORIGIN = `http://localhost:${DEFAULT_BLOG_PREVIEW_PORT}`;
+
 export interface ContentFileDescriptor {
   path: string;
   kind: string;
@@ -114,7 +117,7 @@ export async function chooseSlidesFile(): Promise<string | null> {
   const result = await open({
     multiple: false,
     directory: false,
-    filters: [{ name: 'Slides', extensions: ['ppt', 'pptx', 'pdf'] }],
+    filters: [{ name: 'PDF Slides', extensions: ['pdf'] }],
   });
   if (!result) return null;
   return Array.isArray(result) ? result[0] ?? null : result;
@@ -156,10 +159,6 @@ export async function copyFileToPath(source: string, destination: string): Promi
 
 export async function compressGalleryImageFile(source: string, destination: string): Promise<number> {
   return invoke('compress_gallery_image_file', { source, destination });
-}
-
-export async function convertSlidesToPdf(source: string, destination: string): Promise<void> {
-  await invoke('convert_slides_to_pdf', { source, destination });
 }
 
 export async function getContentIndex(): Promise<ContentIndexResponse> {
@@ -235,8 +234,8 @@ export async function listenToDesktopUpdateProgress(
 export async function ensureBlogPreviewServer(): Promise<BlogPreviewServerResponse> {
   if (!isTauri()) {
     return {
-      origin: 'http://localhost:4321',
-      port: 4321,
+      origin: DEFAULT_BLOG_PREVIEW_ORIGIN,
+      port: DEFAULT_BLOG_PREVIEW_PORT,
       running: true,
       started: false,
       ready: true,

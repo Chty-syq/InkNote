@@ -8,7 +8,9 @@ import {
   type WheelEvent as ReactWheelEvent,
 } from 'react';
 import {
+  getNotebookTextLayers,
   renderNotebookPages,
+  type NotebookTextLayerPage,
   type ProjectData,
 } from '@inknote/inknote-core';
 
@@ -20,6 +22,7 @@ interface InkNoteProjectPanelProps {
 interface PreviewPage {
   pageNumber: number;
   dataUrl: string;
+  textLayer: NotebookTextLayerPage;
 }
 
 const NOTEBOOK_PREVIEW_SCALE = 0.92;
@@ -40,6 +43,35 @@ function getSpreadStart(value: number, pagesPerSpread: number): number {
 function clampSpreadStart(value: number, pageCount: number, pagesPerSpread: number): number {
   const lastSpreadStart = getSpreadStart(Math.max(0, pageCount - 1), pagesPerSpread);
   return Math.max(0, Math.min(lastSpreadStart, getSpreadStart(value, pagesPerSpread)));
+}
+
+function InkNotePageSurface({ page }: { page: PreviewPage }) {
+  return (
+    <div className="inknote-page-surface">
+      <img src={page.dataUrl} alt={`Notebook preview page ${page.pageNumber}`} />
+      <div className="inknote-text-layer" aria-label={`第 ${page.pageNumber} 页文本`}>
+        {page.textLayer.lines.map((line, index) => (
+          <span
+            className="inknote-text-line"
+            key={`${page.pageNumber}-${index}`}
+            style={{
+              left: `${(line.x / page.textLayer.width) * 100}%`,
+              top: `${(line.y / page.textLayer.height) * 100}%`,
+              width: `${(line.width / page.textLayer.width) * 100}%`,
+              height: `${(line.height / page.textLayer.height) * 100}%`,
+              fontSize: `${Math.max(8, line.fontSize * 0.54)}px`,
+              fontWeight: line.fontWeight,
+            }}
+            onMouseDown={(event) => event.stopPropagation()}
+            onClick={(event) => event.stopPropagation()}
+            onDoubleClick={(event) => event.stopPropagation()}
+          >
+            {line.text}
+          </span>
+        ))}
+      </div>
+    </div>
+  );
 }
 
 export function InkNoteProjectPreviewPanel({
@@ -83,9 +115,11 @@ export function InkNoteProjectPreviewPanel({
       }
 
       try {
+        const textLayers = getNotebookTextLayers(deferredProject);
         const renderedPages = renderNotebookPages(deferredProject, NOTEBOOK_PREVIEW_SCALE).map((canvas, index) => ({
           pageNumber: index + 1,
           dataUrl: canvas.toDataURL('image/png'),
+          textLayer: textLayers[index] ?? { width: canvas.width, height: canvas.height, lines: [] },
         }));
 
         if (cancelled) {
@@ -225,7 +259,7 @@ export function InkNoteProjectPreviewPanel({
               {currentSpreadPages.length > 0 ? (
                 currentSpreadPages.map((page) => (
                   <article className="spread-page" key={page.pageNumber}>
-                    <img src={page.dataUrl} alt={`Notebook preview page ${page.pageNumber}`} />
+                    <InkNotePageSurface page={page} />
                     <span>{`第 ${page.pageNumber} 页`}</span>
                   </article>
                 ))
@@ -283,7 +317,7 @@ export function InkNoteProjectPreviewPanel({
             {currentSpreadPages.length > 0 ? (
               currentSpreadPages.map((page) => (
                 <article className="spread-page" key={page.pageNumber}>
-                  <img src={page.dataUrl} alt={`Notebook preview page ${page.pageNumber}`} />
+                  <InkNotePageSurface page={page} />
                   <span>{`第 ${page.pageNumber} 页`}</span>
                 </article>
               ))

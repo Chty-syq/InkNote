@@ -8,6 +8,7 @@ const pagesBase = process.env.VITE_PAGES_BASE?.trim() || '/';
 const contentRoot = fileURLToPath(new URL('../../content', import.meta.url));
 const workspaceRoot = fileURLToPath(new URL('../..', import.meta.url));
 const previewHealthPath = '/__inknote-preview-health';
+const devServerPort = Number(process.env.INKNOTE_WEB_DEV_PORT || 4322);
 const contentEntryPattern =
   /[\\/]content[\\/](?:markdown[\\/][^\\/]+[\\/]index\.md|inknotes[\\/][^\\/]+[\\/](?:index\.md|[^\\/]+\.inknote\.json))$/i;
 
@@ -369,7 +370,7 @@ export default defineConfig({
   base: pagesBase,
   plugins: [contentCollectionReloadPlugin(), rssFeedPlugin(), previewHealthPlugin(), react()],
   server: {
-    port: 4321,
+    port: devServerPort,
     strictPort: true,
     fs: {
       allow: [workspaceRoot],

@@ -11,7 +11,9 @@ import {
 } from 'react';
 import {
   deserializeProject,
+  getNotebookTextLayers,
   renderNotebookPages,
+  type NotebookTextLayerPage,
   type ProjectData,
 } from '@inknote/inknote-core';
 
@@ -24,6 +26,7 @@ interface InkNoteNotebookViewerProps {
 interface PreviewPage {
   pageNumber: number;
   dataUrl: string;
+  textLayer: NotebookTextLayerPage;
 }
 
 const NOTEBOOK_WEB_PREVIEW_SCALE = 0.94;
@@ -47,6 +50,35 @@ function parseProject(payload: string | null): ProjectData | null {
   } catch {
     return null;
   }
+}
+
+function InkNotePageSurface({ page, title }: { page: PreviewPage; title: string }) {
+  return (
+    <div className="inknote-page-surface">
+      <img src={page.dataUrl} alt={`${title} page ${page.pageNumber}`} />
+      <div className="inknote-text-layer" aria-label={`${title} 第 ${page.pageNumber} 页文本`}>
+        {page.textLayer.lines.map((line, index) => (
+          <span
+            className="inknote-text-line"
+            key={`${page.pageNumber}-${index}`}
+            style={{
+              left: `${(line.x / page.textLayer.width) * 100}%`,
+              top: `${(line.y / page.textLayer.height) * 100}%`,
+              width: `${(line.width / page.textLayer.width) * 100}%`,
+              height: `${(line.height / page.textLayer.height) * 100}%`,
+              fontSize: `${Math.max(8, line.fontSize * 0.54)}px`,
+              fontWeight: line.fontWeight,
+            }}
+            onMouseDown={(event) => event.stopPropagation()}
+            onClick={(event) => event.stopPropagation()}
+            onDoubleClick={(event) => event.stopPropagation()}
+          >
+            {line.text}
+          </span>
+        ))}
+      </div>
+    </div>
+  );
 }
 
 export function InkNoteNotebookViewer({
@@ -80,9 +112,11 @@ export function InkNoteNotebookViewer({
 
     const timer = window.setTimeout(() => {
       try {
+        const textLayers = getNotebookTextLayers(deferredProject);
         const pages = renderNotebookPages(deferredProject, NOTEBOOK_WEB_PREVIEW_SCALE).map((canvas, index) => ({
           pageNumber: index + 1,
           dataUrl: canvas.toDataURL('image/png'),
+          textLayer: textLayers[index] ?? { width: canvas.width, height: canvas.height, lines: [] },
         }));
 
         if (cancelled) {
@@ -205,11 +239,11 @@ export function InkNoteNotebookViewer({
         {firstPage ? (
           <>
             <figure className="blog-inknote-page">
-              <img src={firstPage.dataUrl} alt={`${title} page ${firstPage.pageNumber}`} />
+              <InkNotePageSurface page={firstPage} title={title} />
             </figure>
             {secondPage ? (
               <figure className="blog-inknote-page">
-                <img src={secondPage.dataUrl} alt={`${title} page ${secondPage.pageNumber}`} />
+                <InkNotePageSurface page={secondPage} title={title} />
               </figure>
             ) : (
               <figure className="blog-inknote-page blog-inknote-page-blank" aria-hidden="true">
