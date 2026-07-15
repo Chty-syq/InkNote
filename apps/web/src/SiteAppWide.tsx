@@ -1544,7 +1544,15 @@ function SiteSidebar({
   );
 }
 
-function ArticleTocSidebar({ headings, extra }: { headings: MarkdownHeading[]; extra?: ReactNode }) {
+function ArticleTocSidebar({
+  headings,
+  extra,
+  className = '',
+}: {
+  headings: MarkdownHeading[];
+  extra?: ReactNode;
+  className?: string;
+}) {
   const handleTocJump = (id: string) => {
     if (typeof document === 'undefined' || typeof window === 'undefined') {
       return;
@@ -1563,7 +1571,7 @@ function ArticleTocSidebar({ headings, extra }: { headings: MarkdownHeading[]; e
   };
 
   return (
-    <aside className="blog-sidebar blog-sidebar-toc">
+    <aside className={`blog-sidebar blog-sidebar-toc ${className}`.trim()}>
       <SidebarSection title="目录">
         {headings.length > 0 ? (
           <ol className="blog-toc-list">
@@ -2119,14 +2127,14 @@ type LatexSyntaxItem = {
 type LatexSyntaxGroup = {
   title: string;
   description?: string;
-  layout?: 'flow' | 'grid' | 'function-grid';
+  layout?: 'flow' | 'grid' | 'function-grid' | 'ten-column' | 'eight-column' | 'four-column';
   items: LatexSyntaxItem[];
 };
 
 const LATEX_SYNTAX_GROUPS: LatexSyntaxGroup[] = [
   {
-    title: '小写希腊字母',
-    layout: 'flow',
+    title: '希腊字母',
+    layout: 'ten-column',
     items: [
       { command: '\\alpha' },
       { command: '\\beta' },
@@ -2146,53 +2154,174 @@ const LATEX_SYNTAX_GROUPS: LatexSyntaxGroup[] = [
       { command: '\\rho' },
       { command: '\\sigma' },
       { command: '\\tau' },
-      { command: '\\upsilon' },
       { command: '\\phi' },
       { command: '\\chi' },
       { command: '\\psi' },
       { command: '\\omega' },
       { command: '\\varepsilon' },
       { command: '\\vartheta' },
+      { command: '\\varkappa' },
       { command: '\\varphi' },
+      { command: '\\varpi' },
       { command: '\\varrho' },
       { command: '\\varsigma' },
+      { command: '\\Gamma' },
+      { command: '\\Delta' },
+      { command: '\\Theta' },
+      { command: '\\Lambda' },
+      { command: '\\Pi' },
+      { command: '\\Sigma' },
+      { command: '\\Upsilon' },
+      { command: '\\Phi' },
+      { command: '\\Psi' },
+      { command: '\\Omega' },
     ],
   },
   {
-    title: '常用二元关系符',
-    layout: 'flow',
-    description: '可以在命令前加 \\not 得到否定形式，例如 \\not\\equiv。',
+    title: '常用运算符',
+    layout: 'ten-column',
     items: [
-      { command: '<', formula: '<' },
-      { command: '\\le' },
+      { command: '\\pm' },
+      { command: '\\mp' },
+      { command: '\\times' },
+      { command: '\\div' },
+      { command: '\\cdot' },
+      { command: '\\ast' },
+      { command: '\\star' },
+      { command: '\\circ' },
+      { command: '\\bullet' },
+      { command: '\\oplus' },
+      { command: '\\ominus' },
+      { command: '\\otimes' },
+      { command: '\\oslash' },
+      { command: '\\odot' },
+      { command: '\\cap' },
+      { command: '\\cup' },
       { command: '\\leq' },
-      { command: '\\ge' },
       { command: '\\geq' },
-      { command: '=' },
       { command: '\\neq' },
       { command: '\\equiv' },
-      { command: '\\not\\equiv' },
       { command: '\\mid' },
       { command: '\\nmid' },
       { command: '\\approx' },
       { command: '\\sim' },
       { command: '\\cong' },
       { command: '\\in' },
-      { command: '\\notin' },
       { command: '\\subset' },
       { command: '\\supset' },
       { command: '\\subseteq' },
       { command: '\\supseteq' },
+      { command: '\\ll' },
+      { command: '\\gg' },
+      { command: '\\doteq' },
+      { command: '\\propto' },
+      { command: '\\asymp' },
+      { command: '\\simeq' },
+      { command: '\\prec' },
+      { command: '\\succ' },
+      { command: '\\preceq' },
+      { command: '\\succeq' },
+      { command: '\\parallel' },
+      { command: '\\perp' },
+      { command: '\\emptyset' },
+      { command: '\\varnothing' },
+      { command: '\\forall' },
+      { command: '\\exists' },
+      { command: '\\nexists' },
+      { command: '\\neg' },
+      { command: '\\land' },
+      { command: '\\lor' },
+      { command: '\\therefore' },
+      { command: '\\because' },
+      { command: '\\implies' },
+      { command: '\\iff' },
+      { command: '\\ldots' },
+      { command: '\\cdots' },
+      { command: '\\vdots' },
+      { command: '\\ddots' },
+      { command: '\\infty' },
+      { command: '\\partial' },
+      { command: '\\nabla' },
+      { command: '\\ell' },
+      { command: '\\hbar' },
+      { command: '\\Re' },
+      { command: '\\Im' },
+      { command: '\\angle' },
+      { command: '\\triangle' },
+      { command: '\\degree' },
+    ],
+  },
+  {
+    title: '标准数学函数',
+    layout: 'ten-column',
+    items: [
+      { command: '\\sin' },
+      { command: '\\cos' },
+      { command: '\\tan' },
+      { command: '\\cot' },
+      { command: '\\sinh' },
+      { command: '\\cosh' },
+      { command: '\\tanh' },
+      { command: '\\arccos' },
+      { command: '\\arcsin' },
+      { command: '\\arctan' },
+      { command: '\\exp' },
+      { command: '\\log' },
+      { command: '\\ln' },
+      { command: '\\max' },
+      { command: '\\min' },
+      { command: '\\inf' },
+      { command: '\\sup' },
+      { command: '\\arg' },
+      { command: '\\gcd' },
+      { command: '\\deg' },
+      { command: '\\det' },
+      { command: '\\dim' },
+      { command: '\\lim' },
+      { command: '\\Pr' },
+    ],
+  },
+  {
+    title: '箭头',
+    layout: 'eight-column',
+    items: [
+      { command: '\\leftarrow' },
+      { command: '\\rightarrow' },
+      { command: '\\leftrightarrow' },
+      { command: '\\Leftarrow' },
+      { command: '\\Rightarrow' },
+      { command: '\\Leftrightarrow' },
+      { command: '\\mapsto' },
+      { command: '\\longmapsto' },
+      { command: '\\uparrow' },
+      { command: '\\downarrow' },
+      { command: '\\updownarrow' },
+      { command: '\\nearrow' },
+      { command: '\\searrow' },
+      { command: '\\swarrow' },
+      { command: '\\nwarrow' },
+      { command: '\\xrightarrow{f}' },
+      { command: '\\xleftarrow{g}' },
     ],
   },
   {
     title: '常用数学结构',
-    layout: 'grid',
+    layout: 'four-column',
     items: [
-      { command: '\\frac{abc}{xyz}' },
-      { command: "f'", formula: "f'" },
-      { command: '\\sqrt{abc}' },
-      { command: '\\sqrt[n]{abc}' },
+      { command: '\\\|x\\|' },
+      { command: '\\lfloor x\\rfloor' },
+      { command: '\\lceil x\\rceil' },
+      { command: '\\sqrt{x}' },
+      { command: '\\sqrt[n]{x}' },
+      { command: '\\hat{x}' },
+      { command: '\\bar{x}' },
+      { command: '\\vec{x}' },
+      { command: '\\tilde{x}' },
+      { command: '\\dot{x}' },
+      { command: '\\ddot{x}' },
+      { command: '\\langle x,y\\rangle' },
+      { command: '\\frac{a}{b}' },
+      { command: '\\binom{n}{k}' },
       { command: '\\overline{abc}' },
       { command: '\\underline{abc}' },
       { command: '\\widehat{abc}' },
@@ -2201,56 +2330,41 @@ const LATEX_SYNTAX_GROUPS: LatexSyntaxGroup[] = [
       { command: '\\overleftarrow{abc}' },
       { command: '\\overbrace{abc}' },
       { command: '\\underbrace{abc}' },
+      { command: '\\overleftrightarrow{abc}' },
+
+
+      { command: '\\boxed{a^2+b^2}' },
     ],
   },
   {
-    title: '标准数学函数',
-    layout: 'function-grid',
+    title: '大型算子',
+    layout: 'four-column',
     items: [
-      { command: '\\arccos' },
-      { command: '\\arcsin' },
-      { command: '\\arctan' },
-      { command: '\\arg' },
-      { command: '\\cos' },
-      { command: '\\cosh' },
-      { command: '\\cot' },
-      { command: '\\coth' },
-      { command: '\\csc' },
-      { command: '\\deg' },
-      { command: '\\det' },
-      { command: '\\dim' },
-      { command: '\\exp' },
-      { command: '\\gcd' },
-      { command: '\\hom' },
-      { command: '\\inf' },
-      { command: '\\ker' },
-      { command: '\\lg' },
-      { command: '\\lim' },
-      { command: '\\liminf' },
-      { command: '\\limsup' },
-      { command: '\\ln' },
-      { command: '\\log' },
-      { command: '\\max' },
-      { command: '\\min' },
-      { command: '\\Pr' },
-      { command: '\\sec' },
-      { command: '\\sin' },
-      { command: '\\sinh' },
-      { command: '\\sup' },
-      { command: '\\tan' },
-      { command: '\\tanh' },
-    ],
-  },
-  {
-    title: '大型算子与上下标',
-    layout: 'grid',
-    items: [
-      { command: 'x_i^2' },
-      { command: '\\sum_{i=1}^{n} i^2' },
+      { command: '\\sum_{i=1}^{n} x_i' },
       { command: '\\prod_{i=1}^{n} x_i' },
-      { command: '\\int_a^b f(x)\\,dx' },
+      { command: '\\bigcup_{i=1}^{n} A_i' },
+      { command: '\\bigcap_{i=1}^{n} A_i' },
       { command: '\\lim_{n\\to\\infty} a_n' },
-      { command: '\\underset{x\\in S}{\\operatorname{argmax}}\\ f(x)' },
+      { command: '\\int_a^b f(x)\\,dx' },
+      { command: '\\iint_D f(x,y)\\,dA' },
+      { command: '\\oint_C F\\cdot dr' },
+    ],
+  },
+  {
+    title: '常用字体',
+    layout: 'four-column',
+    items: [
+      { command: '\\mathrm{ABC}' },
+      { command: '\\mathit{ABC}' },
+      { command: '\\mathbf{ABC}' },
+      { command: '\\mathsf{ABC}' },
+      { command: '\\mathtt{ABC}' },
+      { command: '\\mathcal{ABC}' },
+      { command: '\\mathbb{ABC}' },
+      { command: '\\mathfrak{ABC}' },
+      { command: '\\boldsymbol{\\alpha}' },
+      { command: '\\text{subject to}' },
+      { command: '\\operatorname{rank}(A)' },
     ],
   },
 ];
@@ -2262,29 +2376,62 @@ const LATEX_BLOCK_EXAMPLES = [
     formula: '\\begin{bmatrix} a & b \\\\ c & d \\end{bmatrix}',
   },
   {
+    title: '圆括号矩阵',
+    command: '\\begin{pmatrix} a & b \\\\ c & d \\end{pmatrix}',
+    formula: '\\begin{pmatrix} a & b \\\\ c & d \\end{pmatrix}',
+  },
+  {
+    title: '行列式',
+    command: '\\begin{vmatrix} a & b \\\\ c & d \\end{vmatrix}',
+    formula: '\\begin{vmatrix} a & b \\\\ c & d \\end{vmatrix}',
+  },
+  {
+    title: '增广矩阵',
+    command: '\\left[\\begin{array}{cc|c} 1 & 2 & 3 \\\\ 4 & 5 & 6 \\end{array}\\right]',
+    formula: '\\left[\\begin{array}{cc|c} 1 & 2 & 3 \\\\ 4 & 5 & 6 \\end{array}\\right]',
+  },
+  {
     title: '分段函数',
     command: '\\begin{cases} x^2, & x \\ge 0 \\\\ -x, & x < 0 \\end{cases}',
     formula: 'f(x)=\\begin{cases} x^2, & x \\ge 0 \\\\ -x, & x < 0 \\end{cases}',
   },
   {
     title: '多行对齐',
-    command: '\\begin{aligned} a+b&=c \\\\ c+d&=e \\end{aligned}',
-    formula: '\\begin{aligned} a+b&=c \\\\ c+d&=e \\end{aligned}',
-  },
-  {
-    title: '数组',
-    command: '\\begin{array}{cl} \\text{maximize} & f(x) \\\\ \\text{s.t.} & x\\in S \\end{array}',
-    formula: '\\begin{array}{cl} \\text{maximize} & f(x) \\\\ \\text{s.t.} & x\\in S \\end{array}',
+    command: '\\begin{aligned} (a+b)^2 &= a^2+2ab+b^2 \\\\ &= a(a+2b)+b^2 \\end{aligned}',
+    formula: '\\begin{aligned} (a+b)^2 &= a^2+2ab+b^2 \\\\ &= a(a+2b)+b^2 \\end{aligned}',
   },
 ];
+
+const ORDERED_LATEX_SYNTAX_GROUPS = LATEX_SYNTAX_GROUPS;
+
+const LATEX_TOC_HEADINGS: MarkdownHeading[] = [
+  ...ORDERED_LATEX_SYNTAX_GROUPS.map((group, index) => ({
+    id: getLatexSectionId(index),
+    level: 2,
+    text: group.title,
+    markdown: group.title,
+    line: index + 1,
+  })),
+  {
+    id: 'latex-block-examples',
+    level: 2,
+    text: '多行公式',
+    markdown: '多行公式',
+    line: ORDERED_LATEX_SYNTAX_GROUPS.length + 1,
+  },
+];
+
+function getLatexSectionId(index: number): string {
+  return `latex-syntax-${index + 1}`;
+}
 
 function renderLatexFormula(formula: string): ReactNode {
   return renderInlineMarkdown(`$${formula}$`);
 }
 
-function LatexSyntaxTable({ group }: { group: LatexSyntaxGroup }) {
+function LatexSyntaxTable({ group, index }: { group: LatexSyntaxGroup; index: number }) {
   return (
-    <section className={`blog-latex-section ${group.layout ?? 'grid'}`}>
+    <section className={`blog-latex-section ${group.layout ?? 'grid'}`} id={getLatexSectionId(index)}>
       <h3>{group.title}</h3>
       {group.description ? <p className="blog-latex-note">{group.description}</p> : null}
       <div className="blog-latex-rule" />
@@ -2293,8 +2440,8 @@ function LatexSyntaxTable({ group }: { group: LatexSyntaxGroup }) {
           const formula = item.formula ?? item.command;
           return (
             <div className="blog-latex-item" key={`${group.title}-${item.command}`}>
-              <code>{item.command}</code>
-              <span>{renderLatexFormula(formula)}</span>
+              <code title={item.command}>{item.command}</code>
+              <span className="blog-latex-item-preview">{renderLatexFormula(formula)}</span>
             </div>
           );
         })}
@@ -2303,15 +2450,7 @@ function LatexSyntaxTable({ group }: { group: LatexSyntaxGroup }) {
   );
 }
 
-function LatexPage({
-  navigate,
-  query,
-  setQuery,
-}: {
-  navigate: (href: string) => void;
-  query: string;
-  setQuery: (value: string) => void;
-}) {
+function LatexPage() {
   return (
     <div className="blog-layout">
       <section className="blog-main-column">
@@ -2323,33 +2462,18 @@ function LatexPage({
               <p>这里列出本站 Markdown 预览与文章页常用、稳定支持的 KaTeX 公式写法。</p>
             </div>
             <div className="blog-metrics">
-              <span>{LATEX_SYNTAX_GROUPS.length + 1} 组示例</span>
+              <span>{ORDERED_LATEX_SYNTAX_GROUPS.length + 1} 组示例</span>
             </div>
           </div>
         </section>
 
         <article className="blog-panel blog-archive-panel blog-latex-panel">
-          <section className="blog-latex-section">
-            <h3>公式写法</h3>
-            <div className="blog-latex-rule" />
-            <div className="blog-latex-usage">
-              <div>
-                <code>$a^2+b^2=c^2$</code>
-                <span>行内公式：{renderLatexFormula('a^2+b^2=c^2')}</span>
-              </div>
-              <div>
-                <code>$$\\sum_&#123;i=1&#125;^n i = \\frac&#123;n(n+1)&#125;&#123;2&#125;$$</code>
-                <span>独立公式会居中显示。</span>
-              </div>
-            </div>
-          </section>
-
-          {LATEX_SYNTAX_GROUPS.map((group) => (
-            <LatexSyntaxTable group={group} key={group.title} />
+          {ORDERED_LATEX_SYNTAX_GROUPS.map((group, index) => (
+            <LatexSyntaxTable group={group} index={index} key={group.title} />
           ))}
 
-          <section className="blog-latex-section">
-            <h3>矩阵、分段与对齐环境</h3>
+          <section className="blog-latex-section" id="latex-block-examples">
+            <h3>多行公式</h3>
             <div className="blog-latex-rule" />
             <div className="blog-latex-blocks">
               {LATEX_BLOCK_EXAMPLES.map((example) => (
@@ -2364,7 +2488,7 @@ function LatexPage({
         </article>
       </section>
 
-      <SiteSidebar navigate={navigate} query={query} setQuery={setQuery} />
+      <ArticleTocSidebar headings={LATEX_TOC_HEADINGS} className="blog-latex-toc" />
     </div>
   );
 }
@@ -2730,7 +2854,7 @@ export default function SiteAppWide() {
   } else if (route.type === 'archive') {
     page = <ArchivePage navigate={navigate} query={searchQuery} setQuery={setSearchQuery} />;
   } else if (route.type === 'latex') {
-    page = <LatexPage navigate={navigate} query={searchQuery} setQuery={setSearchQuery} />;
+    page = <LatexPage />;
   } else if (route.type === 'notes-list') {
     page = (
       <CollectionPage
