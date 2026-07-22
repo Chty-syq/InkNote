@@ -10,8 +10,16 @@ permissions:
   contents: write
 
 jobs:
-  release-windows:
-    runs-on: windows-latest
+  release-desktop:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows-latest
+            bundles: nsis
+          - platform: ubuntu-22.04
+            bundles: appimage,deb
+    runs-on: ${{ matrix.platform }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -25,34 +33,35 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Install Linux dependencies
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf xdg-utils
+
       - name: Install dependencies
         run: npm ci
 
       - name: Verify release version
         if: startsWith(github.ref, 'refs/tags/')
-        shell: pwsh
+        shell: bash
         run: |
           node scripts/update-desktop-version.mjs --check
-          $tauriVersion = (Get-Content apps/desktop/src-tauri/tauri.conf.json | ConvertFrom-Json).version
-          $cargoVersion = (Select-String -Path apps/desktop/src-tauri/Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"').Matches[0].Groups[1].Value
-          $packageVersion = (Get-Content apps/desktop/package.json | ConvertFrom-Json).version
-          $expectedTag = "v$tauriVersion"
-          if ($env:GITHUB_REF_NAME -ne $expectedTag) {
-            throw "Tag $env:GITHUB_REF_NAME does not match Tauri version $expectedTag"
-          }
-          if ($cargoVersion -ne $tauriVersion -or $packageVersion -ne $tauriVersion) {
-            throw "Desktop versions are inconsistent: tauri=$tauriVersion cargo=$cargoVersion package=$packageVersion"
-          }
+          tauri_version="$(node -p "require('./apps/desktop/src-tauri/tauri.conf.json').version")"
+          expected_tag="v${tauri_version}"
+          if [[ "${GITHUB_REF_NAME}" != "${expected_tag}" ]]; then
+            echo "Tag ${GITHUB_REF_NAME} does not match Tauri version ${expected_tag}." >&2
+            exit 1
+          fi
 
       - name: Configure updater signing
-        shell: pwsh
         env:
           TAURI_UPDATER_PUBKEY: ${{ secrets.TAURI_UPDATER_PUBKEY }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
         run: node scripts/configure-tauri-updater.mjs
 
       - name: Build and publish release
-        uses: tauri-apps/tauri-action@v0
+        uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
@@ -61,68 +70,60 @@ jobs:
           projectPath: apps/desktop
           tagName: v__VERSION__
           releaseName: InkNote v__VERSION__
-          releaseBody: Download the Windows installer below.
+          releaseBody: Download the Windows NSIS installer or Linux AppImage/deb package below.
           releaseDraft: false
           prerelease: false
-          includeUpdaterJson: true
-          updaterJsonPreferNsis: true
+          retryAttempts: 2
+          uploadUpdaterJson: false
+          uploadUpdaterSignatures: true
+          args: --bundles ${{ matrix.bundles }}
+
+  publish-updater-manifest:
+    needs: release-desktop
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
 
       - name: Publish updater manifest
-        shell: pwsh
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: ./scripts/publish-tauri-updater-manifest.ps1
+        run: node scripts/publish-tauri-updater-manifest.mjs
 
       - name: Verify updater manifest
-        shell: pwsh
+        shell: bash
         run: |
-          $tauriVersion = (Get-Content apps/desktop/src-tauri/tauri.conf.json | ConvertFrom-Json).version
-          $manifestUrls = @(
-            "https://github.com/${{ github.repository }}/releases/download/v$tauriVersion/latest.json",
+          set -o pipefail
+          tauri_version="$(node -p "require('./apps/desktop/src-tauri/tauri.conf.json').version")"
+          manifest_urls=(
+            "https://github.com/${{ github.repository }}/releases/download/v${tauri_version}/latest.json"
             "https://github.com/${{ github.repository }}/releases/latest/download/latest.json"
           )
 
-          foreach ($manifestUrl in $manifestUrls) {
-            $lastError = $null
-            for ($attempt = 1; $attempt -le 6; $attempt++) {
-              try {
-                $response = Invoke-WebRequest -UseBasicParsing -Uri $manifestUrl -MaximumRedirection 5 -TimeoutSec 30
-                $manifestContent = $response.Content
-                if ($manifestContent -is [byte[]]) {
-                  $manifestJson = [System.Text.Encoding]::UTF8.GetString($manifestContent)
-                } else {
-                  $manifestJson = [string]$manifestContent
-                }
-                $manifest = $manifestJson | ConvertFrom-Json
-                if (-not $manifest.version) {
-                  $preview = $manifestJson
-                  if ($preview.Length -gt 200) {
-                    $preview = $preview.Substring(0, 200)
-                  }
-                  throw "latest.json is missing the version field. Content preview: $preview"
-                }
-                if (-not $manifest.platforms) {
-                  throw "latest.json is missing the platforms field."
-                }
-                if (-not $manifest.platforms.'windows-x86_64') {
-                  throw "latest.json is missing the windows-x86_64 platform."
-                }
-                if (-not $manifest.platforms.'windows-x86_64'.signature) {
-                  throw "latest.json is missing the windows-x86_64 signature."
-                }
-                if (-not $manifest.platforms.'windows-x86_64'.url) {
-                  throw "latest.json is missing the windows-x86_64 installer URL."
-                }
-                Write-Host "Updater manifest is available: $manifestUrl"
-                $lastError = $null
+          for manifest_url in "${manifest_urls[@]}"; do
+            verified=false
+            for attempt in {1..6}; do
+              if curl --fail --location --silent --show-error "${manifest_url}" |
+                jq --exit-status --arg version "${tauri_version}" '
+                  .version == $version and
+                  (.platforms["windows-x86_64"].signature | length > 0) and
+                  (.platforms["windows-x86_64"].url | length > 0) and
+                  (.platforms["linux-x86_64"].signature | length > 0) and
+                  (.platforms["linux-x86_64"].url | length > 0)
+                ' >/dev/null; then
+                echo "Updater manifest is available: ${manifest_url}"
+                verified=true
                 break
-              } catch {
-                $lastError = $_.Exception.Message
-                Write-Warning "Updater manifest check attempt $attempt failed for $manifestUrl`: $lastError"
-                Start-Sleep -Seconds 10
-              }
-            }
-            if ($lastError) {
-              throw "Updater manifest was not published or is invalid at $manifestUrl`: $lastError"
-            }
-          }
+              fi
+              echo "Updater manifest check attempt ${attempt} failed for ${manifest_url}." >&2
+              sleep 10
+            done
+            if [[ "${verified}" != true ]]; then
+              exit 1
+            fi
+          done

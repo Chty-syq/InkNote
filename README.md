@@ -215,7 +215,14 @@ npm.cmd run desktop:version -- 0.2.0
 3. 创建版本标签。
 4. 将当前分支和标签推送到 `origin`。
 
-GitHub Actions 会根据标签构建 Windows 安装包和 Tauri updater 元数据。
+GitHub Actions 会根据标签并行构建 Windows x86_64 的 NSIS `.exe`、Linux x86_64 的 `.AppImage` 和 `.deb`，并生成同时覆盖两个平台的 Tauri updater 元数据。
+
+在 Ubuntu 22.04 本地构建 Linux 安装包：
+
+```bash
+sudo apt-get install libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf xdg-utils
+npm run tauri --workspace @inknote/desktop -- build --bundles appimage,deb
+```
 
 如果只想改版本文件而不执行 Git 操作：
 
@@ -237,7 +244,7 @@ npm.cmd run desktop:version -- patch --dry-run
 https://github.com/Chty-syq/InkNote/releases/latest/download/latest.json
 ```
 
-如果 updater 没有返回可安装包，但 GitHub Release 中存在 Windows 安装包，编辑器会降级为“下载安装”流程：自动下载 release 里的 `.exe` 并启动安装器。
+Windows 下如果 updater 没有返回可安装包，但 GitHub Release 中存在 Windows 安装包，编辑器会降级为“下载安装”流程：自动下载 release 里的 `.exe` 并启动安装器。Linux 自动更新使用签名 AppImage；也可以从 Release 页面手动下载 AppImage 或 `.deb`。
 
 Tauri updater 签名需要 GitHub Secrets：
 

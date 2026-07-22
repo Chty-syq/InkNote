@@ -35,7 +35,19 @@ Replace `patch` with `minor`, `major`, or an explicit version such as `0.2.0`. R
 
 By default the script updates the version files, creates a release commit, creates the matching `v*` tag, and atomically pushes the current branch and tag to `origin`. It refuses to run when version files are already dirty or when the Git index contains staged work, preventing unrelated changes from entering the release commit. Use `--dry-run` to preview the release or `--no-git` to update version files without committing, tagging, or pushing.
 
-For example, `npm run desktop:version -- 0.2.0` publishes the version commit and `v0.2.0` tag. The workflow then creates a public GitHub Release containing the Windows installer and updater metadata.
+For example, `npm run desktop:version -- 0.2.0` publishes the version commit and `v0.2.0` tag. The workflow then creates a public GitHub Release containing these x86_64 packages:
+
+- Windows: NSIS `.exe` installer.
+- Linux: portable `.AppImage` and Debian/Ubuntu `.deb` package.
+
+The release workflow builds Windows and Linux in parallel. After both builds finish, it publishes one signed `latest.json` containing `windows-x86_64` and `linux-x86_64`. The Linux auto-updater uses the signed AppImage; `.deb` remains available for manual installation and upgrades.
+
+To build the Linux packages locally on Ubuntu 22.04, install the native dependencies and run the Tauri build from the repository root:
+
+```bash
+sudo apt-get install libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf xdg-utils
+npm run tauri --workspace @inknote/desktop -- build --bundles appimage,deb
+```
 
 ### Desktop auto-updates
 
@@ -53,6 +65,6 @@ Add these GitHub repository secrets before publishing an auto-updatable release:
 
 Copy only the key value itself. Do not include labels such as `Public key:` or `Private key:`, quotes, Markdown code fences, spaces, or line breaks. Keep any trailing `=` padding characters. If GitHub Actions reports `Invalid padding`, regenerate the key and replace `TAURI_SIGNING_PRIVATE_KEY` with the exact private key value.
 
-During the release workflow, `scripts/configure-tauri-updater.mjs` injects the public key into the temporary CI copy of `tauri.conf.json` and enables updater artifact generation. The built application checks `https://github.com/Chty-syq/InkNote/releases/latest/download/latest.json`, downloads the signed NSIS update, installs it, and relaunches the app.
+During the release workflow, `scripts/configure-tauri-updater.mjs` injects the public key into the temporary CI copy of `tauri.conf.json` and enables updater artifact generation. The built application checks `https://github.com/Chty-syq/InkNote/releases/latest/download/latest.json`, selects the signed NSIS or AppImage update for its current platform, installs it, and relaunches the app.
 
 Only versions built after the updater integration can update themselves automatically. Older installed versions must be upgraded once manually from GitHub Releases.

@@ -3352,6 +3352,34 @@ fn remove_empty_parent_directories(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
+fn write_content_file_if_missing(path: &Path, contents: &str) -> Result<(), String> {
+    match OpenOptions::new().write(true).create_new(true).open(path) {
+        Ok(mut file) => file
+            .write_all(contents.as_bytes())
+            .map_err(|error| format!("failed to initialize {}: {error}", path.display())),
+        Err(error) if error.kind() == ErrorKind::AlreadyExists => Ok(()),
+        Err(error) => Err(format!("failed to initialize {}: {error}", path.display())),
+    }
+}
+
+fn ensure_content_workspace(content: &Path) -> Result<(), String> {
+    for directory in ["site", "markdown", "inknotes"] {
+        let path = content.join(directory);
+        fs::create_dir_all(&path)
+            .map_err(|error| format!("failed to create {}: {error}", path.display()))?;
+    }
+
+    for (relative_path, contents) in [
+        ("site/site.config.json", "{}\n"),
+        ("site/navigation.json", "[]\n"),
+        ("site/categories.json", "[]\n"),
+    ] {
+        write_content_file_if_missing(&content.join(relative_path), contents)?;
+    }
+
+    Ok(())
+}
+
 fn initialize_runtime_paths(app: &tauri::AppHandle) -> Result<(), String> {
     let source_workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../..")
@@ -3364,13 +3392,15 @@ fn initialize_runtime_paths(app: &tauri::AppHandle) -> Result<(), String> {
     let bundled_content = resource_directory.join("default-content");
     let bundled_web_shell = resource_directory.join("web-dist");
 
-    let (workspace_root, content_root) = if cfg!(debug_assertions)
-        && source_workspace
-            .as_ref()
-            .is_some_and(|root| root.join("content/site/site.config.json").is_file())
-    {
-        let workspace = source_workspace.clone().expect("checked source workspace");
+    let development_workspace = if cfg!(debug_assertions) {
+        source_workspace.clone()
+    } else {
+        None
+    };
+
+    let (workspace_root, content_root) = if let Some(workspace) = development_workspace {
         let content = workspace.join("content");
+        ensure_content_workspace(&content)?;
         (workspace, content)
     } else {
         let workspace = app
@@ -3380,13 +3410,11 @@ fn initialize_runtime_paths(app: &tauri::AppHandle) -> Result<(), String> {
             .join("workspace");
         let content = workspace.join("content");
         if !content.join("site/site.config.json").is_file() {
-            if !bundled_content.is_dir() {
-                return Err(
-                    "the installer does not contain the default content workspace".to_string(),
-                );
+            if bundled_content.is_dir() {
+                copy_directory_contents(&bundled_content, &content)?;
             }
-            copy_directory_contents(&bundled_content, &content)?;
         }
+        ensure_content_workspace(&content)?;
         let public_root = workspace.join("apps/web/public");
         fs::create_dir_all(&public_root)
             .map_err(|error| format!("failed to create local public asset directory: {error}"))?;
@@ -5487,6 +5515,47 @@ fn ensure_git_success(result: GitCommandResult, action: &str) -> Result<GitComma
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn initializes_an_empty_content_workspace() {
+        let directory = TemporaryPublishDirectory::create().unwrap();
+        let content = directory.path().join("content");
+
+        ensure_content_workspace(&content).unwrap();
+
+        assert!(content.join("markdown").is_dir());
+        assert!(content.join("inknotes").is_dir());
+        assert_eq!(
+            read_json_value(&content.join("site/site.config.json")).unwrap(),
+            serde_json::json!({})
+        );
+        assert_eq!(
+            read_json_value(&content.join("site/navigation.json")).unwrap(),
+            serde_json::json!([])
+        );
+        assert_eq!(
+            read_json_value(&content.join("site/categories.json")).unwrap(),
+            serde_json::json!([])
+        );
+    }
+
+    #[test]
+    fn content_workspace_initialization_preserves_existing_files() {
+        let directory = TemporaryPublishDirectory::create().unwrap();
+        let content = directory.path().join("content");
+        let site = content.join("site");
+        fs::create_dir_all(&site).unwrap();
+        fs::write(site.join("site.config.json"), "{\"title\":\"Existing\"}\n").unwrap();
+
+        ensure_content_workspace(&content).unwrap();
+
+        assert_eq!(
+            read_json_value(&site.join("site.config.json")).unwrap(),
+            serde_json::json!({ "title": "Existing" })
+        );
+        assert!(site.join("navigation.json").is_file());
+        assert!(site.join("categories.json").is_file());
+    }
 
     #[cfg(target_os = "windows")]
     #[test]
