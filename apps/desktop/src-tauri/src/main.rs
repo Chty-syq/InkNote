@@ -41,6 +41,8 @@ const CONTENT_SYNC_LOCK_STALE_AFTER: Duration = Duration::from_secs(6 * 60 * 60)
 const CONTENT_SOURCE_ROOTS: &[&str] = &["content", "apps/web/public"];
 const CONTENT_BRANCH_WORKFLOW_PATH: &str = ".github/workflows/deploy-web.yml";
 const CONTENT_BRANCH_WORKFLOW: &str = include_str!("../../../../.github/workflows/deploy-web.yml");
+const GIT_AUTHOR_NAME: &str = "InkNote Publisher";
+const GIT_AUTHOR_EMAIL: &str = "inknote-publisher@localhost";
 
 static WORKSPACE_ROOT: OnceLock<PathBuf> = OnceLock::new();
 static CONTENT_ROOT: OnceLock<PathBuf> = OnceLock::new();
@@ -1240,14 +1242,11 @@ fn sync_content_source_branch(
     );
 
     ensure_git_success(
-        run_git_in(source_root, &["config", "user.name", "InkNote Publisher"])?,
+        run_git_in(source_root, &["config", "user.name", GIT_AUTHOR_NAME])?,
         "configure content source Git author",
     )?;
     ensure_git_success(
-        run_git_in(
-            source_root,
-            &["config", "user.email", "inknote-publisher@localhost"],
-        )?,
+        run_git_in(source_root, &["config", "user.email", GIT_AUTHOR_EMAIL])?,
         "configure content source Git author email",
     )?;
     ensure_git_success(
@@ -1648,14 +1647,11 @@ fn content_git_repository_matches(
 
 fn configure_content_git_author(repo_root: &Path) -> Result<(), String> {
     ensure_git_success(
-        run_git_in(repo_root, &["config", "user.name", "InkNote Publisher"])?,
+        run_git_in(repo_root, &["config", "user.name", GIT_AUTHOR_NAME])?,
         "configure content git author",
     )?;
     ensure_git_success(
-        run_git_in(
-            repo_root,
-            &["config", "user.email", "inknote-publisher@localhost"],
-        )?,
+        run_git_in(repo_root, &["config", "user.email", GIT_AUTHOR_EMAIL])?,
         "configure content git author email",
     )?;
     Ok(())
@@ -3020,14 +3016,11 @@ fn publish_prepared_worktree(
         "success",
     );
     ensure_git_success(
-        run_git_in(publish_root, &["config", "user.name", "InkNote Publisher"])?,
+        run_git_in(publish_root, &["config", "user.name", GIT_AUTHOR_NAME])?,
         "configure Git author",
     )?;
     ensure_git_success(
-        run_git_in(
-            publish_root,
-            &["config", "user.email", "inknote-publisher@localhost"],
-        )?,
+        run_git_in(publish_root, &["config", "user.email", GIT_AUTHOR_EMAIL])?,
         "configure Git author email",
     )?;
     reporter.emit(
@@ -5138,6 +5131,14 @@ fn run_git_in(directory: &Path, args: &[&str]) -> Result<GitCommandResult, Strin
     run_git_in_with_ssh(directory, args, None)
 }
 
+fn apply_git_process_identity(command: &mut Command) {
+    command
+        .env("GIT_AUTHOR_NAME", GIT_AUTHOR_NAME)
+        .env("GIT_AUTHOR_EMAIL", GIT_AUTHOR_EMAIL)
+        .env("GIT_COMMITTER_NAME", GIT_AUTHOR_NAME)
+        .env("GIT_COMMITTER_EMAIL", GIT_AUTHOR_EMAIL);
+}
+
 fn run_git_in_with_ssh(
     directory: &Path,
     args: &[&str],
@@ -5149,6 +5150,7 @@ fn run_git_in_with_ssh(
         .current_dir(directory)
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GCM_INTERACTIVE", "Never");
+    apply_git_process_identity(&mut command);
     apply_git_system_proxy_env(&mut command);
     if let Some(ssh_command) = ssh_command {
         command.env("GIT_SSH_COMMAND", ssh_command);
@@ -5185,6 +5187,7 @@ where
         .env("GCM_INTERACTIVE", "Never")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    apply_git_process_identity(&mut command);
     apply_git_system_proxy_env(&mut command);
     if let Some(ssh_command) = ssh_command {
         command.env("GIT_SSH_COMMAND", ssh_command);
