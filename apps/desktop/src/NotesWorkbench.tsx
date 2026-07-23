@@ -6688,36 +6688,40 @@ export default function NotesWorkbench() {
       return;
     }
 
+    if (draft.type !== 'markdown') {
+      setStatus('当前仅支持将 Markdown 笔记导出为 PDF。');
+      return;
+    }
+
     if (!isTauri()) {
       setStatus('导出笔记需要在 Tauri 桌面端中执行。');
       return;
     }
 
-    const chosenPath = await chooseFileToSave(`${draft.slug || 'note'}.md`);
+    const chosenPath = await chooseFileToSave(`${draft.slug || 'note'}.pdf`);
     if (!chosenPath) {
       setStatus('已取消导出。');
       return;
     }
 
-    const markdownPath = ensureExtension(chosenPath, '.md');
+    const pdfPath = ensureExtension(chosenPath, '.pdf');
+    setIsBusy(true);
+    setStatus('正在生成 PDF...');
 
     try {
-      const exportableDraft = patchDraft(draft, { updatedAt: getTimestampValue() });
-      await writeTextFile(markdownPath, serializeContentDraft(exportableDraft));
-
-      if (exportableDraft.type === 'inknote') {
-        const linkedProject = linkedNotebook ?? createLinkedNotebookProject(exportableDraft, linkedNotebookRef.current);
-        const notebookExportPath = markdownPath.replace(/\.md$/i, '.inknote.json');
-        await writeTextFile(notebookExportPath, serializeProject(linkedProject));
-        appendHistoryEntry('Exported note', exportableDraft.title);
-        setStatus(`已导出 Markdown 和手写笔记工程到 ${markdownPath}`);
-        return;
-      }
-
-      appendHistoryEntry('Exported note', exportableDraft.title);
-      setStatus(`已导出笔记到 ${markdownPath}`);
+      const { renderMarkdownPdf } = await import('./lib/markdown-pdf-export');
+      const pdfBytes = await renderMarkdownPdf({
+        title: draft.title.trim() || '未命名笔记',
+        markdown: resolveDesktopContentImages(draft.body, libraryRoot, localBlogPreviewOrigin),
+      });
+      await writeBinaryFile(pdfPath, pdfBytes);
+      appendHistoryEntry('Exported note', draft.title);
+      setStatus(`PDF 已导出到 ${pdfPath}`);
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : '导出笔记失败。');
+      const message = error instanceof Error ? error.message : '未知错误';
+      setStatus(`导出 PDF 失败：${message}`);
+    } finally {
+      setIsBusy(false);
     }
   };
 
