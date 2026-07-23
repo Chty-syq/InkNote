@@ -177,6 +177,10 @@ export async function deleteContentFile(path: string): Promise<void> {
   await invoke('delete_content_path', { path });
 }
 
+export async function clearLocalContentWorkspace(): Promise<number> {
+  return invoke('clear_local_content_workspace');
+}
+
 export async function deleteGalleryImageFile(publicPath: string): Promise<void> {
   await invoke('delete_gallery_image_file', { publicPath });
 }

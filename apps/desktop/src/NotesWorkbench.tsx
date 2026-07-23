@@ -102,6 +102,7 @@ import {
   chooseGalleryImageFiles,
   chooseSlidesFile,
   cacheExternalImage,
+  clearLocalContentWorkspace,
   compressGalleryImageFile,
   copyFileToPath,
   deleteContentFile,
@@ -2556,6 +2557,8 @@ export default function NotesWorkbench() {
   const [isPublishingSite, setIsPublishingSite] = useState(false);
   const [isTestingRemote, setIsTestingRemote] = useState(false);
   const [isPublishDialogOpen, setIsPublishDialogOpen] = useState(false);
+  const [isClearLocalContentDialogOpen, setIsClearLocalContentDialogOpen] = useState(false);
+  const [isClearingLocalContent, setIsClearingLocalContent] = useState(false);
   const [publishProgress, setPublishProgress] = useState(0);
   const [publishRunState, setPublishRunState] = useState<PublishRunState>('idle');
   const [publishLogs, setPublishLogs] = useState<PublishLogEntry[]>([]);
@@ -4558,6 +4561,7 @@ export default function NotesWorkbench() {
         allowRiskyContentSync,
         verifyAfterPush: false,
       });
+      const initializedFromRemote = result.stdout.includes('首次同步已从远端克隆');
 
       draftCacheRef.current.clear();
       cleanDraftsRef.current = new WeakSet();
@@ -4570,9 +4574,9 @@ export default function NotesWorkbench() {
       appendHistoryEntry('Synced site', message);
       recordManualProgress(
         84,
-        'push',
-        '内容已推送',
-        result.stdout || `内容分支 ${contentBranch} 已更新。`,
+        initializedFromRemote ? 'pull' : 'push',
+        initializedFromRemote ? '远端内容已拉取' : '内容已推送',
+        result.stdout || (initializedFromRemote ? '远端内容已写入本地。' : `内容分支 ${contentBranch} 已更新。`),
         'success',
       );
 
@@ -4593,10 +4597,16 @@ export default function NotesWorkbench() {
         100,
         'done',
         '同步完成',
-        '内容分支已推送。远端构建与 Pages 发布将由仓库工作流继续处理。',
+        initializedFromRemote
+          ? '首次同步完成，远端内容已写入本地内容库。'
+          : '内容分支已推送。远端构建与 Pages 发布将由仓库工作流继续处理。',
         'success',
       );
-      setStatus('内容已同步并推送，远端构建会自动继续。');
+      setStatus(
+        initializedFromRemote
+          ? '远端内容已同步到本地。'
+          : '内容已同步并推送，远端构建会自动继续。',
+      );
     } catch (error) {
       const detail = error instanceof Error ? error.message : typeof error === 'string' ? error : String(error);
       const conflicts = parseContentSyncConflictError(detail);
@@ -5571,6 +5581,40 @@ export default function NotesWorkbench() {
     const nextSelectedItem = rewrittenByPath.get(draft.sourceRelativePath);
     if (nextSelectedItem) {
       activateDraft(getDraftFromItem(nextSelectedItem));
+    }
+  };
+
+  const clearLocalContent = async () => {
+    if (!isTauri() || isClearingLocalContent || isPublishingSite || isPullingContent) {
+      return;
+    }
+
+    setIsClearingLocalContent(true);
+    try {
+      const removedCount = await clearLocalContentWorkspace();
+      draftCacheRef.current.clear();
+      cleanDraftsRef.current = new WeakSet();
+      clearLinkedNotebookState();
+      activateDraft(null);
+      setCategories([]);
+      setItems([]);
+      setSelectedCategorySlug(null);
+      setGalleryImages([]);
+      setGalleryAssignments({});
+      setSelectedGalleryImageKeys([]);
+      setGalleryPage(1);
+      setManagedImagePage(1);
+      setPublishLogs([]);
+      setPublishProgress(0);
+      setPublishRunState('idle');
+      await loadSiteConfig();
+      await loadLibrary(undefined, true);
+      setIsClearLocalContentDialogOpen(false);
+      setStatus(`本地内容已清空，共移除 ${removedCount} 个文件；远端仓库未受影响。`);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : '清空本地内容失败。');
+    } finally {
+      setIsClearingLocalContent(false);
     }
   };
 
@@ -8929,6 +8973,58 @@ export default function NotesWorkbench() {
         </div>
       ) : null}
 
+      {isClearLocalContentDialogOpen ? (
+        <div
+          className="notes-dialog-overlay notes-clear-local-overlay"
+          onClick={() => {
+            if (!isClearingLocalContent) {
+              setIsClearLocalContentDialogOpen(false);
+            }
+          }}
+        >
+          <section
+            className="notes-unsaved-dialog notes-delete-dialog notes-clear-local-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="notes-clear-local-dialog-title"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="notes-unsaved-dialog-header">
+              <h2 id="notes-clear-local-dialog-title">确认清空本地内容</h2>
+              <p>此操作不可撤销，但不会删除远端仓库中的任何内容。</p>
+            </div>
+
+            <div className="notes-unsaved-dialog-body">
+              <span className="notes-unsaved-dialog-target">
+                将清空本地文章、InkNote 工程、图片、PDF、图库和同步基线。
+              </span>
+              <p className="notes-clear-local-note">
+                远程仓库绑定会被保留。清空后再次同步，将从远端重新克隆全部内容。
+              </p>
+            </div>
+
+            <div className="notes-unsaved-dialog-actions">
+              <button
+                type="button"
+                className="notes-unsaved-dialog-cancel"
+                onClick={() => setIsClearLocalContentDialogOpen(false)}
+                disabled={isClearingLocalContent}
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                className="notes-unsaved-dialog-danger"
+                onClick={() => void clearLocalContent()}
+                disabled={isClearingLocalContent}
+              >
+                {isClearingLocalContent ? '正在清空...' : '确认清空'}
+              </button>
+            </div>
+          </section>
+        </div>
+      ) : null}
+
       {contentSyncConflictDialog ? (
         <div className="notes-dialog-overlay notes-content-conflict-overlay" onClick={() => setContentSyncConflictDialog(null)}>
           <section
@@ -9977,6 +10073,16 @@ export default function NotesWorkbench() {
                       <footer className="notes-settings-sync-actions">
                         <button
                           type="button"
+                          className="notes-settings-danger"
+                          onClick={() => setIsClearLocalContentDialogOpen(true)}
+                          disabled={isClearingLocalContent || isPublishingSite || isPullingContent || isBusy}
+                        >
+                          <IconTrash aria-hidden="true" />
+                          清空本地
+                        </button>
+                        <div className="notes-settings-sync-main-actions">
+                        <button
+                          type="button"
                           className="notes-settings-secondary"
                           onClick={() => void refreshPublishStatus()}
                           disabled={
@@ -10017,6 +10123,7 @@ export default function NotesWorkbench() {
                               ? '开始同步'
                               : '重新同步'}
                         </button>
+                        </div>
                       </footer>
                     </article>
                   </section>

@@ -4413,9 +4413,15 @@ input[type='range']::-moz-range-thumb {
 }
 
 .notes-settings-sync-actions {
-  justify-content: flex-end;
+  justify-content: space-between;
   border-top: 1px solid #e7ecf1;
   padding-top: 0.72rem;
+}
+
+.notes-settings-sync-main-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
 }
 
 .notes-settings-sync-actions button {
@@ -5460,6 +5466,25 @@ input[type='range']::-moz-range-thumb {
 
 .notes-gallery-delete-dialog {
   max-width: 460px;
+}
+
+.notes-clear-local-dialog {
+  max-width: 460px;
+}
+
+.notes-clear-local-overlay {
+  z-index: 120;
+}
+
+.notes-clear-local-note {
+  margin: 0;
+  padding: 0.62rem 0.7rem;
+  border: 1px solid #ead3d3;
+  border-radius: 7px;
+  background: #fff8f8;
+  color: #7d4a4e;
+  font-size: 0.78rem;
+  line-height: 1.6;
 }
 
 .notes-gallery-delete-impact {

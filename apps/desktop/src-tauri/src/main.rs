@@ -584,6 +584,49 @@ fn delete_content_path(path: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn clear_local_content_workspace() -> Result<usize, String> {
+    let _sync_lock = acquire_content_sync_lock("clear-local-content")?;
+    let workspace_root = get_workspace_root()?;
+    let local_files = collect_content_source_files(&workspace_root)?;
+    let site_config_path = workspace_root.join("content/site/site.config.json");
+    let site_config = if site_config_path.is_file() {
+        Some(
+            fs::read(&site_config_path)
+                .map_err(|error| format!("failed to preserve local site config: {error}"))?,
+        )
+    } else {
+        None
+    };
+
+    for source_root in CONTENT_SOURCE_ROOTS {
+        let target = join_safe_relative_path(&workspace_root, source_root)?;
+        if target.exists() {
+            clear_path(&target)?;
+        }
+    }
+
+    if let Some(site_config) = site_config {
+        if let Some(parent) = site_config_path.parent() {
+            fs::create_dir_all(parent).map_err(|error| {
+                format!("failed to restore local site config directory: {error}")
+            })?;
+        }
+        fs::write(&site_config_path, site_config)
+            .map_err(|error| format!("failed to restore local site config: {error}"))?;
+    }
+
+    for sync_path in [content_git_repository_root()?, content_sync_cache_root()?] {
+        if sync_path.exists() {
+            clear_path(&sync_path)?;
+        }
+    }
+
+    Ok(local_files
+        .len()
+        .saturating_sub(usize::from(site_config_path.is_file())))
+}
+
+#[tauri::command]
 async fn fetch_friend_link_icon(page_url: String) -> Result<favicon::FriendLinkIconResult, String> {
     favicon::fetch_and_cache(page_url).await
 }
@@ -858,7 +901,7 @@ fn sync_content_changes_inner(
         format!("内容分支：{content_branch}"),
         "info",
     );
-    let content_result = sync_content_git_branch(
+    let (content_result, initialized_from_remote) = sync_content_git_branch(
         &remote,
         &content_branch,
         ssh_command.as_deref(),
@@ -870,22 +913,36 @@ fn sync_content_changes_inner(
         reporter,
     )?;
 
-    reporter.emit(
-        82,
-        "workflow",
-        "内容分支已更新",
-        "远端工作流将构建 Web 并通过 Pages artifact 发布。",
-        "success",
-    );
+    if initialized_from_remote {
+        reporter.emit(
+            82,
+            "content",
+            "本地内容已初始化",
+            "远端内容已克隆并写入本地内容库。",
+            "success",
+        );
+    } else {
+        reporter.emit(
+            82,
+            "workflow",
+            "内容分支已更新",
+            "远端工作流将构建 Web 并通过 Pages artifact 发布。",
+            "success",
+        );
+    }
 
     Ok(GitCommandResult {
         success: content_result.success,
-        stdout: format!(
-            "{}\n远端工作流将构建 Web 并通过 Pages artifact 发布。",
-            content_result.stdout.trim()
-        )
-        .trim()
-        .to_string(),
+        stdout: if initialized_from_remote {
+            content_result.stdout.trim().to_string()
+        } else {
+            format!(
+                "{}\n远端工作流将构建 Web 并通过 Pages artifact 发布。",
+                content_result.stdout.trim()
+            )
+            .trim()
+            .to_string()
+        },
         stderr: content_result.stderr,
     })
 }
@@ -1319,9 +1376,21 @@ fn sync_content_git_branch(
     commit_message: &str,
     allow_risky_content_sync: bool,
     reporter: &PublishProgressReporter,
-) -> Result<GitCommandResult, String> {
-    let repo_root =
+) -> Result<(GitCommandResult, bool), String> {
+    let (repo_root, initialized_from_remote) =
         ensure_content_git_repository(remote, content_branch, ssh_command, status, reporter)?;
+
+    if initialized_from_remote {
+        sync_content_git_repo_back_to_workspace(&repo_root, reporter)?;
+        return Ok((
+            GitCommandResult {
+                success: true,
+                stdout: format!("首次同步已从远端克隆内容分支 {content_branch}。"),
+                stderr: String::new(),
+            },
+            true,
+        ));
+    }
 
     if has_git_merge_in_progress(&repo_root) {
         resolve_content_git_merge(
@@ -1367,11 +1436,14 @@ fn sync_content_git_branch(
         reporter,
     )?;
 
-    Ok(GitCommandResult {
-        success: push_result.success,
-        stdout: format!("内容分支 {content_branch} 已通过 Git 同步。"),
-        stderr: push_result.stderr,
-    })
+    Ok((
+        GitCommandResult {
+            success: push_result.success,
+            stdout: format!("内容分支 {content_branch} 已通过 Git 同步。"),
+            stderr: push_result.stderr,
+        },
+        false,
+    ))
 }
 
 fn ensure_content_git_repository(
@@ -1380,7 +1452,7 @@ fn ensure_content_git_repository(
     ssh_command: Option<&str>,
     status: &PublishStatus,
     reporter: &PublishProgressReporter,
-) -> Result<PathBuf, String> {
+) -> Result<(PathBuf, bool), String> {
     let repo_root = content_git_repository_root()?;
     fs::create_dir_all(&repo_root)
         .map_err(|error| format!("failed to create content git repository: {error}"))?;
@@ -1398,6 +1470,51 @@ fn ensure_content_git_repository(
         clear_path(&repo_root)?;
         fs::create_dir_all(&repo_root)
             .map_err(|error| format!("failed to recreate content git repository: {error}"))?;
+    }
+
+    if !repo_root.join(".git").exists() && status.branch_exists {
+        clear_path(&repo_root)?;
+        fs::create_dir_all(&repo_root)
+            .map_err(|error| format!("failed to prepare content clone directory: {error}"))?;
+        reporter.emit(
+            22,
+            "fetch",
+            "正在克隆远端内容仓库",
+            format!("内容分支：{content_branch}"),
+            "info",
+        );
+        let mut last_clone_percent = None;
+        ensure_git_success(
+            run_git_in_with_ssh_progress(
+                &repo_root,
+                &[
+                    "clone",
+                    "--progress",
+                    "--depth=1",
+                    "--single-branch",
+                    "--branch",
+                    content_branch,
+                    remote,
+                    ".",
+                ],
+                ssh_command,
+                |line| {
+                    emit_git_transfer_progress(
+                        reporter,
+                        22,
+                        12,
+                        "fetch",
+                        "正在克隆远端内容仓库",
+                        line,
+                        &mut last_clone_percent,
+                    );
+                },
+            )?,
+            "clone initial content branch",
+        )?;
+        configure_content_git_remote(&repo_root, remote, ssh_command)?;
+        configure_content_git_author(&repo_root)?;
+        return Ok((repo_root, true));
     }
 
     if !repo_root.join(".git").exists() {
@@ -1418,9 +1535,10 @@ fn ensure_content_git_repository(
     configure_content_git_author(&repo_root)?;
 
     if has_git_merge_in_progress(&repo_root) {
-        return Ok(repo_root);
+        return Ok((repo_root, false));
     }
 
+    let mut initialized_from_remote = false;
     if !has_git_head(&repo_root)? {
         if status.branch_exists {
             let remote_ref = format!("refs/heads/{content_branch}");
@@ -1458,6 +1576,7 @@ fn ensure_content_git_repository(
                 )?,
                 "checkout initial content branch",
             )?;
+            initialized_from_remote = true;
         } else {
             reporter.emit(
                 24,
@@ -1478,7 +1597,7 @@ fn ensure_content_git_repository(
         )?;
     }
 
-    Ok(repo_root)
+    Ok((repo_root, initialized_from_remote))
 }
 
 fn configure_content_git_remote(
@@ -5792,6 +5911,7 @@ fn main() {
             read_content_file,
             write_content_file,
             delete_content_path,
+            clear_local_content_workspace,
             fetch_friend_link_icon,
             favicon::cache_external_image,
             get_publish_status,
