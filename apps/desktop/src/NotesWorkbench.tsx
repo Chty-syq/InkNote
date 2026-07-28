@@ -116,6 +116,7 @@ import {
   getPublishStatus,
   isTauri,
   listenToContentSyncProgress,
+  listenToContentSyncPreview,
   listenToDesktopUpdateProgress,
   listenToPublishProgress,
   openExternalUrl,
@@ -123,12 +124,15 @@ import {
   pullRemoteContent,
   readContentFile,
   readTextFile,
+  resolveContentSyncPreview,
   syncContentChanges,
   writeBinaryFile,
   writeContentFile,
   writeTextFile,
   type PublishProgressEvent,
   type PublishStatusResponse,
+  type ContentSyncArticleChange,
+  type ContentSyncPreviewEvent,
 } from './lib/platform';
 
 type WorkspacePanel = 'write' | 'inknote';
@@ -152,6 +156,10 @@ interface ContentSyncConflictDialogState {
   conflicts: ContentSyncConflictItem[];
   source: 'sync' | 'pull';
   resolutions: Partial<ContentSyncConflictResolutions>;
+}
+
+interface ContentSyncPreviewDialogState extends ContentSyncPreviewEvent {
+  isSubmitting: boolean;
 }
 
 type ConflictDiffSide = 'local' | 'remote';
@@ -2535,6 +2543,60 @@ function FriendLinkAvatar({
   );
 }
 
+const CONTENT_SYNC_CHANGE_LABELS: Record<ContentSyncArticleChange['changeType'], string> = {
+  added: '新增',
+  deleted: '删除',
+  modified: '修改',
+};
+
+function ContentSyncChangeColumn({
+  title,
+  description,
+  changes,
+}: {
+  title: string;
+  description: string;
+  changes: ContentSyncArticleChange[];
+}) {
+  const count = (changeType: ContentSyncArticleChange['changeType']) =>
+    changes.filter((change) => change.changeType === changeType).length;
+
+  return (
+    <section className="notes-content-sync-preview-column">
+      <header>
+        <div>
+          <strong>{title}</strong>
+          <span>{description}</span>
+        </div>
+        <em>{changes.length} 项</em>
+      </header>
+      <div className="notes-content-sync-preview-counts">
+        <span className="added">新增 {count('added')}</span>
+        <span className="deleted">删除 {count('deleted')}</span>
+        <span className="modified">修改 {count('modified')}</span>
+      </div>
+      <div className="notes-content-sync-preview-list">
+        {changes.length ? (
+          changes.map((change) => (
+            <article key={`${change.changeType}-${change.path}`}>
+              <span className={`notes-content-sync-change-type ${change.changeType}`}>
+                {CONTENT_SYNC_CHANGE_LABELS[change.changeType]}
+              </span>
+              <div>
+                <strong>{change.title}</strong>
+                <small>{change.path}</small>
+              </div>
+              <em>{change.noteType}</em>
+            </article>
+          ))
+        ) : (
+          <div className="notes-content-sync-preview-empty">没有文章变更</div>
+        )}
+      </div>
+    </section>
+  );
+}
+
 export default function NotesWorkbench() {
   const [libraryRoot, setLibraryRoot] = useState('content');
   const [categories, setCategories] = useState<ContentCategory[]>([]);
@@ -2569,6 +2631,8 @@ export default function NotesWorkbench() {
   const [pullLogs, setPullLogs] = useState<PublishLogEntry[]>([]);
   const [contentSyncConflictDialog, setContentSyncConflictDialog] =
     useState<ContentSyncConflictDialogState | null>(null);
+  const [contentSyncPreviewDialog, setContentSyncPreviewDialog] =
+    useState<ContentSyncPreviewDialogState | null>(null);
   const [desktopVersion, setDesktopVersion] = useState(DESKTOP_FALLBACK_VERSION);
   const [desktopUpdateState, setDesktopUpdateState] = useState<DesktopUpdateState>('idle');
   const [desktopUpdateMessage, setDesktopUpdateMessage] = useState('\u5c1a\u672a\u68c0\u67e5\u66f4\u65b0');
@@ -4458,12 +4522,26 @@ export default function NotesWorkbench() {
     setIsPullingContent(true);
     setIsPublishingSite(true);
     let stopPublishListening: (() => void) | null = null;
+    let stopContentSyncPreviewListening: (() => void) | null = null;
 
     try {
       stopPublishListening = await listenToPublishProgress((event) => {
         if (event.taskId === taskId) {
           upsertPublishFlowEntry(event);
         }
+      });
+      stopContentSyncPreviewListening = await listenToContentSyncPreview((event) => {
+        if (event.taskId !== taskId) {
+          return;
+        }
+        setContentSyncPreviewDialog({ ...event, isSubmitting: false });
+        recordManualProgress(
+          61,
+          'preview',
+          '等待确认同步变更',
+          `本地 ${event.localChanges.length} 项，远端 ${event.remoteChanges.length} 项。`,
+          'warning',
+        );
       });
 
       if (isResolvingConflicts) {
@@ -4609,6 +4687,17 @@ export default function NotesWorkbench() {
       );
     } catch (error) {
       const detail = error instanceof Error ? error.message : typeof error === 'string' ? error : String(error);
+      if (detail.includes('CONTENT_SYNC_CANCELLED')) {
+        setStatus('已取消站点同步，本地和远端内容均未更改。');
+        recordManualProgress(
+          currentProgress,
+          'cancelled',
+          '同步已取消',
+          '本地和远端内容均未更改。',
+          'warning',
+        );
+        return;
+      }
       const conflicts = parseContentSyncConflictError(detail);
       if (conflicts) {
         setContentSyncConflictDialog({
@@ -4655,6 +4744,8 @@ export default function NotesWorkbench() {
       );
     } finally {
       stopPublishListening?.();
+      stopContentSyncPreviewListening?.();
+      setContentSyncPreviewDialog((current) => (current?.taskId === taskId ? null : current));
       setIsPullingContent(false);
       setIsPublishingSite(false);
     }
@@ -4676,6 +4767,29 @@ export default function NotesWorkbench() {
       void pullRemoteContentToLocal('manual', resolutions);
     } else {
       void syncSiteChanges('manual', resolutions);
+    }
+  };
+
+  const submitContentSyncPreviewDecision = async (confirmed: boolean) => {
+    const preview = contentSyncPreviewDialog;
+    if (!preview || preview.isSubmitting) {
+      return;
+    }
+
+    setContentSyncPreviewDialog({ ...preview, isSubmitting: true });
+    try {
+      await resolveContentSyncPreview(preview.taskId, confirmed);
+      setContentSyncPreviewDialog(null);
+      setStatus(
+        confirmed
+          ? '已确认同步变更，正在继续写入并推送。'
+          : '正在取消同步，本地和远端内容不会更改。',
+      );
+    } catch (error) {
+      setContentSyncPreviewDialog((current) =>
+        current?.taskId === preview.taskId ? { ...current, isSubmitting: false } : current,
+      );
+      setStatus(formatUnknownError(error) || '提交同步确认失败。');
     }
   };
 
@@ -9023,6 +9137,55 @@ export default function NotesWorkbench() {
                 disabled={isClearingLocalContent}
               >
                 {isClearingLocalContent ? '正在清空...' : '确认清空'}
+              </button>
+            </div>
+          </section>
+        </div>
+      ) : null}
+
+      {contentSyncPreviewDialog ? (
+        <div className="notes-dialog-overlay notes-content-sync-preview-overlay">
+          <section
+            className="notes-unsaved-dialog notes-content-sync-preview-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="notes-content-sync-preview-title"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="notes-unsaved-dialog-header">
+              <h2 id="notes-content-sync-preview-title">确认同步变更</h2>
+              <p>以下是确认后将应用的文章变化。资源文件会随文章一同同步，但不在此列表中重复展示。</p>
+            </div>
+
+            <div className="notes-content-sync-preview-grid">
+              <ContentSyncChangeColumn
+                title="本地内容"
+                description="同步结果写入本地后"
+                changes={contentSyncPreviewDialog.localChanges}
+              />
+              <ContentSyncChangeColumn
+                title="远端内容"
+                description="同步结果推送远端后"
+                changes={contentSyncPreviewDialog.remoteChanges}
+              />
+            </div>
+
+            <div className="notes-unsaved-dialog-actions">
+              <button
+                type="button"
+                className="notes-unsaved-dialog-cancel"
+                onClick={() => void submitContentSyncPreviewDecision(false)}
+                disabled={contentSyncPreviewDialog.isSubmitting}
+              >
+                取消同步
+              </button>
+              <button
+                type="button"
+                className="notes-unsaved-dialog-primary"
+                onClick={() => void submitContentSyncPreviewDecision(true)}
+                disabled={contentSyncPreviewDialog.isSubmitting}
+              >
+                {contentSyncPreviewDialog.isSubmitting ? '处理中...' : '确定并继续'}
               </button>
             </div>
           </section>

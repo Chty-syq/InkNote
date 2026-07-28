@@ -72,6 +72,19 @@ export interface PublishProgressEvent {
   level: PublishProgressLevel;
 }
 
+export interface ContentSyncArticleChange {
+  path: string;
+  title: string;
+  noteType: 'Markdown' | 'InkNote';
+  changeType: 'added' | 'deleted' | 'modified';
+}
+
+export interface ContentSyncPreviewEvent {
+  taskId: string;
+  localChanges: ContentSyncArticleChange[];
+  remoteChanges: ContentSyncArticleChange[];
+}
+
 export interface BlogPreviewServerResponse {
   origin: string;
   port: number;
@@ -217,6 +230,10 @@ export async function syncContentChanges(request: SyncSiteRequest): Promise<GitC
   return invoke('sync_content_changes', { request });
 }
 
+export async function resolveContentSyncPreview(taskId: string, confirmed: boolean): Promise<void> {
+  await invoke('resolve_content_sync_preview', { taskId, confirmed });
+}
+
 export async function listenToPublishProgress(
   handler: (event: PublishProgressEvent) => void,
 ): Promise<UnlistenFn> {
@@ -227,6 +244,12 @@ export async function listenToContentSyncProgress(
   handler: (event: PublishProgressEvent) => void,
 ): Promise<UnlistenFn> {
   return listen<PublishProgressEvent>('content-sync-progress', (event) => handler(event.payload));
+}
+
+export async function listenToContentSyncPreview(
+  handler: (event: ContentSyncPreviewEvent) => void,
+): Promise<UnlistenFn> {
+  return listen<ContentSyncPreviewEvent>('content-sync-preview', (event) => handler(event.payload));
 }
 
 export async function listenToDesktopUpdateProgress(

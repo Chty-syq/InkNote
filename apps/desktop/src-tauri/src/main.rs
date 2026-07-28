@@ -4,6 +4,8 @@ mod favicon;
 
 use image::{codecs::jpeg::JpegEncoder, imageops::FilterType, GenericImageView};
 use serde::{Deserialize, Serialize};
+#[cfg(test)]
+use std::collections::BTreeSet;
 use std::{
     collections::BTreeMap,
     fs::{self, OpenOptions},
@@ -38,6 +40,9 @@ const CONTENT_SYNC_CACHE_DIR: &str = ".inknote-sync/content-source";
 const CONTENT_GIT_REPOSITORY_DIR: &str = ".inknote-sync/repository";
 const CONTENT_SYNC_LOCK_PATH: &str = ".inknote-sync/sync.lock";
 const CONTENT_SYNC_LOCK_STALE_AFTER: Duration = Duration::from_secs(6 * 60 * 60);
+const CONTENT_SYNC_PREVIEW_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+const CONTENT_SYNC_CANCELLED: &str = "CONTENT_SYNC_CANCELLED";
+const EMPTY_GIT_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 const CONTENT_SOURCE_ROOTS: &[&str] = &["content", "apps/web/public"];
 const CONTENT_BRANCH_WORKFLOW_PATH: &str = ".github/workflows/deploy-web.yml";
 const CONTENT_BRANCH_WORKFLOW: &str = include_str!("../../../../.github/workflows/deploy-web.yml");
@@ -47,6 +52,8 @@ const GIT_AUTHOR_EMAIL: &str = "inknote-publisher@localhost";
 static WORKSPACE_ROOT: OnceLock<PathBuf> = OnceLock::new();
 static CONTENT_ROOT: OnceLock<PathBuf> = OnceLock::new();
 static WEB_SHELL_ROOT: OnceLock<PathBuf> = OnceLock::new();
+static CONTENT_SYNC_PREVIEW_DECISIONS: OnceLock<Mutex<BTreeMap<String, mpsc::Sender<bool>>>> =
+    OnceLock::new();
 
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
@@ -175,6 +182,23 @@ struct PublishProgressEvent {
     message: String,
     detail: String,
     level: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ContentSyncArticleChange {
+    path: String,
+    title: String,
+    note_type: String,
+    change_type: String,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ContentSyncPreviewEvent {
+    task_id: String,
+    local_changes: Vec<ContentSyncArticleChange>,
+    remote_changes: Vec<ContentSyncArticleChange>,
 }
 
 struct PublishProgressReporter {
@@ -822,6 +846,19 @@ async fn sync_content_changes(
         .map_err(|error| format!("站点同步任务线程异常结束：{error}"))?
 }
 
+#[tauri::command]
+fn resolve_content_sync_preview(task_id: String, confirmed: bool) -> Result<(), String> {
+    let sender = CONTENT_SYNC_PREVIEW_DECISIONS
+        .get_or_init(|| Mutex::new(BTreeMap::new()))
+        .lock()
+        .map_err(|_| "同步确认状态不可用。".to_string())?
+        .remove(task_id.trim())
+        .ok_or_else(|| "同步确认已失效，请重新开始同步。".to_string())?;
+    sender
+        .send(confirmed)
+        .map_err(|_| "同步任务已结束，无法提交确认结果。".to_string())
+}
+
 fn sync_content_changes_blocking(
     app: tauri::AppHandle,
     request: SyncSiteRequest,
@@ -848,6 +885,13 @@ fn sync_content_changes_blocking(
             "同步完成",
             concise_git_result_detail(output, "远端站点已更新。"),
             "success",
+        ),
+        Err(error) if error == CONTENT_SYNC_CANCELLED => reporter.emit(
+            reporter.current_progress(),
+            "cancelled",
+            "同步已取消",
+            "未写入本地，也未推送远端。",
+            "warning",
         ),
         Err(error) => reporter.emit(
             reporter.current_progress(),
@@ -1378,8 +1422,26 @@ fn sync_content_git_branch(
 ) -> Result<(GitCommandResult, bool), String> {
     let (repo_root, initialized_from_remote) =
         ensure_content_git_repository(remote, content_branch, ssh_command, status, reporter)?;
+    let cloned_remote_head = current_git_head(&repo_root)?;
+    let recovered_from_cache = initialized_from_remote
+        && recover_cloned_content_repository_from_cache(
+            &repo_root,
+            content_branch,
+            conflict_strategy,
+            conflict_resolutions,
+            commit_message,
+            reporter,
+        )?;
 
-    if initialized_from_remote {
+    if initialized_from_remote && !recovered_from_cache {
+        let remote_changes = collect_git_article_changes(&repo_root, None, "HEAD")?;
+        await_content_sync_preview_confirmation(
+            &repo_root,
+            Vec::new(),
+            remote_changes,
+            true,
+            reporter,
+        )?;
         sync_content_git_repo_back_to_workspace(&repo_root, reporter)?;
         return Ok((
             GitCommandResult {
@@ -1391,7 +1453,24 @@ fn sync_content_git_branch(
         ));
     }
 
-    if has_git_merge_in_progress(&repo_root) {
+    if recovered_from_cache {
+        reporter.emit(
+            50,
+            "merge",
+            "已恢复同步基线",
+            "已根据上次同步记录重新识别本地与远端变更。",
+            "success",
+        );
+        let local_changes =
+            collect_git_article_changes(&repo_root, cloned_remote_head.as_deref(), "HEAD")?;
+        await_content_sync_preview_confirmation(
+            &repo_root,
+            local_changes,
+            Vec::new(),
+            true,
+            reporter,
+        )?;
+    } else if has_git_merge_in_progress(&repo_root) {
         resolve_content_git_merge(
             &repo_root,
             conflict_strategy,
@@ -1407,17 +1486,33 @@ fn sync_content_git_branch(
             reporter,
         )?;
         if status.branch_exists {
-            fetch_and_merge_content_branch(
+            fetch_content_branch(&repo_root, content_branch, ssh_command, reporter)?;
+            let (local_changes, remote_changes) =
+                collect_pre_merge_article_changes(&repo_root, "FETCH_HEAD")?;
+            await_content_sync_preview_confirmation(
                 &repo_root,
-                content_branch,
-                ssh_command,
+                local_changes,
+                remote_changes,
+                false,
+                reporter,
+            )?;
+            merge_fetched_content_branch(
+                &repo_root,
                 conflict_strategy,
                 conflict_resolutions,
                 reporter,
             )?;
+        } else {
+            let local_changes = collect_git_article_changes(&repo_root, None, "HEAD")?;
+            await_content_sync_preview_confirmation(
+                &repo_root,
+                local_changes,
+                Vec::new(),
+                false,
+                reporter,
+            )?;
         }
     }
-
     sync_content_git_repo_back_to_workspace(&repo_root, reporter)?;
 
     reporter.emit(
@@ -1658,7 +1753,16 @@ fn configure_content_git_author(repo_root: &Path) -> Result<(), String> {
 }
 
 fn has_git_head(repo_root: &Path) -> Result<bool, String> {
-    Ok(run_git_in(repo_root, &["rev-parse", "--verify", "HEAD"])?.success)
+    Ok(current_git_head(repo_root)?.is_some())
+}
+
+fn current_git_head(repo_root: &Path) -> Result<Option<String>, String> {
+    let result = run_git_in(repo_root, &["rev-parse", "--verify", "HEAD"])?;
+    if !result.success {
+        return Ok(None);
+    }
+    let head = result.stdout.trim();
+    Ok((!head.is_empty()).then(|| head.to_string()))
 }
 
 fn has_git_merge_in_progress(repo_root: &Path) -> bool {
@@ -1714,6 +1818,61 @@ fn stage_workspace_content_in_git_repo(
     Ok(true)
 }
 
+fn recover_cloned_content_repository_from_cache(
+    repo_root: &Path,
+    content_branch: &str,
+    conflict_strategy: ContentSyncConflictStrategy,
+    conflict_resolutions: &BTreeMap<String, ContentSyncConflictResolution>,
+    commit_message: &str,
+    reporter: &PublishProgressReporter,
+) -> Result<bool, String> {
+    let cache_root = content_sync_cache_root()?;
+    if !cache_root.is_dir() {
+        return Ok(false);
+    }
+    let base_files = collect_content_source_files(&cache_root)?;
+    if !is_initialized_content_source(&base_files) {
+        return Ok(false);
+    }
+    reporter.emit(
+        46,
+        "merge",
+        "正在恢复同步基线",
+        "检测到上次同步缓存，正在恢复本地删除与修改记录。",
+        "info",
+    );
+
+    let local_files = collect_content_source_files(&get_workspace_root()?)?;
+    let remote_files = collect_content_source_files(repo_root)?;
+    let (merged_files, _, conflicts) = merge_content_source_files(
+        Some(&base_files),
+        &local_files,
+        &remote_files,
+        conflict_strategy,
+        conflict_resolutions,
+    );
+    if conflict_strategy == ContentSyncConflictStrategy::Manual && !conflicts.is_empty() {
+        return Err(format_content_sync_conflict_error(&conflicts)?);
+    }
+
+    validate_content_source_health(&merged_files, Some(&remote_files), true)?;
+    clear_content_git_worktree(repo_root)?;
+    write_content_source_files(repo_root, &merged_files)?;
+    write_content_branch_workflow(repo_root, content_branch)?;
+    ensure_git_success(
+        run_git_in(repo_root, &["add", "--all"])?,
+        "stage recovered content changes",
+    )?;
+    let unchanged = run_git_in(repo_root, &["diff", "--cached", "--quiet"])?;
+    if !unchanged.success {
+        ensure_git_success(
+            run_git_in(repo_root, &["commit", "-m", commit_message])?,
+            "commit recovered content changes",
+        )?;
+    }
+    Ok(true)
+}
+
 fn clear_content_git_worktree(repo_root: &Path) -> Result<(), String> {
     for entry in fs::read_dir(repo_root)
         .map_err(|error| format!("failed to read content git repository: {error}"))?
@@ -1728,12 +1887,10 @@ fn clear_content_git_worktree(repo_root: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn fetch_and_merge_content_branch(
+fn fetch_content_branch(
     repo_root: &Path,
     content_branch: &str,
     ssh_command: Option<&str>,
-    conflict_strategy: ContentSyncConflictStrategy,
-    conflict_resolutions: &BTreeMap<String, ContentSyncConflictResolution>,
     reporter: &PublishProgressReporter,
 ) -> Result<(), String> {
     let remote_ref = format!("refs/heads/{content_branch}");
@@ -1764,7 +1921,15 @@ fn fetch_and_merge_content_branch(
         )?,
         "fetch content branch for merge",
     )?;
+    Ok(())
+}
 
+fn merge_fetched_content_branch(
+    repo_root: &Path,
+    conflict_strategy: ContentSyncConflictStrategy,
+    conflict_resolutions: &BTreeMap<String, ContentSyncConflictResolution>,
+    reporter: &PublishProgressReporter,
+) -> Result<(), String> {
     reporter.emit(
         56,
         "merge",
@@ -2013,6 +2178,292 @@ fn push_content_git_branch(
     )
 }
 
+fn is_content_article_path(path: &str) -> bool {
+    let normalized = path.replace('\\', "/");
+    (normalized.starts_with("content/markdown/") || normalized.starts_with("content/inknotes/"))
+        && normalized.ends_with("/index.md")
+}
+
+fn content_article_type(path: &str) -> &'static str {
+    if path.replace('\\', "/").starts_with("content/inknotes/") {
+        "InkNote"
+    } else {
+        "Markdown"
+    }
+}
+
+fn content_article_fallback_title(path: &str) -> String {
+    Path::new(path)
+        .parent()
+        .and_then(Path::file_name)
+        .map(|value| value.to_string_lossy().to_string())
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "未命名文章".to_string())
+}
+
+fn content_article_title(path: &str, contents: &[u8]) -> String {
+    let text = String::from_utf8_lossy(contents);
+    let mut lines = text.lines();
+    if lines.next().is_some_and(|line| line.trim() == "---") {
+        for line in lines {
+            let trimmed = line.trim();
+            if trimmed == "---" {
+                break;
+            }
+            if let Some(value) = trimmed.strip_prefix("title:") {
+                let title = value
+                    .trim()
+                    .trim_matches(|character| character == '"' || character == '\'')
+                    .trim();
+                if !title.is_empty() {
+                    return title.to_string();
+                }
+            }
+        }
+    }
+    content_article_fallback_title(path)
+}
+
+fn content_sync_article_change(
+    path: &str,
+    change_type: &str,
+    contents: &[u8],
+) -> ContentSyncArticleChange {
+    ContentSyncArticleChange {
+        path: path.to_string(),
+        title: content_article_title(path, contents),
+        note_type: content_article_type(path).to_string(),
+        change_type: change_type.to_string(),
+    }
+}
+
+fn sort_content_sync_article_changes(changes: &mut [ContentSyncArticleChange]) {
+    fn change_order(value: &str) -> u8 {
+        match value {
+            "added" => 0,
+            "deleted" => 1,
+            _ => 2,
+        }
+    }
+
+    changes.sort_by(|left, right| {
+        change_order(&left.change_type)
+            .cmp(&change_order(&right.change_type))
+            .then_with(|| left.title.cmp(&right.title))
+            .then_with(|| left.path.cmp(&right.path))
+    });
+}
+
+#[cfg(test)]
+fn compare_content_article_files(
+    before: &ContentSourceFileMap,
+    after: &ContentSourceFileMap,
+) -> Vec<ContentSyncArticleChange> {
+    let paths = before
+        .keys()
+        .chain(after.keys())
+        .filter(|path| is_content_article_path(path))
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let mut changes = Vec::new();
+
+    for path in paths {
+        match (before.get(&path), after.get(&path)) {
+            (None, Some(contents)) => {
+                changes.push(content_sync_article_change(&path, "added", contents));
+            }
+            (Some(contents), None) => {
+                changes.push(content_sync_article_change(&path, "deleted", contents));
+            }
+            (Some(before_contents), Some(after_contents)) if before_contents != after_contents => {
+                changes.push(content_sync_article_change(
+                    &path,
+                    "modified",
+                    after_contents,
+                ));
+            }
+            _ => {}
+        }
+    }
+
+    sort_content_sync_article_changes(&mut changes);
+    changes
+}
+
+fn read_git_article_for_preview(repo_root: &Path, git_ref: &str, path: &str) -> Vec<u8> {
+    let object = format!("{git_ref}:{path}");
+    run_git_in(repo_root, &["show", object.as_str()])
+        .ok()
+        .filter(|result| result.success)
+        .map(|result| result.stdout.into_bytes())
+        .unwrap_or_default()
+}
+
+fn collect_git_article_changes(
+    repo_root: &Path,
+    base_ref: Option<&str>,
+    target_ref: &str,
+) -> Result<Vec<ContentSyncArticleChange>, String> {
+    let base_ref = base_ref.unwrap_or(EMPTY_GIT_TREE);
+    let result = run_git_in(
+        repo_root,
+        &[
+            "-c",
+            "core.quotepath=false",
+            "diff",
+            "--name-status",
+            "--no-renames",
+            base_ref,
+            target_ref,
+            "--",
+            "content/markdown",
+            "content/inknotes",
+        ],
+    )?;
+    ensure_git_success(result, "inspect content sync article changes").map(|output| {
+        let mut changes = output
+            .stdout
+            .lines()
+            .filter_map(|line| {
+                let mut fields = line.splitn(2, '\t');
+                let status = fields.next()?.chars().next()?;
+                let path = fields.next()?.trim();
+                if !is_content_article_path(path) {
+                    return None;
+                }
+                let change_type = match status {
+                    'A' => "added",
+                    'D' => "deleted",
+                    _ => "modified",
+                };
+                let contents = if status == 'D' {
+                    read_git_article_for_preview(repo_root, base_ref, path)
+                } else {
+                    read_git_article_for_preview(repo_root, target_ref, path)
+                };
+                Some(content_sync_article_change(path, change_type, &contents))
+            })
+            .collect::<Vec<_>>();
+        sort_content_sync_article_changes(&mut changes);
+        changes
+    })
+}
+
+fn collect_pre_merge_article_changes(
+    repo_root: &Path,
+    remote_ref: &str,
+) -> Result<(Vec<ContentSyncArticleChange>, Vec<ContentSyncArticleChange>), String> {
+    let merge_base = run_git_in(repo_root, &["merge-base", "HEAD", remote_ref])?;
+    let merge_base = if merge_base.success {
+        let value = merge_base.stdout.trim();
+        (!value.is_empty()).then(|| value.to_string())
+    } else if merge_base.stderr.trim().is_empty() {
+        None
+    } else {
+        return Err(format!(
+            "无法计算本地与远端的共同基线：{}",
+            merge_base.stderr.trim()
+        ));
+    };
+    Ok((
+        collect_git_article_changes(repo_root, merge_base.as_deref(), "HEAD")?,
+        collect_git_article_changes(repo_root, merge_base.as_deref(), remote_ref)?,
+    ))
+}
+
+fn discard_temporary_content_sync_repository(repo_root: &Path) -> Result<(), String> {
+    if !repo_root.exists() {
+        return Ok(());
+    }
+    clear_path(repo_root)
+        .map_err(|error| format!("取消首次同步后清理临时 Git 工作区失败：{error}"))?;
+    Ok(())
+}
+
+fn await_content_sync_preview_confirmation(
+    repo_root: &Path,
+    local_changes: Vec<ContentSyncArticleChange>,
+    remote_changes: Vec<ContentSyncArticleChange>,
+    cleanup_temporary_repository: bool,
+    reporter: &PublishProgressReporter,
+) -> Result<(), String> {
+    let event = ContentSyncPreviewEvent {
+        task_id: reporter.task_id.clone(),
+        local_changes,
+        remote_changes,
+    };
+    let (sender, receiver) = mpsc::channel();
+    CONTENT_SYNC_PREVIEW_DECISIONS
+        .get_or_init(|| Mutex::new(BTreeMap::new()))
+        .lock()
+        .map_err(|_| "同步确认状态不可用。".to_string())?
+        .insert(reporter.task_id.clone(), sender);
+
+    let emit_result = reporter
+        .app
+        .as_ref()
+        .ok_or_else(|| "桌面应用上下文不可用。".to_string())?
+        .emit("content-sync-preview", event);
+    if let Err(error) = emit_result {
+        if let Ok(mut decisions) = CONTENT_SYNC_PREVIEW_DECISIONS
+            .get_or_init(|| Mutex::new(BTreeMap::new()))
+            .lock()
+        {
+            decisions.remove(&reporter.task_id);
+        }
+        if cleanup_temporary_repository {
+            discard_temporary_content_sync_repository(repo_root)?;
+        }
+        return Err(format!("无法显示同步变更确认：{error}"));
+    }
+
+    reporter.emit(
+        61,
+        "preview",
+        "等待确认同步变更",
+        "请检查本地和远端文章变更后选择确定或取消。",
+        "warning",
+    );
+    let decision = receiver.recv_timeout(CONTENT_SYNC_PREVIEW_TIMEOUT);
+    if let Ok(mut decisions) = CONTENT_SYNC_PREVIEW_DECISIONS
+        .get_or_init(|| Mutex::new(BTreeMap::new()))
+        .lock()
+    {
+        decisions.remove(&reporter.task_id);
+    }
+
+    match decision {
+        Ok(true) => {
+            reporter.emit(
+                62,
+                "preview",
+                "同步变更已确认",
+                "继续写入本地并推送远端。",
+                "success",
+            );
+            Ok(())
+        }
+        Ok(false) => {
+            if cleanup_temporary_repository {
+                discard_temporary_content_sync_repository(repo_root)?;
+            }
+            Err(CONTENT_SYNC_CANCELLED.to_string())
+        }
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            if cleanup_temporary_repository {
+                discard_temporary_content_sync_repository(repo_root)?;
+            }
+            Err("同步确认超时，任务已安全取消。".to_string())
+        }
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            if cleanup_temporary_repository {
+                discard_temporary_content_sync_repository(repo_root)?;
+            }
+            Err("同步确认窗口已关闭，任务已安全取消。".to_string())
+        }
+    }
+}
+
 fn sync_content_git_repo_back_to_workspace(
     repo_root: &Path,
     reporter: &PublishProgressReporter,
@@ -2216,10 +2667,9 @@ fn pull_content_git_branch(
                 allow_risky_content_sync,
                 reporter,
             )?;
-            fetch_and_merge_content_branch(
+            fetch_content_branch(pull_root, content_branch, ssh_command, reporter)?;
+            merge_fetched_content_branch(
                 pull_root,
-                content_branch,
-                ssh_command,
                 conflict_strategy,
                 conflict_resolutions,
                 reporter,
@@ -5679,6 +6129,49 @@ mod tests {
         assert!(site.join("categories.json").is_file());
     }
 
+    #[test]
+    fn classifies_article_changes_for_sync_preview() {
+        let mut before = ContentSourceFileMap::new();
+        before.insert(
+            "content/markdown/1000001/index.md".to_string(),
+            b"---\ntitle: Old title\n---\nold\n".to_vec(),
+        );
+        before.insert(
+            "content/inknotes/2000002/index.md".to_string(),
+            b"---\ntitle: Removed note\n---\nbody\n".to_vec(),
+        );
+        before.insert(
+            "content/site/site.config.json".to_string(),
+            br#"{"title":"Before"}"#.to_vec(),
+        );
+
+        let mut after = ContentSourceFileMap::new();
+        after.insert(
+            "content/markdown/1000001/index.md".to_string(),
+            b"---\ntitle: New title\n---\nnew\n".to_vec(),
+        );
+        after.insert(
+            "content/markdown/3000003/index.md".to_string(),
+            b"---\ntitle: Added note\n---\nbody\n".to_vec(),
+        );
+        after.insert(
+            "content/site/site.config.json".to_string(),
+            br#"{"title":"After"}"#.to_vec(),
+        );
+
+        let changes = compare_content_article_files(&before, &after);
+        assert_eq!(changes.len(), 3);
+        assert!(changes
+            .iter()
+            .any(|change| change.change_type == "added" && change.title == "Added note"));
+        assert!(changes
+            .iter()
+            .any(|change| change.change_type == "deleted" && change.title == "Removed note"));
+        assert!(changes
+            .iter()
+            .any(|change| change.change_type == "modified" && change.title == "New title"));
+    }
+
     #[cfg(target_os = "windows")]
     #[test]
     fn normalizes_windows_extended_preview_workspace_paths() {
@@ -5840,6 +6333,53 @@ mod tests {
     }
 
     #[test]
+    fn cancelled_pre_merge_preview_is_stable_without_a_rollback() {
+        let directory = TemporaryPublishDirectory::create().unwrap();
+        let repo_root = directory.path();
+        let article = repo_root.join("content/markdown/1234567/index.md");
+        fs::create_dir_all(article.parent().unwrap()).unwrap();
+        fs::write(&article, "---\ntitle: test\n---\n").unwrap();
+
+        ensure_git_success(run_git_in(repo_root, &["init"]).unwrap(), "init test repo").unwrap();
+        configure_content_git_author(repo_root).unwrap();
+        ensure_git_success(
+            run_git_in(repo_root, &["add", "--all"]).unwrap(),
+            "stage test article",
+        )
+        .unwrap();
+        ensure_git_success(
+            run_git_in(repo_root, &["commit", "-m", "baseline"]).unwrap(),
+            "commit test baseline",
+        )
+        .unwrap();
+        let baseline = current_git_head(repo_root).unwrap().unwrap();
+
+        fs::remove_file(&article).unwrap();
+        ensure_git_success(
+            run_git_in(repo_root, &["add", "--all"]).unwrap(),
+            "stage test deletion",
+        )
+        .unwrap();
+        ensure_git_success(
+            run_git_in(repo_root, &["commit", "-m", "delete article"]).unwrap(),
+            "commit test deletion",
+        )
+        .unwrap();
+        let local_head = current_git_head(repo_root).unwrap();
+        assert!(!article.exists());
+
+        let first_preview = collect_pre_merge_article_changes(repo_root, &baseline).unwrap();
+        let second_preview = collect_pre_merge_article_changes(repo_root, &baseline).unwrap();
+
+        assert_eq!(first_preview, second_preview);
+        assert_eq!(first_preview.0.len(), 1);
+        assert_eq!(first_preview.0[0].change_type, "deleted");
+        assert!(first_preview.1.is_empty());
+        assert!(!article.exists());
+        assert_eq!(current_git_head(repo_root).unwrap(), local_head);
+    }
+
+    #[test]
     fn publishes_and_updates_a_local_deployment_branch() {
         let test_directory = TemporaryPublishDirectory::create().unwrap();
         let root = test_directory.path();
@@ -5921,6 +6461,7 @@ fn main() {
             publish_content_changes,
             pull_remote_content,
             sync_content_changes,
+            resolve_content_sync_preview,
             open_external_url,
             download_and_run_desktop_installer,
             ensure_blog_preview_server
