@@ -2,7 +2,7 @@
 type: markdown
 title: The Alpha-Zero Architecture
 slug: "6576902"
-order: 13
+order: 14
 date: 2024-06-18
 updatedAt: 2026-07-09 23:25:49
 tags:

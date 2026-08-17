@@ -2,7 +2,7 @@
 type: markdown
 title: CS229 Note(9) 主成分分析
 slug: "1692166"
-order: 21
+order: 22
 date: 2023-06-26
 updatedAt: 2026-07-10 20:58:17
 tags:

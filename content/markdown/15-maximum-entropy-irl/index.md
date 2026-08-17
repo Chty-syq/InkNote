@@ -2,7 +2,7 @@
 type: markdown
 title: 强化学习重学系列(15) Maximum Entropy IRL
 slug: "4488563"
-order: 4
+order: 5
 date: 2025-04-29
 updatedAt: 2026-07-01 01:41:34
 tags:

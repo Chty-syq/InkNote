@@ -2,7 +2,7 @@
 type: markdown
 title: Generative Adversarial Imitation Learning
 slug: "3187429"
-order: 2
+order: 3
 date: 2025-05-15
 updatedAt: 2026-07-01 00:45:04
 tags:

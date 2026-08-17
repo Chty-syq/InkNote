@@ -2,7 +2,7 @@
 type: markdown
 title: 强化学习重学系列(8) Bellman Operator
 slug: "1170948"
-order: 11
+order: 12
 date: 2025-02-08
 updatedAt: 2026-07-01 01:26:36
 tags:

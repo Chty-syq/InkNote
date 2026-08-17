@@ -2,7 +2,7 @@
 type: markdown
 title: CS229 Note(4) 支持向量机(下)
 slug: "1300659"
-order: 28
+order: 29
 date: 2021-11-25
 updatedAt: 2026-07-10 21:23:01
 tags:

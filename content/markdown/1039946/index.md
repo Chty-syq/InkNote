@@ -2,7 +2,7 @@
 type: markdown
 title: Variational Inference
 slug: "1039946"
-order: 24
+order: 25
 date: 2023-06-14
 updatedAt: 2026-07-10 21:11:10
 tags:

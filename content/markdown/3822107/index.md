@@ -2,7 +2,7 @@
 type: markdown
 title: Risk-Aware Reinforcement Learning with Bandit-Based Adaptation for Quadrupedal Locomotion
 slug: "3822107"
-order: 1
+order: 2
 date: 2026-01-14
 updatedAt: 2026-07-01 00:40:50
 tags:

@@ -2,7 +2,7 @@
 type: markdown
 title: CS229 Note(5) 泛化
 slug: "6888484"
-order: 27
+order: 28
 date: 2023-03-21
 updatedAt: 2026-07-10 21:23:01
 tags:

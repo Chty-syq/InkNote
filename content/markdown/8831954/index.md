@@ -2,7 +2,7 @@
 type: markdown
 title: CS229 Note(6) 正则化
 slug: "8831954"
-order: 26
+order: 27
 date: 2023-04-04
 updatedAt: 2026-07-10 21:11:20
 tags:

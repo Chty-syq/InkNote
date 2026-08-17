@@ -2,7 +2,7 @@
 type: markdown
 title: 强化学习重学系列(12) Trust Region Policy Optimization
 slug: "4575204"
-order: 7
+order: 8
 date: 2025-04-01
 updatedAt: 2026-07-01 01:26:43
 tags:

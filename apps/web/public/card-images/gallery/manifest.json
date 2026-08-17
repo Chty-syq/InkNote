@@ -1,5 +1,5 @@
 {
-  "updatedAt": "2026-07-11T09:44:59.775Z",
+  "updatedAt": "2026-07-23T19:02:18.971Z",
   "count": 550,
   "images": [
     {
@@ -6054,6 +6054,7 @@
     }
   ],
   "assignments": {
+    "/notes/4539127": "1782746798383-27-gallery-20260629-232631-28-jkpp-yosuga-no-sora-92722.jpg",
     "/notes/3616221": "1782746930565-6-gallery-20260629-232848-07-tkfj-honkai-star-rail-358897.jpg",
     "/inknote/5369007": "1782580833897-30-gallery-20260628-011940-31-3lk3-cardcaptor-sakura-246382.jpg",
     "/notes/8043157": "1782746922359-18-gallery-20260629-232837-19-rqbs-azur-lane-305701.jpg",
@@ -6077,6 +6078,7 @@
     "/notes/1864066": "1782746695467-28-gallery-20260629-232448-29-hfjh-date-a-live-208556.jpg",
     "/notes/7185341": "1782747377358-77-gallery-20260629-233557-78-s3o1-shakugan-no-shana-171502.jpg",
     "/notes/9571016": "1782746862812-29-gallery-20260629-232736-30-irt2-madoka-magica-202518.jpg",
+    "/notes/5563261": "1782746794437-10-gallery-20260629-232631-11-qmeu-yosuga-no-sora-59344.jpg",
     "/notes/6854339": "1782746919679-8-gallery-20260629-232837-09-u84y-azur-lane-282153.jpg",
     "/notes/5352904": "1782747375764-71-gallery-20260629-233557-72-ans3-shakugan-no-shana-117057.jpg",
     "/notes/2901263": "1782746882853-4-gallery-20260629-232801-05-m49w-zero-no-tsukaima-61156.jpg",
@@ -6106,7 +6108,6 @@
     "/notes/1031988": "1782746838264-38-gallery-20260629-232709-39-81xl-gotoubun-no-hanayome-342900.jpg",
     "/notes/4748532": "1782580853698-42-gallery-20260628-011940-43-5grt-cardcaptor-sakura-265091.jpg",
     "/notes/4063401": "1782707525985-20-gallery-20260629-123159-21-7lon-guilty-crown-153281.jpg",
-    "/notes/5233085": "1782746863823-34-gallery-20260629-232736-35-mtpm-madoka-magica-213921.jpg",
-    "/notes/5563261": "1782746794437-10-gallery-20260629-232631-11-qmeu-yosuga-no-sora-59344.jpg"
+    "/notes/5233085": "1782746863823-34-gallery-20260629-232736-35-mtpm-madoka-magica-213921.jpg"
   }
 }

@@ -2,7 +2,7 @@
 type: markdown
 title: CS229 Note(8) 因子分析
 slug: "6854416"
-order: 22
+order: 23
 date: 2023-06-21
 updatedAt: 2026-07-10 20:58:15
 tags:

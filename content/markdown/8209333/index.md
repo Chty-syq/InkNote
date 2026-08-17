@@ -2,7 +2,7 @@
 type: markdown
 title: Generative Adversarial Networks
 slug: "8209333"
-order: 3
+order: 4
 date: 2025-05-15
 updatedAt: 2026-07-10 15:02:14
 tags:

@@ -2,7 +2,7 @@
 type: markdown
 title: Variational Auto-Encoding
 slug: "4065780"
-order: 23
+order: 24
 date: 2023-06-16
 updatedAt: 2026-07-10 21:26:21
 tags:
